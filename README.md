@@ -30,6 +30,21 @@ Provenance: Human-authored with AI assistance; human-reviewed.
 
 ---
 
+### Tampermonkey (official)
+- Website: https://www.tampermonkey.net/
+- Chrome Web Store: https://chrome.google.com/webstore/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo
+- Firefox Add-ons: https://addons.mozilla.org/firefox/addon/tampermonkey/
+- Microsoft Edge Add-ons: https://microsoftedge.microsoft.com/addons/detail/tampermonkey/iikmkjmpaadaobahmlepeloendndfphd
+
+### Violentmonkey (open source)
+- Website: https://violentmonkey.github.io/
+- GitHub: https://github.com/violentmonkey/violentmonkey
+- Chrome Web Store: https://chrome.google.com/webstore/detail/violentmonkey/jinjaccalgkegednnccohejagnlnfdag
+- Firefox Add-ons: https://addons.mozilla.org/firefox/addon/violentmonkey/
+- Microsoft Edge Add-ons: https://microsoftedge.microsoft.com/addons/detail/violentmonkey/eeagobfjdenkkddmbclomhiblgggliao
+
+> After installing a manager, open any `.user.js` file in this repo via the **Raw** link to install/update.
+
 ## How to install (Violentmonkey/Tampermonkey)
 
 1. Install a userscript manager (Violentmonkey or Tampermonkey).
