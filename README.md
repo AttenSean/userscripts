@@ -1,8 +1,11 @@
 # Attentus Userscripts (ConnectWise)
 
 A collection of quality-of-life userscripts for ConnectWise Manager (browser UI).  
+
 Tested with Violentmonkey/Tampermonkey on Chromium-based browsers.
+
 Provenance: Human-authored with AI assistance; human-reviewed.
+
 
 > **Install**: Click a script’s **Raw** link below in your browser and your userscript manager should prompt to install.  
 > **Auto-updates**: Each script includes `@downloadURL` and `@updateURL` that point to this repo’s `main` branch. Bump `@version` on changes.
