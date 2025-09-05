@@ -24,7 +24,7 @@ Provenance: Human-authored with AI assistance; human-reviewed.
 | `attentus-cw-ticket-quick-nav-and-dedupe.user.js` | Quick “Go to Ticket #” input + recent tickets, adds a left-side Tickets menu entry, and prevents duplicate tabs for the same ticket. | https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-ticket-quick-nav-and-dedupe.user.js |
 | `attentus-cw-time-entry-clipboard-bar.user.js` | Adds a compact **clipboard bar** to Time Entry for **Copy Signature** and **Copy Review + Signature**. Includes a settings fly-out to customize name and review text, and optional location randomizer with default location choice. | https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-time-entry-clipboard-bar.user.js |
 | `attentus-cw-time-entry-in-tab.user.js` | Forces new Time Entry forms to open in their own tab for better multitasking. | https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-time-entry-in-tab.user.js |
-| `attentus-cw-copy-ticket-in-new-tab.user.js` | When you click **Copy** on a Service Ticket, it opens the **new copy** in a **new tab** (keeps your original ticket open). | https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-copy-ticket-in-new-tab.user.js |
+
 
 > If a script isn’t listed above but lives in this repo, it’s likely WIP or internal and may not include auto-update headers yet.
 
