@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         attentus-cw-time-entry-clipboard-bar
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.7.0
+// @version      1.7.1
 // @description  Inline clipboard buttons by the Notes timestamp: copy Signature, Signature+Review, or Review; settings flyout (name, text, random/default location) with GM storage.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
@@ -130,18 +130,24 @@
   }
 
   function reviewHTMLParts(url, { headline, prefix, linkText, suffix, closing }) {
-    return [
-      `<div style="margin:0;line-height:1.35">`,
-      `<div style="margin:0">—</div>`,
-      `<div style="margin:0"><strong>${esc(headline)}</strong></div>`,
-      `<div style="margin:0">${esc(prefix)}<a href="${url}">${esc(linkText)}</a>${esc(suffix)}</div>`,
-      `<div style="margin:0">${esc(closing)}</div>`,
-      `</div>`
-    ].join('');
-  }
-  function reviewTextParts(_url, { headline, prefix, linkText, suffix, closing }) {
-    return ['—', headline, `${prefix}${linkText}${suffix}`, closing].join('\n');
-  }
+  const gap1 = /\s$/.test(prefix) ? '' : ' ';                // space before link if needed
+  const gap2 = suffix && !/^\s/.test(suffix) ? ' ' : '';     // space before suffix if needed
+  return [
+    `<div style="margin:0;line-height:1.35">`,
+    `<div style="margin:0">—</div>`,
+    `<div style="margin:0"><strong>${esc(headline)}</strong></div>`,
+    `<div style="margin:0">${esc(prefix)}${gap1}<a href="${url}">${esc(linkText)}</a>${gap2}${esc(suffix || '')}</div>`,
+    `<div style="margin:0">${esc(closing)}</div>`,
+    `</div>`
+  ].join('');
+}
+
+function reviewTextParts(_url, { headline, prefix, linkText, suffix, closing }) {
+  const gap1 = /\s$/.test(prefix) ? '' : ' ';
+  const gap2 = suffix && !/^\s/.test(suffix) ? ' ' : '';
+  return ['—', headline, `${prefix}${gap1}${linkText}${gap2}${suffix || ''}`, closing].join('\n');
+}
+
 
   // ---------- toasts ----------
   function toast(msg) {
@@ -275,9 +281,9 @@
       const v = id => modal.querySelector(id);
       await gmSet(KEYS.name,     v('#att_name').value.trim()      || DEFAULTS.name);
       await gmSet(KEYS.headline, v('#att_headline').value.trim()  || DEFAULTS.headline);
-      await gmSet(KEYS.prefix,   v('#att_prefix').value.trim()    || DEFAULTS.prefix);
+      await gmSet(KEYS.prefix,   v('#att_prefix').value()    || DEFAULTS.prefix);
       await gmSet(KEYS.link,     v('#att_linktext').value.trim()  || DEFAULTS.linkText);
-      await gmSet(KEYS.suffix,   v('#att_suffix').value.trim());
+      await gmSet(KEYS.suffix,   v('#att_suffix').value());
       await gmSet(KEYS.closing,  v('#att_closing').value.trim()   || DEFAULTS.closing);
       await gmSet(KEYS.random,   !!v('#att_random').checked);
       await gmSet(KEYS.defloc,   defSel.value || DEFAULTS.defaultLocation);
