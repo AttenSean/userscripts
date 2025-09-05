@@ -1,0 +1,20 @@
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editors/IDEs
+.vscode/
+.idea/
+*.code-workspace
+
+# Archives / exports
+*.zip
+
+# Node/npm (if you ever add tooling here)
+node_modules/
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+
+# Misc
+*.log
