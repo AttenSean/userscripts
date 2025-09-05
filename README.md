@@ -2,7 +2,7 @@
 
 A collection of quality-of-life userscripts for ConnectWise Manager (browser UI).  
 
-Tested with Violentmonkey/Tampermonkey on Chromium-based browsers.
+Tested with Violentmonkey on Chromium-based browsers.
 
 Provenance: Human-authored with AI assistance; human-reviewed.
 
