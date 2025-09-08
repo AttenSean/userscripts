@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         attentus-cw-copy-ticket-link
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.2.0
-// @description  Adds Copy Ticket button next to Clear Contact, copies rich HTML with plain text fallback (now with 'Copied' flash)
+// @version      1.3.0
+// @description  Adds Copy Ticket button next to Clear Contact, copies rich HTML with plain text fallback (fix: full title incl. parentheses; now with 'Copied' flash)
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
 // @run-at       document-idle
@@ -12,7 +12,6 @@
 // @downloadURL  https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-copy-ticket-link.user.js
 // @updateURL    https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-copy-ticket-link.user.js
 // ==/UserScript==
-
 
 (function () {
   'use strict';
@@ -30,16 +29,8 @@
     const css = document.createElement('style');
     css.id = 'cw-copy-flash-styles';
     css.textContent = `
-      @keyframes cwFlashPulse {
-        0%   { transform: scale(1); }
-        50%  { transform: scale(1.04); }
-        100% { transform: scale(1); }
-      }
-      .cw-flash-pulse {
-        animation: cwFlashPulse .35s ease-in-out;
-        box-shadow: 0 0 0 2px rgba(59,130,246,.25) inset;
-        border-radius: 6px;
-      }
+      @keyframes cwFlashPulse { 0%{transform:scale(1)}50%{transform:scale(1.04)}100%{transform:scale(1)} }
+      .cw-flash-pulse { animation: cwFlashPulse .35s ease-in-out; box-shadow: 0 0 0 2px rgba(59,130,246,.25) inset; border-radius: 6px; }
     `;
     document.head.appendChild(css);
   }
@@ -68,7 +59,7 @@
     }, 900);
   }
 
-  // -------- data extraction, banner first for reliability --------
+  // -------- data extraction --------
   function getTicketIdFromBanner() {
     const line = $$('.cw_CwLabel,.gwt-Label').map(txt)
       .find(t => /service\s*ticket\s*#\s*\d+/i.test(t || ''));
@@ -76,14 +67,34 @@
     return m ? m[1] : null;
   }
 
-  function getSummaryFromBanner() {
+  // NEW: capture everything after "#ID - " to the end (don’t stop at parentheses)
+  function getSummaryFromBannerFull() {
     const line = $$('.cw_CwLabel,.gwt-Label').map(txt)
       .find(t => /service\s*ticket\s*#\s*\d+/i.test(t || ''));
     if (!line) return '';
-    const m = line.match(/#\s*\d+\s*-\s*(.*?)(?:\s*\(|$)/);
+    const m = line.match(/#\s*\d+\s*-\s*(.+)$/);
     return m ? m[1].trim() : '';
   }
 
+  // Fallback: derive full label from the tab title
+  function getLabelFromTitle() {
+    let t = (document.title || '').trim();
+    if (!t) return '';
+
+    // Strip vendor suffix like " | ConnectWise Manage" / " - ConnectWise ..."
+    t = t.replace(/\s*[|\-–—]\s*ConnectWise.*$/i, '').trim();
+
+    // If title already starts with #123..., we can use it directly
+    if (/^#\d+/.test(t)) return t;
+
+    // Or if it has "#123 - rest", rebuild in our style
+    const m = t.match(/#\s*(\d{3,})\s*-\s*(.+)$/);
+    if (m) return `#${m[1]} - ${m[2].trim()}`;
+
+    return '';
+  }
+
+  // Optional: Need-by tag (unchanged)
   function getNeedByTag() {
     const rows = $$('.gwt-Label, .mm_label, .detailLabel, .cw_CwLabel');
     for (const el of rows) {
@@ -100,14 +111,25 @@
     return '';
   }
 
+  // Build label (prefer full banner; then title; else minimal)
   function buildLabel() {
-    const id  = getTicketIdFromBanner() || '????';
-    const sum = getSummaryFromBanner();
+    const id   = getTicketIdFromBanner() || '????';
     const need = getNeedByTag();
-    const parts = [`#${id}`];
-    if (sum) parts.push(sum);
-    if (need) parts.push(need);
-    return parts.join(' - ').replace(/\s+-\s+<Need by/, ' <Need by');
+
+    const fullFromBanner = getSummaryFromBannerFull();
+    if (fullFromBanner) {
+      let base = `#${id} - ${fullFromBanner}`;
+      if (need) base += ` ${need}`;
+      return base;
+    }
+
+    const fromTitle = getLabelFromTitle();
+    if (fromTitle) {
+      return need ? `${fromTitle} ${need}` : fromTitle;
+    }
+
+    // Last-resort minimal
+    return need ? `#${id} ${need}` : `#${id}`;
   }
 
   function escapeHtml(s) {
@@ -216,8 +238,7 @@
       return true;
     }
 
-    const followLabel = $$('.GMDB3DUBBPG')
-      .find(el => (txt(el).toLowerCase() === 'follow'));
+    const followLabel = $$('.GMDB3DUBBPG').find(el => (txt(el).toLowerCase() === 'follow'));
     const followBtn = followLabel && followLabel.closest('.cw_CwActionButton');
     if (followBtn) {
       followBtn.insertAdjacentElement('afterend', makeButton());
