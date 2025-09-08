@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         attentus-cw-copy-timezest-link
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      2.1.0
-// @description  One button: left-click copies Help Desk Team (30-min) TimeZest link; right-click copies Personal (30-min) link. First click opens settings flyout to set tech name.
+// @version      2.1.1
+// @description  One button: left-click copies Help Desk Team (30-min) TimeZest link; right-click copies Personal (30-min) link. First click opens settings flyout to set tech name. Copies true HTML ("Schedule a time") with plaintext URL fallback.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
 // @run-at       document-idle
@@ -26,7 +26,7 @@
 
   // URL building
   const BASE          = 'https://attentus.timezest.com/';
-  const TEAM_PATH     = 'help-desk-team/phone-call-30'; // left-click (keep prior help-desk-team path)
+  const TEAM_PATH     = 'help-desk-team/phone-call-30'; // left-click: keep existing help-desk-team path
   const PERSONAL_PATH = 'phone-call-30';                // right-click
 
   // storage keys
@@ -97,6 +97,11 @@
       .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
   }
 
+  // Build a safe HTML link label (rich clipboard) with plaintext fallback URL separately
+  function htmlLink(url, label='Schedule a time') {
+    return `<a href="${url}">${escapeHtml(label)}</a>`;
+  }
+
   function slug(s) {
     return String(s||'').trim().toLowerCase().replace(/[^a-z]+/g,'-').replace(/^-+|-+$/g,'');
   }
@@ -114,7 +119,8 @@
       if (typeof GM !== 'undefined' && GM?.getValue) return await GM.getValue(key, def);
       if (typeof GM_getValue === 'function') return GM_getValue(key, def);
     } catch {}
-    return localStorage.getItem(key) ?? def;
+    const v = localStorage.getItem(key);
+    return v == null ? def : v;
   }
   async function setVal(key, val) {
     try {
@@ -261,7 +267,7 @@
       const tid = getTicketId();
       if (!tid) { showToast('Ticket # not found'); return; }
       const url = teamUrl(tid);
-      const ok = await copyRich(`<a href="${url}">Schedule (Help Desk Team, 30-min)</a>`, url);
+      const ok = await copyRich(htmlLink(url, 'Schedule a time'), url);
       if (ok) flashCopied(btn, label, 'Copied'); else showToast('Copy failed');
     });
 
@@ -277,8 +283,7 @@
       if (!first || !last) { openFlyout(); return; }
 
       const url = personalUrl(tid, first, last);
-      const nice = `${first} ${last}`.trim();
-      const ok = await copyRich(`<a href="${url}">Schedule with ${escapeHtml(nice)} (30-min)</a>`, url);
+      const ok = await copyRich(htmlLink(url, 'Schedule a time'), url);
       if (ok) flashCopied(btn, label, 'Copied'); else showToast('Copy failed');
     });
 
