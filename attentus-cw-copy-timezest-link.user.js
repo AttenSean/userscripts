@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         attentus-cw-copy-timezest-link
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      2.1.1
-// @description  One button: left-click copies Help Desk Team (30-min) TimeZest link; right-click copies Personal (30-min) link. First click opens settings flyout to set tech name. Copies true HTML ("Schedule a time") with plaintext URL fallback.
+// @version      2.2.0
+// @description  One button: left-click copies Help Desk Team (30-min) TimeZest link; right-click copies Personal (30-min) link. Works on Ticket & Time Entry windows (reads Charge To). First click opens settings (or Shift-click anytime). Copies true HTML (“Schedule a time”) with plaintext URL fallback.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
 // @run-at       document-idle
@@ -24,10 +24,13 @@
   const FLY_ID   = 'cw-timezest-flyout';
   const CSS_ID   = 'cw-timezest-styles';
 
+  // Known toolbar group ID from the clipboard bar script
+  const CLIPBOARD_GROUP_ID = 'cw-notes-inline-copy-group';
+
   // URL building
   const BASE          = 'https://attentus.timezest.com/';
-  const TEAM_PATH     = 'help-desk-team/phone-call-30'; // left-click: keep existing help-desk-team path
-  const PERSONAL_PATH = 'phone-call-30';                // right-click
+  const TEAM_PATH     = 'help-desk-team/phone-call-30'; // left-click: 30-min help-desk-team
+  const PERSONAL_PATH = 'phone-call-30';                // right-click: 30-min personal
 
   // storage keys
   const K_FIRST = 'tz_firstname';
@@ -85,6 +88,7 @@
   }
 
   function flashCopied(btnRoot, labelEl, customText) {
+    if (!labelEl) return;
     const original = labelEl.textContent;
     labelEl.textContent = customText || 'Copied';
     btnRoot.classList.add('tz-flash');
@@ -106,11 +110,66 @@
     return String(s||'').trim().toLowerCase().replace(/[^a-z]+/g,'-').replace(/^-+|-+$/g,'');
   }
 
-  function getTicketId() {
-    const line = $$('.cw_CwLabel,.gwt-Label').map(txt)
-      .find(t => /service\s*ticket\s*#\s*\d+/i.test(t||''));
-    const m = line && line.match(/#\s*(\d{3,})/);
+  // ----- robust Ticket ID getters (Ticket view or Time Entry view) -----
+  function parseTicketId(raw) {
+    if (!raw) return null;
+    const m = String(raw).match(/(\d{5,})/); // 5+ digits
     return m ? m[1] : null;
+  }
+
+  function getTicketIdFromBanner() {
+    const labels = $$('.cw_CwLabel,.gwt-Label').map(el => (el.textContent||'').trim());
+    const line = labels.find(t => /service\s*ticket\s*#/i.test(t));
+    if (!line) return null;
+    const m = line.match(/#\s*(\d{3,})/);
+    return m ? m[1] : null;
+  }
+
+  function getTicketIdFromChargeToOnce() {
+    // Time entry "Charge To" field
+    const sel = 'input.cw_ChargeToTextBox, input[id$="ChargeToTextBox"], input.GKV5JQ3DMVF.cw_ChargeToTextBox';
+    const inp = document.querySelector(sel);
+    if (!inp) return null;
+
+    let id = parseTicketId(inp.value);        // prefer live property
+    if (id) return id;
+
+    const scope = inp.closest('td,div') || document; // hidden values near the widget
+    const hid = scope.querySelector('input[type="hidden"][value], input[type="hidden"][name*="ChargeTo"]');
+    id = parseTicketId(hid && hid.value);
+    if (id) return id;
+
+    const activeId = inp.getAttribute('aria-activedescendant'); // sometimes holds current suggestion
+    if (activeId) {
+      const activeEl = document.getElementById(activeId);
+      id = parseTicketId(activeEl && activeEl.textContent);
+      if (id) return id;
+    }
+
+    return null;
+  }
+
+  async function getTicketIdFromChargeToWait(timeoutMs = 5000) {
+    const t0 = Date.now();
+    return new Promise(resolve => {
+      const iv = setInterval(() => {
+        const id = getTicketIdFromChargeToOnce();
+        if (id || (Date.now() - t0) > timeoutMs) {
+          clearInterval(iv);
+          resolve(id || null);
+        }
+      }, 150);
+    });
+  }
+
+  async function getTicketId() {
+    // 1) Ticket view banner fast path
+    const fromBanner = getTicketIdFromBanner();
+    if (fromBanner) return fromBanner;
+
+    // 2) Time Entry window: read Charge To (with short wait)
+    const fromChargeTo = getTicketIdFromChargeToOnce() || await getTicketIdFromChargeToWait(4000);
+    return fromChargeTo || null;
   }
 
   // ----- storage (VM/TM + fallback) -----
@@ -191,8 +250,8 @@
         <input id="${FLY_ID}-last"  type="text" placeholder="Last name">
       </div>
       <div class="explainer">
-        <div><strong>Left-click</strong>: copies the <em>Help Desk Team (30-min)</em> link.</div>
-        <div><strong>Right-click</strong>: copies your <em>Personal (30-min)</em> link.</div>
+        <div><strong>Left-click</strong>: copies the <em>Help Desk Team (30-min)</em> link as “Schedule a time”.</div>
+        <div><strong>Right-click</strong>: copies your <em>Personal (30-min)</em> link as “Schedule a time”.</div>
         <div>Need a different duration? Use the TimeZest pod in ConnectWise.</div>
         <div>You can reopen this panel anytime by <strong>Shift-clicking</strong> the button.</div>
       </div>
@@ -228,10 +287,32 @@
     return el;
   }
 
-  // ----- one CW-style button -----
-  function makeButton() {
-    addStyles();
+  // ----- two button renderers -----
+  function makeInlineButton() {
+    // Matches the clipboard bar button look/spacing
+    const b = document.createElement('button');
+    b.id = BTN_ID;
+    b.type = 'button';
+    b.textContent = 'Copy TimeZest';
+    b.title = 'Left-click: Help Desk Team (30-min) • Right-click: Personal (30-min) • Shift-click: Settings';
+    Object.assign(b.style, {
+      padding: '4px 8px',
+      borderRadius: '6px',
+      border: '1px solid rgba(0,0,0,.2)',
+      background: 'rgb(37,99,235)',
+      color: '#fff',
+      font: '12px system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif',
+      cursor: 'pointer',
+      userSelect: 'none',
+      whiteSpace: 'nowrap',
+      height: '26px',
+      lineHeight: '18px'
+    });
+    return b;
+  }
 
+  function makeActionButton() {
+    // Native CW action button styling
     const outer = document.createElement('div');
     outer.className = 'GMDB3DUBHFJ GMDB3DUBAQG GMDB3DUBOFJ cw_CwActionButton';
     outer.id = BTN_ID;
@@ -250,32 +331,38 @@
     inner.appendChild(label);
     btn.appendChild(inner);
     outer.appendChild(btn);
-
     outer.title = 'Left-click: Help Desk Team (30-min) • Right-click: Personal (30-min) • Shift-click: Settings';
 
+    // Same handlers as inline, but label el differs
+    wireHandlers(outer, btn, label);
+    return outer;
+  }
+
+  function wireHandlers(clickTarget, pulseTarget, labelEl) {
     // Left-click: Team link
-    outer.addEventListener('click', async (e) => {
+    clickTarget.addEventListener('click', async (e) => {
       e.preventDefault();
 
       // Shift-click opens settings anytime
       if (e.shiftKey) { openFlyout(); return; }
 
-      // First time -> force settings flyout
+      // First click → onboard
       const onboarded = await getVal(K_ONBOARDED, '');
       if (!onboarded) { openFlyout(); return; }
 
-      const tid = getTicketId();
+      const tid = await getTicketId();
       if (!tid) { showToast('Ticket # not found'); return; }
+
       const url = teamUrl(tid);
       const ok = await copyRich(htmlLink(url, 'Schedule a time'), url);
-      if (ok) flashCopied(btn, label, 'Copied'); else showToast('Copy failed');
+      if (ok) flashCopied(pulseTarget, labelEl, 'Copied'); else showToast('Copy failed');
     });
 
     // Right-click: Personal link
-    outer.addEventListener('contextmenu', async (e) => {
+    clickTarget.addEventListener('contextmenu', async (e) => {
       e.preventDefault();
 
-      const tid = getTicketId();
+      const tid = await getTicketId();
       if (!tid) { showToast('Ticket # not found'); return; }
 
       let first = await getVal(K_FIRST, '');
@@ -284,23 +371,30 @@
 
       const url = personalUrl(tid, first, last);
       const ok = await copyRich(htmlLink(url, 'Schedule a time'), url);
-      if (ok) flashCopied(btn, label, 'Copied'); else showToast('Copy failed');
+      if (ok) flashCopied(pulseTarget, labelEl, 'Copied'); else showToast('Copy failed');
     });
-
-    return outer;
   }
 
   function placeButton() {
     if ($('#' + BTN_ID)) return true;
 
-    // Prefer after Clear Contact; else after Follow
+    // 1) If the clipboard bar exists, append inline to maintain spacing/feel
+    const group = $('#' + CLIPBOARD_GROUP_ID);
+    if (group) {
+      const b = makeInlineButton();
+      // wire with itself as pulse target + "label"
+      wireHandlers(b, b, b);
+      group.appendChild(b);
+      return true;
+    }
+
+    // 2) Otherwise, place as a CW action button after Clear Contact or Follow
     const anchor =
       $('#cw-clear-contact-btn') ||
       $$('.GMDB3DUBBPG').find(el => (txt(el).toLowerCase() === 'follow'))?.closest('.cw_CwActionButton');
 
     if (!anchor) return false;
-
-    anchor.insertAdjacentElement('afterend', makeButton());
+    anchor.insertAdjacentElement('afterend', makeActionButton());
     return true;
   }
 
@@ -316,5 +410,6 @@
   });
   window.addEventListener('popstate', ensure);
 
+  addStyles();
   ensure();
 })();
