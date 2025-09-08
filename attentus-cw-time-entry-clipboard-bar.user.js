@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         attentus-cw-time-entry-clipboard-bar
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.7.1
-// @description  Inline clipboard buttons by the Notes timestamp: copy Signature, Signature+Review, or Review; settings flyout (name, text, random/default location) with GM storage.
+// @version      1.8.0
+// @description  Clipboard buttons by the Notes timestamp (Signature, Review+Signature) with settings. Now: disables on Time Sheet time entries and prevents duplicate toolbars.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
 // @run-at       document-idle
@@ -16,7 +16,6 @@
 // @downloadURL  https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-time-entry-clipboard-bar.user.js
 // @updateURL    https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-time-entry-clipboard-bar.user.js
 // ==/UserScript==
-
 
 (function () {
   'use strict';
@@ -49,6 +48,10 @@
     renton:   'https://www.attentus.tech/renton_reviews',
   };
   const LOCATIONS = Object.keys(REVIEW_URLS);
+
+  // ---------- tiny utils ----------
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const rand = arr => arr[Math.floor(Math.random() * arr.length)];
 
   // ---------- storage helpers ----------
   async function gmGet(key, defVal) {
@@ -92,7 +95,29 @@
     return { ok: false };
   }
 
-  const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  // ---------- view detection ----------
+  function isTimesheetContext() {
+    // Breadcrumb labels often include "Open Time Sheets" / "Time Sheet" in the timesheet UI
+    const crumbs = Array.from(document.querySelectorAll('.cw-main-banner .navigationEntry, .cw-main-banner .cw_CwLabel'))
+      .map(e => (e.textContent || '').trim().toLowerCase());
+    if (crumbs.some(t => t.includes('open time sheets') || t === 'time sheet')) return true;
+
+    // Timesheet-specific containers/grids also present
+    if (document.querySelector('.mytimesheetlist, .TimeSheet')) return true;
+
+    return false;
+  }
+
+  // ---------- locate Notes timestamp button ----------
+  function findNotesTimestampButton() {
+    const stamps = document.querySelectorAll('.cw_ToolbarButton_TimeStamp');
+    for (const st of stamps) {
+      const row = st.closest('tr');
+      const label = row && row.querySelector('.gwt-Label, .mm_label, .cw_CwLabel');
+      if (label && /notes$/i.test((label.textContent || '').trim())) return st;
+    }
+    return null;
+  }
 
   // ---------- content builders ----------
   function signatureHTML(name, { spacedThankYou = false } = {}) {
@@ -130,24 +155,22 @@
   }
 
   function reviewHTMLParts(url, { headline, prefix, linkText, suffix, closing }) {
-  const gap1 = /\s$/.test(prefix) ? '' : ' ';                // space before link if needed
-  const gap2 = suffix && !/^\s/.test(suffix) ? ' ' : '';     // space before suffix if needed
-  return [
-    `<div style="margin:0;line-height:1.35">`,
-    `<div style="margin:0">—</div>`,
-    `<div style="margin:0"><strong>${esc(headline)}</strong></div>`,
-    `<div style="margin:0">${esc(prefix)}${gap1}<a href="${url}">${esc(linkText)}</a>${gap2}${esc(suffix || '')}</div>`,
-    `<div style="margin:0">${esc(closing)}</div>`,
-    `</div>`
-  ].join('');
-}
-
-function reviewTextParts(_url, { headline, prefix, linkText, suffix, closing }) {
-  const gap1 = /\s$/.test(prefix) ? '' : ' ';
-  const gap2 = suffix && !/^\s/.test(suffix) ? ' ' : '';
-  return ['—', headline, `${prefix}${gap1}${linkText}${gap2}${suffix || ''}`, closing].join('\n');
-}
-
+    const gap1 = /\s$/.test(prefix) ? '' : ' ';
+    const gap2 = suffix && !/^\s/.test(suffix) ? ' ' : '';
+    return [
+      `<div style="margin:0;line-height:1.35">`,
+      `<div style="margin:0">—</div>`,
+      `<div style="margin:0"><strong>${esc(headline)}</strong></div>`,
+      `<div style="margin:0">${esc(prefix)}${gap1}<a href="${url}">${esc(linkText)}</a>${gap2}${esc(suffix || '')}</div>`,
+      `<div style="margin:0">${esc(closing)}</div>`,
+      `</div>`
+    ].join('');
+  }
+  function reviewTextParts(_url, { headline, prefix, linkText, suffix, closing }) {
+    const gap1 = /\s$/.test(prefix) ? '' : ' ';
+    const gap2 = suffix && !/^\s/.test(suffix) ? ' ' : '';
+    return ['—', headline, `${prefix}${gap1}${linkText}${gap2}${suffix || ''}`, closing].join('\n');
+  }
 
   // ---------- toasts ----------
   function toast(msg) {
@@ -163,17 +186,125 @@ function reviewTextParts(_url, { headline, prefix, linkText, suffix, closing }) 
     setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity .25s'; setTimeout(() => t.remove(), 250); }, 1100);
   }
 
-  // ---------- locate timestamp button ----------
-  function findNotesTimestampButton() {
-    const stamps = document.querySelectorAll('.cw_ToolbarButton_TimeStamp');
-    for (const st of stamps) {
-      const row = st.closest('tr');
-      const label = row && row.querySelector('.gwt-Label, .mm_label, .cw_CwLabel');
-      if (label && /notes$/i.test((label.textContent || '').trim())) return st;
-    }
-    return null;
+  // ---------- inline UI (single instance) ----------
+  const GROUP_ID = 'cw-notes-inline-copy-group';
+
+  function mkBtn(label, handler) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = label;
+    Object.assign(b.style, {
+      padding: '4px 8px',
+      borderRadius: '6px',
+      border: '1px solid rgba(0,0,0,.2)',
+      background: 'rgb(37,99,235)',
+      color: '#fff',
+      font: '12px system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif',
+      cursor: 'pointer',
+      userSelect: 'none',
+      whiteSpace: 'nowrap'
+    });
+    b.addEventListener('click', handler);
+    return b;
   }
-  const rand = arr => arr[Math.floor(Math.random() * arr.length)];
+  function mkIconBtn(label, title, handler) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = label;
+    b.title = title;
+    Object.assign(b.style, {
+      padding: '0 6px',
+      height: '26px',
+      lineHeight: '26px',
+      borderRadius: '6px',
+      border: '1px solid rgba(0,0,0,.2)',
+      background: '#fff',
+      color: '#111',
+      font: '14px system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif',
+      cursor: 'pointer',
+      userSelect: 'none',
+      whiteSpace: 'nowrap'
+    });
+    b.addEventListener('click', handler);
+    return b;
+  }
+
+  function getReviewUrlFrom(sel) {
+    return REVIEW_URLS[sel.value] || REVIEW_URLS.bellevue;
+  }
+
+  async function buildGroupChildren(intoWrap) {
+    // location dropdown
+    const sel = document.createElement('select');
+    sel.innerHTML = `
+      <option value="bellevue">Bellevue</option>
+      <option value="seattle">Seattle</option>
+      <option value="tacoma">Tacoma</option>
+      <option value="renton">Renton</option>
+    `;
+    Object.assign(sel.style, {
+      height: '26px', padding: '0 6px',
+      border: '1px solid rgba(0,0,0,.2)', borderRadius: '6px',
+      font: '12px system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif'
+    });
+
+    // choose initial value (settings)
+    const randomOn = await gmGet(KEYS.random, DEFAULTS.randomizeLocation);
+    const defloc   = await gmGet(KEYS.defloc, DEFAULTS.defaultLocation);
+    sel.value = randomOn ? rand(LOCATIONS) : (LOCATIONS.includes(defloc) ? defloc : DEFAULTS.defaultLocation);
+
+    const settingsBtn = mkIconBtn('⚙︎', 'Set name, review message, and default location', showSettings);
+    const sigBtn  = mkBtn('Copy signature', async () => {
+      const name = await gmGet(KEYS.name, DEFAULTS.name);
+      const html = signatureHTML(name, { spacedThankYou: true });
+      const text = signatureText(name,  { spacedThankYou: true });
+      const res  = await copyRich(html, text);
+      toast(res.ok ? 'Copied signature' : 'Copy failed');
+    });
+    const bothBtn = mkBtn('Copy review + signature', async () => {
+      const name   = await gmGet(KEYS.name, DEFAULTS.name);
+      const parts  = await getReviewMsg();
+      const url    = getReviewUrlFrom(sel);
+      const revH   = reviewHTMLParts(url, parts);
+      const revT   = reviewTextParts(url, parts);
+      const sigH   = signatureHTML(name, { spacedThankYou: false });
+      const sigT   = signatureText(name,  { spacedThankYou: false });
+      const html   = `<div style="margin:0;line-height:1.35">${revH}<div style="margin:0"><br></div>${sigH}</div>`;
+      const text   = [revT, '', sigT].join('\n');
+      const res    = await copyRich(html, text);
+      toast(res.ok ? 'Copied review + signature' : 'Copy failed');
+    });
+
+    intoWrap.append(sel, settingsBtn, sigBtn, bothBtn);
+  }
+
+  // Build the wrapper immediately (prevents async double-insert),
+  // then populate it asynchronously.
+  async function mountGroup(nextToStamp) {
+    // If an existing group isn't adjacent to this stamp, move it.
+    const existing = document.getElementById(GROUP_ID);
+    if (existing) {
+      if (existing.previousElementSibling === nextToStamp) return true;
+      existing.remove();
+    }
+
+    // Create wrapper synchronously to avoid races
+    const wrap = document.createElement('span');
+    wrap.id = GROUP_ID;
+    Object.assign(wrap.style, {
+      display: 'inline-flex', gap: '6px', marginLeft: '8px',
+      verticalAlign: 'middle', alignItems: 'center', whiteSpace: 'nowrap'
+    });
+
+    // ensure timestamp TD doesn’t wrap
+    const td = nextToStamp.closest('td'); if (td) td.style.whiteSpace = 'nowrap';
+    nextToStamp.style.display = 'inline-block';
+    nextToStamp.insertAdjacentElement('afterend', wrap);
+
+    // fill children
+    await buildGroupChildren(wrap);
+    return true;
+  }
 
   // ---------- settings panel ----------
   function closeModal(el) { el?.remove(); }
@@ -224,7 +355,7 @@ function reviewTextParts(_url, { headline, prefix, linkText, suffix, closing }) 
 
         <label>Randomize location on open</label>
         <label style="display:flex; align-items:center; gap:6px;">
-          <input type="checkbox" id="att_random" ${randomOn ? 'checked' : ''}>
+          <input type="checkbox" id="att_random">
           <span style="color:#555;">Pick a random location each time the toolbar appears</span>
         </label>
 
@@ -250,9 +381,11 @@ function reviewTextParts(_url, { headline, prefix, linkText, suffix, closing }) 
 
     const defSel   = modal.querySelector('#att_defloc');
     const defLabel = modal.querySelector('#att_defloc_label');
-    defSel.value   = defloc;
-
     const randomCb = modal.querySelector('#att_random');
+
+    defSel.value   = defloc;
+    randomCb.checked = !!randomOn;
+
     function syncDefLocVisibility() {
       const on = randomCb.checked;
       defSel.disabled = on;
@@ -278,134 +411,38 @@ function reviewTextParts(_url, { headline, prefix, linkText, suffix, closing }) 
       closeModal(overlay);
     };
     modal.querySelector('#att_save').onclick   = async () => {
-      const v = id => modal.querySelector(id);
-      await gmSet(KEYS.name,     v('#att_name').value.trim()      || DEFAULTS.name);
-      await gmSet(KEYS.headline, v('#att_headline').value.trim()  || DEFAULTS.headline);
-      await gmSet(KEYS.prefix,   v('#att_prefix').value()    || DEFAULTS.prefix);
-      await gmSet(KEYS.link,     v('#att_linktext').value.trim()  || DEFAULTS.linkText);
-      await gmSet(KEYS.suffix,   v('#att_suffix').value());
-      await gmSet(KEYS.closing,  v('#att_closing').value.trim()   || DEFAULTS.closing);
-      await gmSet(KEYS.random,   !!v('#att_random').checked);
+      const v = id => modal.querySelector(id).value;
+      await gmSet(KEYS.name,     (v('#att_name')     || '').trim()      || DEFAULTS.name);
+      await gmSet(KEYS.headline, (v('#att_headline') || '').trim()      || DEFAULTS.headline);
+      await gmSet(KEYS.prefix,    v('#att_prefix')   ?? DEFAULTS.prefix);
+      await gmSet(KEYS.link,     (v('#att_linktext') || '').trim()      || DEFAULTS.linkText);
+      await gmSet(KEYS.suffix,    v('#att_suffix')   ?? '');
+      await gmSet(KEYS.closing,  (v('#att_closing')  || '').trim()      || DEFAULTS.closing);
+      await gmSet(KEYS.random,   !!randomCb.checked);
       await gmSet(KEYS.defloc,   defSel.value || DEFAULTS.defaultLocation);
       toast('Settings saved');
       closeModal(overlay);
     };
   }
 
-  // ---------- inline UI next to Notes timestamp ----------
-  const GROUP_ID = 'cw-notes-inline-copy-group';
-
-  function mkBtn(label, handler) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.textContent = label;
-    Object.assign(b.style, {
-      padding: '4px 8px',
-      borderRadius: '6px',
-      border: '1px solid rgba(0,0,0,.2)',
-      background: 'rgb(37,99,235)',
-      color: '#fff',
-      font: '12px system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif',
-      cursor: 'pointer',
-      userSelect: 'none',
-      whiteSpace: 'nowrap'
-    });
-    b.addEventListener('click', handler);
-    return b;
-  }
-  function mkIconBtn(label, title, handler) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.textContent = label;
-    b.title = title;
-    Object.assign(b.style, {
-      padding: '0 6px',
-      height: '26px',
-      lineHeight: '26px',
-      borderRadius: '6px',
-      border: '1px solid rgba(0,0,0,.2)',
-      background: '#fff',
-      color: '#111',
-      font: '14px system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif',
-      cursor: 'pointer',
-      userSelect: 'none',
-      whiteSpace: 'nowrap'
-    });
-    b.addEventListener('click', handler);
-    return b;
+  // ---------- orchestrate ----------
+  function removeGroupIfAny() {
+    const ex = document.getElementById(GROUP_ID);
+    if (ex && ex.parentNode) ex.parentNode.removeChild(ex);
   }
 
-  function getReviewUrlFrom(sel) {
-    return REVIEW_URLS[sel.value] || REVIEW_URLS.bellevue;
-  }
+  async function ensure() {
+    // Do NOT show on timesheet-derived time entries
+    if (isTimesheetContext()) { removeGroupIfAny(); return; }
 
-  async function buildGroupElements() {
-    const wrap = document.createElement('span');
-    wrap.id = GROUP_ID;
-    Object.assign(wrap.style, {
-      display: 'inline-flex', gap: '6px', marginLeft: '8px',
-      verticalAlign: 'middle', alignItems: 'center', whiteSpace: 'nowrap'
-    });
-
-    // location dropdown
-    const sel = document.createElement('select');
-    sel.innerHTML = `
-      <option value="bellevue">Bellevue</option>
-      <option value="seattle">Seattle</option>
-      <option value="tacoma">Tacoma</option>
-      <option value="renton">Renton</option>
-    `;
-    Object.assign(sel.style, {
-      height: '26px', padding: '0 6px',
-      border: '1px solid rgba(0,0,0,.2)', borderRadius: '6px',
-      font: '12px system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif'
-    });
-
-    // choose initial value
-    const randomOn = await gmGet(KEYS.random, DEFAULTS.randomizeLocation);
-    const defloc   = await gmGet(KEYS.defloc, DEFAULTS.defaultLocation);
-    sel.value = randomOn ? rand(LOCATIONS) : (LOCATIONS.includes(defloc) ? defloc : DEFAULTS.defaultLocation);
-
-    const settingsBtn = mkIconBtn('⚙︎', 'Set name, review message, and default location', showSettings);
-
-    const sigBtn  = mkBtn('Copy signature', async () => {
-      const name = await gmGet(KEYS.name, DEFAULTS.name);
-      const html = signatureHTML(name, { spacedThankYou: true });
-      const text = signatureText(name,  { spacedThankYou: true });
-      const res  = await copyRich(html, text);
-      toast(res.ok ? 'Copied signature' : 'Copy failed');
-    });
-
-    const bothBtn = mkBtn('Copy review + signature', async () => {
-      const name   = await gmGet(KEYS.name, DEFAULTS.name);
-      const parts  = await getReviewMsg();
-      const url    = getReviewUrlFrom(sel);
-      const revH   = reviewHTMLParts(url, parts);
-      const revT   = reviewTextParts(url, parts);
-      const sigH   = signatureHTML(name, { spacedThankYou: false });
-      const sigT   = signatureText(name,  { spacedThankYou: false });
-      const html   = `<div style="margin:0;line-height:1.35">${revH}<div style="margin:0"><br></div>${sigH}</div>`;
-      const text   = [revT, '', sigT].join('\n');
-      const res    = await copyRich(html, text);
-      toast(res.ok ? 'Copied review + signature' : 'Copy failed');
-    });
-
-    wrap.append(sel, settingsBtn, sigBtn, bothBtn);
-    return wrap;
-  }
-
-  function placeGroup() {
-    if (document.getElementById(GROUP_ID)) return true;
     const stamp = findNotesTimestampButton();
-    if (!stamp) return false;
-    const td = stamp.closest('td'); if (td) td.style.whiteSpace = 'nowrap';
-    stamp.style.display = 'inline-block';
-    buildGroupElements().then(el => stamp.insertAdjacentElement('afterend', el));
-    return true;
+    if (!stamp) { removeGroupIfAny(); return; }
+
+    await mountGroup(stamp);
   }
 
-  function ensure() { placeGroup(); }
   const mo = new MutationObserver(() => ensure());
   mo.observe(document.documentElement, { subtree: true, childList: true });
+
   ensure();
 })();
