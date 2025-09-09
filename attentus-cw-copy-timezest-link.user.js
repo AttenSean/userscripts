@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         attentus-cw-copy-timezest-link
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      2.2.0
+// @version      2.2.1
 // @description  One button: left-click copies Help Desk Team (30-min) TimeZest link; right-click copies Personal (30-min) link. Works on Ticket & Time Entry windows (reads Charge To). First click opens settings (or Shift-click anytime). Copies true HTML (“Schedule a time”) with plaintext URL fallback.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
@@ -252,7 +252,7 @@
       <div class="explainer">
         <div><strong>Left-click</strong>: copies the <em>Help Desk Team (30-min)</em> link as “Schedule a time”.</div>
         <div><strong>Right-click</strong>: copies your <em>Personal (30-min)</em> link as “Schedule a time”.</div>
-        <div>Need a different duration? Use the TimeZest pod in ConnectWise.</div>
+        <div>Need a different duration or multiple contacts? Use the TimeZest pod and advanced options in ConnectWise.</div>
         <div>You can reopen this panel anytime by <strong>Shift-clicking</strong> the button.</div>
       </div>
       <div class="actions">
