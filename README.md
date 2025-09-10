@@ -51,7 +51,7 @@ Provenance: Human-authored with AI assistance; human-reviewed.
   Forces new *Time Entry* forms to open in their own tab for better multitasking.
   
 - [**attentus-cw-ticket-quick-triage.user.js**](https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-ticket-quick-triage.user.js)
-  Adds a **Quick Triage:** bar between the Ticket header and fields with a **Junk** button that sets Board to “Junk”, then prompts to **Save**, **Save & Close**, or **Cancel** (reverts). Hides on Project tickets; SPA-safe.
+  Adds a “Quick Triage:” bar with Junk and Spam/Phishing actions. Spam/Phishing sets Help Desk (if not already), MUST ASSIGN → Email → Spam/Phishing, Tier 1, SLA Low/Low → Priority 4, and Summary “Spam/Phishing (Contact)”. Shift+Click (opt-in) applies and Save & Close; Cancel fully reverts (incl. SLA). Hides on Project tickets
 
 
 > If a script isn’t listed above but lives in this repo, it’s likely WIP or internal and may not include auto-update headers yet.
