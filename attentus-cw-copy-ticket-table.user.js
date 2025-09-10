@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         attentus-cw-copy-ticket-table
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.4.0
-// @description  Adds a blue "Copy Ticket Table" button next to CLEAR/Open Calendar View; copies visible Ticket (link) + Summary + Company
+// @version      1.6.3
+// @description  Adds "Copy Ticket Table" next to CLEAR; copies visible Ticket (link) + Summary + Company; only on Service Board List
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
 // @match        https://*.myconnectwise.com/*
@@ -14,46 +14,81 @@
 // @updateURL    https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-copy-ticket-table.user.js
 // ==/UserScript==
 
-
 (function () {
+  'use strict';
+
   const BASE = location.origin;
   const PATH = '/v4_6_release/services/system_io/Service/fv_sr100_request.rails?service_recid=';
   const BTN_ID = 'cw-copy-ticket-table-btn';
+  const STYLE_ID = 'cw-copy-style';
+  const TOAST_ID = 'cw-copy-toast';
 
-  // --- Style injection (blue primary button) ---
+  // ---------- Styles ----------
   function injectStyles() {
-    if (document.getElementById('cw-mm-style')) return;
+    if (document.getElementById(STYLE_ID)) return;
     const css = `
       #${BTN_ID} {
-        /* layout/position handled dynamically; keep visuals only here */
-        -webkit-user-select: none; user-select: none;
-        padding: 4px 12px;
-        border-radius: 6px;
-        font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
-        font-size: 12px; font-weight: 600;
-        line-height: 18px;
-        color: #fff;
-        background: #1f73b7;            /* primary blue */
-        border: 1px solid rgba(0,0,0,.08);
-        box-shadow: 0 1px 0 rgba(255,255,255,.15) inset, 0 1px 4px rgba(0,0,0,.08);
-        cursor: pointer;
-        text-decoration: none;
-        letter-spacing: .2px;
-        white-space: nowrap;
+        -webkit-user-select:none; user-select:none;
+        padding:4px 12px; border-radius:6px;
+        font:600 12px/18px system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+        color:#fff; background:#1f73b7;
+        border:1px solid rgba(0,0,0,.08);
+        box-shadow:0 1px 0 rgba(255,255,255,.15) inset, 0 1px 4px rgba(0,0,0,.08);
+        cursor:pointer; white-space:nowrap;
+        position:absolute; z-index:100;  /* anchor near CLEAR */
       }
-      #${BTN_ID}:hover { filter: brightness(0.97); }
-      #${BTN_ID}:active { filter: brightness(0.94); transform: translateY(0.5px); }
-      #${BTN_ID}:focus { outline: 2px solid #98c9ec; outline-offset: 1px; }
+      #${BTN_ID}:hover{filter:brightness(.97)}
+      #${BTN_ID}:active{filter:brightness(.94); transform:translateY(.5px)}
+      #${BTN_ID}:focus{outline:2px solid #98c9ec; outline-offset:1px}
+
+      #${TOAST_ID}{
+        position:fixed; bottom:70px; right:16px; z-index:2147483647;
+        padding:8px 12px; border-radius:8px; color:#fff;
+        font:12px system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+        box-shadow:0 4px 16px rgba(0,0,0,.2); opacity:0; transition:opacity .2s; pointer-events:none;
+      }
     `;
-    const style = document.createElement('style');
-    style.id = 'cw-mm-style';
-    style.textContent = css;
-    document.head.appendChild(style);
+    const s = document.createElement('style');
+    s.id = STYLE_ID;
+    s.textContent = css;
+    document.head.appendChild(s);
   }
 
-  const isTicketId = (txt) => /^\d{6,}$/.test((txt || '').trim());
+  // ---------- Gates ----------
+  const isTicketId = (t) => /^\d{6,}$/.test((t || '').trim());
+  const hasGrid = () => !!document.querySelector('table.srboard-grid tr.cw-ml-row a.multilineClickable');
 
-  // ---- Column pickers ----
+  // detail label only (NOT navigationEntry); text must be "Service Board List"
+  function isOnServiceBoardList() {
+    const labels = Array.from(
+      document.querySelectorAll('.cw-main-banner .cw_CwLabel.detailLabel:not(.navigationEntry), .cw-main-banner .gwt-Label.detailLabel:not(.navigationEntry)')
+    );
+    const match = labels.find(el => (el.textContent || '').trim().toLowerCase() === 'service board list');
+    return !!match;
+  }
+
+  // ---------- Find CLEAR container (stable) ----------
+  function getClearContainer() {
+    // 1) Known container some tenants expose
+    const byClass = document.querySelector('div.cw-toolbar-clear');
+    if (byClass) return byClass;
+
+    // 2) Button/text that literally says CLEAR (case-insensitive)
+    const btns = Array.from(document.querySelectorAll('button, div, span, a')).filter(el => {
+      const t = (el.textContent || '').trim();
+      return t && /^clear$/i.test(t);
+    });
+    if (btns.length) {
+      // Prefer visible, clickable
+      const vis = btns.find(el => el.offsetParent !== null) || btns[0];
+      // Use a stable positioned parent for absolute anchoring
+      return vis.closest('div,td,th') || vis.parentElement || vis;
+    }
+
+    return null;
+  }
+
+  // ---------- Row extraction (original, working) ----------
   function getTicketAnchor(row) {
     let a = row.querySelector('td[cellindex="7"] a.multilineClickable');
     if (a && isTicketId(a.textContent)) return a;
@@ -65,7 +100,7 @@
     if (a && a.textContent.trim()) return a;
     const anchors = Array.from(row.querySelectorAll('a.multilineClickable'));
     const nonTicket = anchors.filter(a => !isTicketId(a.textContent));
-    return nonTicket.sort((a, b) => (b.textContent || '').length - (a.textContent || '').length)[0] || null;
+    return nonTicket.sort((a,b)=>(b.textContent||'').length-(a.textContent||'').length)[0] || null;
   }
   function getCompanyCell(row, summaryA) {
     let td = row.querySelector('td[aria-label*="Company" i], td[data-columnid*="Company" i]');
@@ -76,15 +111,14 @@
     }
     return null;
   }
-
   function collectRows() {
     const rows = Array.from(document.querySelectorAll('table.srboard-grid tr.cw-ml-row'));
     const out = [];
     for (const row of rows) {
+      if (row.offsetParent === null) continue; // visible only
       const ticketA  = getTicketAnchor(row);
       const summaryA = getSummaryAnchor(row);
       if (!ticketA || !summaryA) continue;
-
       const companyTD = getCompanyCell(row, summaryA);
       const ticket = (ticketA.textContent || '').trim();
       const summary = (summaryA.textContent || '').trim();
@@ -95,7 +129,7 @@
     return out;
   }
 
-  // ---- Copy payloads ----
+  // ---------- Copy payloads (original pipeline) ----------
   function makeHtmlTable(rows) {
     const esc = (s) => (s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
     const header = '<tr><th>Ticket</th><th>Summary</th><th>Company</th></tr>';
@@ -118,7 +152,6 @@
     });
     return [header, ...lines].join('\n');
   }
-
   async function copyToClipboard(html, text) {
     try {
       if (navigator.clipboard && window.ClipboardItem) {
@@ -145,90 +178,89 @@
   }
 
   function toast(msg, ok = true) {
-    const id = 'cw-copy-toast';
-    let el = document.getElementById(id);
-    if (!el) {
-      el = document.createElement('div');
-      el.id = id;
-      Object.assign(el.style, {
-        position: 'fixed', bottom: '70px', right: '16px',
-        zIndex: 999999, padding: '8px 12px', borderRadius: '8px',
-        color: '#fff', fontFamily: 'system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif',
-        fontSize: '12px', boxShadow: '0 4px 16px rgba(0,0,0,.2)', opacity: '0',
-        transition: 'opacity .2s', pointerEvents: 'none'
-      });
-      document.body.appendChild(el);
-    }
+    let el = document.getElementById(TOAST_ID);
+    if (!el) { el = document.createElement('div'); el.id = TOAST_ID; document.body.appendChild(el); }
     el.style.background = ok ? '#16a34a' : '#dc2626';
     el.textContent = msg;
     requestAnimationFrame(() => el.style.opacity = '1');
-    setTimeout(() => el.style.opacity = '0', 2500);
+    setTimeout(() => el.style.opacity = '0', 2200);
   }
 
-  // ---- Placement right of CLEAR ----
-  function getClearDiv() {
-    return document.querySelector('div.cw-toolbar-clear'); // the CLEAR container you pointed out
-  }
-
+  // ---------- Placement next to CLEAR ----------
   function positionButton(clearDiv, btn) {
     if (!clearDiv || !btn) return;
-    const parent = clearDiv.parentElement;
-    if (!parent || btn.parentElement !== parent) {
-      try { parent?.appendChild(btn); } catch {}
-    }
-    const left = clearDiv.offsetLeft + clearDiv.offsetWidth + 8; // 8px gap
-    const top  = Math.max(0, clearDiv.offsetTop);                // align to CLEAR
-    Object.assign(btn.style, {
-      position: 'absolute',
-      left: `${left}px`,
-      top: `${top}px`,
-      zIndex: 10
-    });
+    const parent = clearDiv.parentElement || document.body;
+
+    // Ensure parent can host absolute children without clipping under overflow
+    const cs = getComputedStyle(parent);
+    if (cs.position === 'static') parent.style.position = 'relative';
+
+    // Put our button in the same parent as CLEAR
+    if (btn.parentElement !== parent) parent.appendChild(btn);
+
+    // Calculate left/top: right of CLEAR with 8px gap, align to CLEAR's top
+    const gap = 8;
+    const rectParent = parent.getBoundingClientRect();
+    const rectClear  = clearDiv.getBoundingClientRect();
+
+    const left = (rectClear.left - rectParent.left) + rectClear.width + gap;
+    const top  = (rectClear.top  - rectParent.top);
+
+    btn.style.left = `${Math.max(0, left)}px`;
+    btn.style.top  = `${Math.max(0, top)}px`;
   }
 
   function buildButton() {
     injectStyles();
-    const btn = document.createElement('div');
+    const btn = document.createElement('button');
     btn.id = BTN_ID;
-    btn.setAttribute('role', 'button');
-    btn.setAttribute('aria-label', 'Copy Ticket Table');
-    btn.tabIndex = 0;
+    btn.type = 'button';
     btn.textContent = 'Copy Ticket Table';
-
-    const doCopy = async () => {
+    btn.addEventListener('click', async () => {
       const rows = collectRows();
-      if (!rows.length) {
-        toast('No visible rows found to copy.', false);
-        return;
-      }
+      if (!rows.length) { toast('No visible rows to copy.', false); return; }
       const html = makeHtmlTable(rows);
-      const md = makeMarkdownTable(rows);
-      const ok = await copyToClipboard(html, md);
-      toast(ok ? `Copied ${rows.length} row(s).` : 'Copy failed (clipboard blocked).', ok);
-    };
-    btn.addEventListener('click', doCopy);
-    btn.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); doCopy(); }
+      const md   = makeMarkdownTable(rows);
+      const ok   = await copyToClipboard(html, md);
+      toast(ok ? `Copied ${rows.length} row${rows.length === 1 ? '' : 's'} ✓` : 'Copy failed', ok);
+      // debug convenience
+      window.__attentusLastTicketTableTSV = md;
     });
-
     return btn;
   }
 
-  function ensureButton() {
-    const clearDiv = getClearDiv();
-    if (!clearDiv) return;
+  function mountOrMove() {
+    // Strict gate: must be on Service Board List detail label AND grid present
+    if (!(isOnServiceBoardList() && hasGrid())) { unmount(); return; }
+
+    const clearDiv = getClearContainer();
+    if (!clearDiv) { unmount(); return; }
 
     let btn = document.getElementById(BTN_ID);
     if (!btn) btn = buildButton();
-
-    const parent = clearDiv.parentElement || document.body;
-    if (btn.parentElement !== parent) parent.appendChild(btn);
     positionButton(clearDiv, btn);
   }
 
-  // Kickoff & keep aligned in this SPA
-  ensureButton();
-  new MutationObserver(() => ensureButton()).observe(document.documentElement, { childList: true, subtree: true });
-  window.addEventListener('resize', ensureButton);
-  window.addEventListener('scroll', ensureButton, true);
+  function unmount() {
+    const btn = document.getElementById(BTN_ID);
+    if (btn) btn.remove();
+  }
+
+  // ---------- Observe SPA + resize/scroll ----------
+  function observe() {
+    const mo = new MutationObserver(mountOrMove);
+    mo.observe(document.documentElement, { childList: true, subtree: true });
+    window.addEventListener('resize', mountOrMove);
+    window.addEventListener('scroll', mountOrMove, true);
+    mountOrMove();
+  }
+
+  // Boot
+  (async function boot() {
+    for (let i = 0; i < 20; i++) {
+      if (document.readyState !== 'loading') break;
+      await new Promise(r => setTimeout(r, 80));
+    }
+    observe();
+  })();
 })();
