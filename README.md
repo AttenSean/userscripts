@@ -18,6 +18,7 @@ Provenance: Human-authored with AI assistance; human-reviewed.
 |---|---|---|
 | `attentus-cw-clear-contact-button.user.js` | Adds **Clear Contact** button (next to **Follow**) that wipes Contact, Email, and Phone fields and shows a quick *Cleared* flash. | https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-clear-contact-button.user.js |
 | `attentus-cw-copy-ticket-link.user.js` | Adds **Copy Ticket** button (next to Clear Contact) that copies a **rich HTML link** to the ticket (with a clean plain-text fallback). Shows a *Copied* flash. | https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-copy-ticket-link.user.js |
+| `attentus-cw-copy-ticket-table.user.js` | Adds a blue **Copy Ticket Table** button in the Service Board toolbar (next to **Open Calendar View/CLEAR**) that copies a table of **Ticket (link) + Summary + Company** for all **visible** rows. | https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-copy-ticket-table.user.js |
 | `attentus-cw-copy-timezest-link.user.js` | **Copy TimeZest** button. Left-click copies Help-Desk Team link; **Shift+Click** copies personal link using stored First/Last name. First use prompts for your name. Creates a **30-minute** invite. Need other durations? Use the TimeZest pod in CW. | https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-copy-timezest-link.user.js |
 | `attentus-cw-summary-tag-popup.user.js` | Detects upcoming scheduled time on a ticket and offers a one-click **Summary** suffix: `<Sch m/d @ h:mmAM/PM>` or `<Rem m/d>` for date-only. Popup appears near the top center and hides after use. Handles multiple future entries (chooses the soonest upcoming). | https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-summary-tag-popup.user.js |
 | `attentus-cw-tab-title-normalize.user.js` | Normalizes tab titles (e.g., fixes new “Time Entry” windows that default to *Agreement*) so tabs are easy to recognize. | https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-tab-title-normalize.user.js |
@@ -49,7 +50,7 @@ Provenance: Human-authored with AI assistance; human-reviewed.
 
 1. Install a userscript manager (Violentmonkey or Tampermonkey).
 2. Click a **Raw** link above and accept the install prompt.
-3. Visit ConnectWise; scripts matching `https://*.myconnectwise.net/*` or `https://*.connectwise.net/*` will run.
+3. Visit ConnectWise; scripts matching `https://*.myconnectwise.net/*`, `https://*.connectwise.net/*`, or `https://*.myconnectwise.com/*` will run.
 
 **Updating**  
 - Updates are automatic (per manager settings) or can be forced via **Check for updates**.  
@@ -92,7 +93,7 @@ Provenance: Human-authored with AI assistance; human-reviewed.
 
 ## Troubleshooting
 
-- **No buttons appear?** Ensure you’re on a matching domain (`myconnectwise.net` or `connectwise.net`) and logged in. Some pages are SPA—allow a second for the mutation observer to place UI.
+- **No buttons appear?** Ensure you’re on a matching domain (`myconnectwise.net`, `connectwise.net`, or `myconnectwise.com`) and logged in. Some pages are SPA—allow a second for the mutation observer to place UI.
 - **Clipboard blocked?** Some browsers require a user gesture. Try clicking the button again or allow clipboard permission.
 
 ---
