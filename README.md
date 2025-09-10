@@ -6,7 +6,6 @@ Tested with Violentmonkey on Chromium-based browsers.
 
 Provenance: Human-authored with AI assistance; human-reviewed.
 
-
 > **Install**: Click a script’s **Raw** link below in your browser and your userscript manager should prompt to install.  
 > **Auto-updates**: Each script includes `@downloadURL` and `@updateURL` that point to this repo’s `main` branch. Bump `@version` on changes.
 
@@ -14,18 +13,42 @@ Provenance: Human-authored with AI assistance; human-reviewed.
 
 ## Scripts
 
-| File | What it does | Install / Raw |
-|---|---|---|
-| `attentus-cw-clear-contact-button.user.js` | Adds **Clear Contact** button (next to **Follow**) that wipes Contact, Email, and Phone fields and shows a quick *Cleared* flash. | https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-clear-contact-button.user.js |
-| `attentus-cw-copy-ticket-link.user.js` | Adds **Copy Ticket** button (next to Clear Contact) that copies a **rich HTML link** to the ticket (with a clean plain-text fallback). Shows a *Copied* flash. | https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-copy-ticket-link.user.js |
-| `attentus-cw-copy-ticket-table.user.js` | Adds a blue **Copy Ticket Table** button in the Service Board toolbar (next to **Open Calendar View/CLEAR**) that copies a table of **Ticket (link) + Summary + Company** for all **visible** rows. | https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-copy-ticket-table.user.js |
-| `attentus-cw-copy-timezest-link.user.js` | **Copy TimeZest** button. Left-click copies Help-Desk Team link; **Shift+Click** copies personal link using stored First/Last name. First use prompts for your name. Creates a **30-minute** invite. Need other durations? Use the TimeZest pod in CW. | https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-copy-timezest-link.user.js |
-| `attentus-cw-summary-tag-popup.user.js` | Detects upcoming scheduled time on a ticket and offers a one-click **Summary** suffix: `<Sch m/d @ h:mmAM/PM>` or `<Rem m/d>` for date-only. Popup appears near the top center and hides after use. Handles multiple future entries (chooses the soonest upcoming). | https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-summary-tag-popup.user.js |
-| `attentus-cw-tab-title-normalize.user.js` | Normalizes tab titles (e.g., fixes new “Time Entry” windows that default to *Agreement*) so tabs are easy to recognize. | https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-tab-title-normalize.user.js |
-| `attentus-cw-ticket-open-in-new-tab.user.js` | Converts ticket # cells into proper links that **open in a new tab** (v4_6 URL). | https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-ticket-open-in-new-tab.user.js |
-| `attentus-cw-ticket-quick-nav-and-dedupe.user.js` | Quick “Go to Ticket #” input + recent tickets, adds a left-side Tickets menu entry, and prevents duplicate tabs for the same ticket. | https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-ticket-quick-nav-and-dedupe.user.js |
-| `attentus-cw-time-entry-clipboard-bar.user.js` | Adds a compact **clipboard bar** to Time Entry for **Copy Signature** and **Copy Review + Signature**. Includes a settings fly-out to customize name and review text, and optional location randomizer with default location choice. | https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-time-entry-clipboard-bar.user.js |
-| `attentus-cw-time-entry-in-tab.user.js` | Forces new Time Entry forms to open in their own tab for better multitasking. | https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-time-entry-in-tab.user.js |
+- [**attentus-cw-clear-contact-button.user.js**](https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-clear-contact-button.user.js)  
+  Adds a *Clear Contact* button (next to Follow) that wipes Contact, Email, and Phone fields and shows a quick “Cleared” flash.
+
+- [**attentus-cw-copy-discussion.user.js**](https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-copy-discussion.user.js)  
+  Adds a compact *Copy* button next to **New Note** on Service Tickets that copies all visible Discussion notes (Discussion/Internal/Resolution/All tabs).  
+  Prepends a header with Ticket #, Company, and Contact. Copies both formatted text and plain text.
+
+- [**attentus-cw-copy-ticket-link.user.js**](https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-copy-ticket-link.user.js)  
+  Adds a *Copy Ticket* button (next to Clear Contact) that copies a rich HTML link to the ticket (with a clean plain-text fallback). Shows a “Copied” flash.
+
+- [**attentus-cw-copy-ticket-table.user.js**](https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-copy-ticket-table.user.js)  
+  Adds a blue *Copy Ticket Table* button in the Service Board toolbar (next to Open Calendar View / CLEAR) that copies a table of Ticket (link) + Summary + Company for all visible rows.
+
+- [**attentus-cw-copy-timezest-link.user.js**](https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-copy-timezest-link.user.js)  
+  Adds a *Copy TimeZest* button. Left-click copies Help-Desk Team link; **Shift+Click** copies personal link using stored First/Last name.  
+  First use prompts for your name. Creates a 30-minute invite. Need other durations? Use the TimeZest pod in CW.
+
+- [**attentus-cw-summary-tag-popup.user.js**](https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-summary-tag-popup.user.js)  
+  Detects upcoming scheduled time on a ticket and offers a one-click Summary suffix: `<Sch m/d @ h:mmAM/PM>` or `<Rem m/d>` for date-only.  
+  Popup appears near the top center and hides after use. Handles multiple future entries (chooses the soonest upcoming).
+
+- [**attentus-cw-tab-title-normalize.user.js**](https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-tab-title-normalize.user.js)  
+  Normalizes tab titles (e.g., fixes new *Time Entry* windows that default to Agreement) so tabs are easier to recognize.
+
+- [**attentus-cw-ticket-open-in-new-tab.user.js**](https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-ticket-open-in-new-tab.user.js)  
+  Converts ticket # cells into proper links that open in a new tab (v4_6 URL).
+
+- [**attentus-cw-ticket-quick-nav-and-dedupe.user.js**](https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-ticket-quick-nav-and-dedupe.user.js)  
+  Adds a quick *Go to Ticket #* input + recent tickets menu, a left-side Tickets entry, and prevents duplicate tabs for the same ticket.
+
+- [**attentus-cw-time-entry-clipboard-bar.user.js**](https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-time-entry-clipboard-bar.user.js)  
+  Adds a compact clipboard bar to *Time Entry* for Copy Signature and Copy Review + Signature.  
+  Includes a settings fly-out to customize name and review text, and optional location randomizer with default location choice.
+
+- [**attentus-cw-time-entry-in-tab.user.js**](https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-time-entry-in-tab.user.js)  
+  Forces new *Time Entry* forms to open in their own tab for better multitasking.
 
 > If a script isn’t listed above but lives in this repo, it’s likely WIP or internal and may not include auto-update headers yet.
 
@@ -45,6 +68,8 @@ Provenance: Human-authored with AI assistance; human-reviewed.
 - Microsoft Edge Add-ons: https://microsoftedge.microsoft.com/addons/detail/violentmonkey/eeagobfjdenkkddmbclomhiblgggliao
 
 > After installing a manager, open any `.user.js` file in this repo via the **Raw** link to install/update.
+
+---
 
 ## How to install (Violentmonkey/Tampermonkey)
 
