@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         attentus-cw-summary-tag-popup
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.4.0
+// @version      1.5.0
 // @description  Center top popup that appends "  <Sch M/D @ H:MMAM|PM>" for timed future appts or "  <Rem M/D>" for date only rows, one click then hides
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
+// @match        https://*.myconnectwise.com/*
 // @run-at       document-idle
 // @noframes
 // @grant        none
@@ -12,11 +13,10 @@
 // @updateURL    https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-summary-tag-popup.user.js
 // ==/UserScript==
 
-
 (function () {
   'use strict';
 
-  const VERSION = 'v140';
+  const VERSION = 'v150';
   const MAX_SUMMARY = 100;
   const POPUP_ID = 'att-schrem-popup';
   let ranForThisView = false;
@@ -74,15 +74,28 @@
            $('input.GMDB3DUBCEI.cw_CwTextField.cw_PsaSummaryHeader') ||
            null;
   }
+
+  // More forgiving trailing tag trim: remove any final "<Sch ...>" or "<Rem ...>"
   function removeExistingTagAtEnd(v) {
-    return (v || '').replace(/\s*<(Sch|Rem)\s+[^>]+>\s*$/i, '').trimEnd();
+    return (v || '').replace(/\s*<\s*(?:Sch|Rem)\b[^>]*>\s*$/i, '').trimEnd();
   }
+
+  // Loose detection to suppress popup if user already has *any* <Sch... or <Rem... in the summary
+  function hasAnySchRemTagAnywhere(v) {
+    return /<\s*(?:Sch|Rem)\b/i.test(v || '');
+  }
+
   function appendTag(tag) {
     const inp = findSummaryInput();
     if (!inp) return false;
+
+    // If user has *any* Sch/Rem tag already, don't append a second one.
+    if (hasAnySchRemTagAnywhere(inp.value)) return true;
+
     const cur = inp.value || '';
     const sameEnd = new RegExp(tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*$','i').test(cur);
     if (sameEnd) return true;
+
     let base = removeExistingTagAtEnd(cur);
     const allowed = Math.max(0, MAX_SUMMARY - tag.length);
     if (base.length > allowed) base = base.slice(0, allowed).trimEnd();
@@ -94,11 +107,8 @@
   }
 
   // ---------- parse date rows ----------
-  // Timed full range, example: "Fri 09/05/2025 1:30 PM - Fri 09/05/2025 2:00 PM"
   const RE_FULL = /(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)?\s*(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})\s*(AM|PM)\s*-\s*(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)?\s*(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})\s*(AM|PM)/i;
-  // Timed short end, example: "09/05/2025 1:30 PM - 2:00 PM"
   const RE_SHORT_END = /(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)?\s*(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})\s*(AM|PM)\s*-\s*(\d{1,2}):(\d{2})\s*(AM|PM)/i;
-  // Date only, example: "Thu 09/04/2025  - Thu 09/04/2025"
   const RE_DATE_ONLY = /(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)?\s*(\d{1,2})\/(\d{1,2})\/(\d{4})\s*-\s*(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)?\s*(\d{1,2})\/(\d{1,2})\/(\d{4})\s*$/i;
 
   function toLocalDate(y, M, D, h = 0, m = 0, ampm = null) {
@@ -174,8 +184,7 @@
           seen.add(`t_${t}`);
           candidates.push({ sortAt: parsed.start, tag: buildSchTag(parsed.start) });
         } else if (parsed.kind === 'date') {
-          // treat as future if the day has not fully passed
-          if (parsed.endOfDay <= now) continue;
+          if (parsed.endOfDay <= now) continue; // treat as future if the day has not fully passed
           const dKey = parsed.date.toDateString();
           if (seen.has(`d_${dKey}`)) continue;
           seen.add(`d_${dKey}`);
@@ -194,7 +203,13 @@
   function showPopup(tag, ticketId) {
     const sum = findSummaryInput();
     if (!sum) return;
+
+    // NEW: if any <Sch... or <Rem... tag already present (even messy), don't show the popup.
+    if (hasAnySchRemTagAnywhere(sum.value)) return;
+
+    // If exact tag is already at end, also skip (existing behavior).
     if (new RegExp(tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*$','i').test(sum.value || '')) return;
+
     if (!shouldShow(ticketId, tag)) return;
 
     let pop = document.getElementById(POPUP_ID);
