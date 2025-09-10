@@ -49,6 +49,10 @@ Provenance: Human-authored with AI assistance; human-reviewed.
 
 - [**attentus-cw-time-entry-in-tab.user.js**](https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-time-entry-in-tab.user.js)  
   Forces new *Time Entry* forms to open in their own tab for better multitasking.
+  
+- [**attentus-cw-ticket-quick-triage.user.js**](https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-ticket-quick-triage.user.js)
+  Adds a **Quick Triage:** bar between the Ticket header and fields with a **Junk** button that sets Board to “Junk”, then prompts to **Save**, **Save & Close**, or **Cancel** (reverts). Hides on Project tickets; SPA-safe.
+
 
 > If a script isn’t listed above but lives in this repo, it’s likely WIP or internal and may not include auto-update headers yet.
 
