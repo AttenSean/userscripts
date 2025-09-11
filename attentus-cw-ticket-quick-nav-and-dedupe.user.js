@@ -1,16 +1,17 @@
 // ==UserScript==
 // @name         attentus-cw-ticket-quick-nav-and-dedupe
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      3.4
-// @description  Tiny ticket input in the top header, Enter to open, last 5 dropdown rendered in body, placed left of Tickets, reuses an existing tab per ticket
+// @version      3.5
+// @description  Tiny ticket input in the top header, Enter to open, last 5 dropdown rendered in body, placed left of Tickets, reuses an existing tab per ticket. Exposes a stable hook for other Attentus scripts.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
+// @match        https://*.myconnectwise.com/*
 // @run-at       document-idle
 // @grant        none
+// @noframes
 // @downloadURL  https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-ticket-quick-nav-and-dedupe.user.js
 // @updateURL    https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-ticket-quick-nav-and-dedupe.user.js
 // ==/UserScript==
-
 
 (function () {
   'use strict';
@@ -82,6 +83,8 @@
   function makeUI() {
     const wrap = document.createElement('span');
     wrap.id = 'cw-go-ticket-wrap';
+    // Expose stable hook for companion scripts (e.g., tab-title settings gear)
+    wrap.setAttribute('data-attentus-quick-nav', '');
     wrap.style.cssText = 'display:inline-flex;align-items:center;gap:6px;position:relative;vertical-align:middle;';
 
     const input = document.createElement('input');
