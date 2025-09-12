@@ -53,6 +53,8 @@ Provenance: Human-authored with AI assistance; human-reviewed.
 - [**attentus-cw-ticket-quick-triage.user.js**](https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-ticket-quick-triage.user.js)
   Adds a “Quick Triage:” bar with Junk and Spam/Phishing actions. Spam/Phishing sets Help Desk (if not already), MUST ASSIGN → Email → Spam/Phishing, Tier 1, SLA Low/Low → Priority 4, and Summary “Spam/Phishing (Contact)”. Shift+Click (opt-in) applies and Save & Close; Cancel fully reverts (incl. SLA). Hides on Project tickets
 
+- [**attentus-cw-contact-insight-pod.user.js**](https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-contact-insight-pod.user.js)
+  Ticket-only contact insight under Company pod Email. No-flash stealth scrape. Uses cache when throttled, and never overwrites shown data with a hint. Should only re-run on contact change.
 
 > If a script isn’t listed above but lives in this repo, it’s likely WIP or internal and may not include auto-update headers yet.
 
