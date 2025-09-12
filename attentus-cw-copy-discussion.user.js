@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         attentus-cw-copy-discussion
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.3.1
-// @description  Compact "Copy" button by New Note on Service Tickets. Copies visible Discussion notes with a header (Ticket, Company, Contact) — no duplicates.
+// @version      1.4.0
+// @description  Compact "Copy" button by New Note on Service Tickets. Copies visible Discussion notes with a header (Ticket, Company, Contact, and Contact Insight when available) — no duplicates.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
 // @match        https://*.myconnectwise.com/*
@@ -53,6 +53,52 @@
   function getCompany() { return getVal('input.cw_company') || getVal('[data-cwid="company"] input[readonly]'); }
   function getContact() { return getVal('input.cw_contact') || getVal('[data-cwid="contact"] input[readonly]'); }
 
+  // ----- Contact Insight (optional) -----
+  // Tries to find a pod/section whose text includes "Contact Insight", then read "Job Title" and "Type".
+  function getContactInsight() {
+    // find a plausible panel
+    const candidates = Array.from(document.querySelectorAll(
+      [
+        '[data-cwid*="contact"]',
+        '[data-cwid*="insight"]',
+        '[id*="contact"]',
+        '[id*="insight"]',
+        '[class*="contact"]',
+        '[class*="insight"]',
+        '.CwPod', '.pod', '.panel', 'section'
+      ].join(',')
+    ));
+
+    const panel = candidates.find(el => /Contact\s+Insight/i.test(el.textContent || ''));
+    if (!panel) return null;
+
+    const readLabeled = (root, labelRegex) => {
+      // 1) Label -> sibling/row value
+      const labels = Array.from(root.querySelectorAll('label,.label,.CwFieldLabel,dt,th,span,div'))
+        .filter(el => labelRegex.test(el.textContent || ''));
+      for (const lab of labels) {
+        const sibVal = lab.nextElementSibling?.textContent?.trim();
+        if (sibVal) return sibVal;
+        const row = lab.closest('tr, dl, .row, .CwRow, .grid, .table');
+        if (row) {
+          const cell = row.querySelector('td:last-child, dd, .value, .CwValue');
+          const v = cell?.textContent?.trim();
+          if (v) return v;
+        }
+      }
+      // 2) Fallback: parse inline "Label: Value" from innerText
+      const txt = root.textContent || '';
+      const m = txt.match(new RegExp(labelRegex.source + '\\s*:\\s*(.+?)(?:\\n|$)', 'i'));
+      return m ? m[1].trim() : '';
+    };
+
+    const jobTitle = readLabeled(panel, /Job\s*Title/i);
+    const type = readLabeled(panel, /^Type/i);
+
+    if (!jobTitle && !type) return null;
+    return { jobTitle, type };
+  }
+
   // ----- de-duped extraction -----
   function extractNotes(podRoot) {
     const rows = podRoot.querySelectorAll('.TicketNote-rowWrap .TicketNote-row');
@@ -62,8 +108,7 @@
       const author = row.querySelector('.TicketNote-clickableName, .TicketNote-basicName, .TicketNote-skittleAvatar')?.textContent?.trim() || '';
       const date   = row.querySelector('.TimeText-date')?.textContent?.trim() || '';
 
-      // KEY CHANGE: iterate .TicketNote-rowNote blocks, read ONLY the inner .TicketNote-noteLabel (fallback to textContent of the block),
-      // and do NOT also pull .CwPodCol/.attachmentRow separately (this caused duplicates).
+      // Read only labeled note content to avoid dupes
       const blocks = row.querySelectorAll('.TicketNote-rowNote');
       const parts = [];
       blocks.forEach(block => {
@@ -72,7 +117,6 @@
         if (text) parts.push(text);
       });
 
-      // De-dupe identical parts within a note (just in case)
       const unique = Array.from(new Set(parts));
       const text = unique.join('\n\n');
 
@@ -86,24 +130,41 @@
     const tab = podRoot.querySelector('.TicketNote-ticketNoteTable .TicketNote-ticketNoteTabSelected');
     const tabLabel = tab ? tab.textContent.replace(/\s+\d+$/, '').trim() : 'Visible';
 
+    // Header line: Ticket — Company — Contact (existing behavior)
     const headerBits = [];
     const tid = getTicketNumber(); if (tid) headerBits.push(`#${tid}`);
     const co  = getCompany();      if (co)  headerBits.push(co);
     const ct  = getContact();      if (ct)  headerBits.push(`Contact: ${ct}`);
 
+    // Optional Contact Insight line (only if found)
+    const ci = getContactInsight();
+    const ciPlain = ci
+      ? ['Contact Insight', ci.jobTitle ? `Job Title: ${ci.jobTitle}` : '', ci.type ? `Type: ${ci.type}` : '']
+          .filter(Boolean).join(' — ')
+      : '';
+
     const notes = extractNotes(podRoot);
+
+    // ----- plain text -----
     const textParts = [];
     textParts.push(headerBits.join(' — '));
+    if (ciPlain) textParts.push(ciPlain);
     textParts.push(`Conversation (${tabLabel})`);
     notes.forEach(n => {
       textParts.push(['-----', n.author || 'Unknown', n.date || '', n.text || ''].filter(Boolean).join('\n'));
     });
     const plain = textParts.join('\n');
 
+    // ----- rich HTML -----
+    const htmlHeaderLines = [`<div style="font-weight:700;">${esc(headerBits.join(' — ') || 'Ticket')}</div>`];
+    if (ciPlain) {
+      htmlHeaderLines.push(
+        `<div style="margin-top:4px;color:#333;"><span style="font-weight:600;">Contact Insight:</span> ${esc(ci.jobTitle || '')}${ci.jobTitle && ci.type ? ' — ' : ''}${esc(ci.type || '')}</div>`
+      );
+    }
+
     const htmlParts = [];
-    htmlParts.push(`<div style="margin:0 0 10px 0;padding:10px;border:1px solid #ddd;border-radius:6px;background:#fafafa;">
-      <div style="font-weight:700;">${esc(headerBits.join(' — ') || 'Ticket')}</div>
-    </div>`);
+    htmlParts.push(`<div style="margin:0 0 10px 0;padding:10px;border:1px solid #ddd;border-radius:6px;background:#fafafa;">${htmlHeaderLines.join('')}</div>`);
     htmlParts.push(`<div><strong>Conversation (${esc(tabLabel)})</strong></div>`);
     notes.forEach(n => {
       htmlParts.push(`<div style="margin:12px 0;border-top:1px solid #ddd;padding-top:12px;">
