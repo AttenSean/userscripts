@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         attentus-cw-copy-discussion
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.0.0
+// @version      1.1.0
 // @description  Adds a compact "Copy" button by New Note to copy visible Discussion notes with a header (Ticket, Company, Contact, and Contact Insight when available). SPA-safe with rich+plain clipboard.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
