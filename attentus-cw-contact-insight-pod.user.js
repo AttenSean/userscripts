@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         attentus-cw-contact-insight-pod
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.6.3
-// @description  Ticket-only contact insight under Company pod Email. No-flash stealth scrape. Uses cache when throttled, and never overwrites shown data with a hint. Should only re-run on contact change.
+// @version      1.7.0
+// @description  Ticket-only contact insight under Company pod Email. No-flash stealth scrape. Publishes a stable API for other userscripts (title/type). Uses cache when throttled, and never overwrites shown data with a hint. Should only re-run on contact change.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
 // @match        https://*.myconnectwise.com/*
@@ -112,7 +112,7 @@
     return '';
   }
 
-  /** ---------- stealth CSS (no flash) ---------- */
+  /** ---------- stealth CSS ---------- */
   function ensureStealthStyle() {
     let s = document.getElementById('attentus-stealth-style');
     if (s) return s;
@@ -123,7 +123,7 @@
     return s;
   }
 
-  /** ---------- flyout (stealth with reliable close) ---------- */
+  /** ---------- flyout scrape ---------- */
   let SCRAPE_IN_PROGRESS = false;
   const SCRAPE_THROTTLE_MS = 30 * 60 * 1000; // 30m AFTER a successful scrape
   const lastSuccessfulScrapeById = new Map(); // identity -> ts
@@ -173,15 +173,12 @@
     document.body.classList.add('att-silent-scrape');
 
     const alreadyOpen = !!anyContactDialog();
-    let wnd = null, prevStyle = null;
 
     try {
       if (!alreadyOpen) {
         if (!contactActionEnabled()) return { blocked:true, data:null };
         const ok = await openContactFlyout();
         if (!ok) return { blocked:false, data:null };
-        wnd = anyContactDialog();
-        if (wnd) prevStyle = wnd.getAttribute('style') || '';
       }
 
       await sleep(160); // let labels populate
@@ -197,6 +194,40 @@
       SCRAPE_IN_PROGRESS = false;
     }
   }
+
+  /** ---------- PUBLICATION LAYER (new) ---------- */
+  // A small registry keyed by ticketId
+  const _registry = new Map(); // ticketId -> details
+  const _subs = new Set();     // subscriber callbacks
+
+  function publish(ticketId, details) {
+    if (!ticketId) return;
+    _registry.set(ticketId, details || null);
+
+    // DOM data attributes (easy no-dep consumption)
+    const box = document.getElementById('attentus-contact-insight-box');
+    if (box) {
+      if (details?.title) box.dataset.title = details.title;
+      else delete box?.dataset?.title;
+      if (details?.type) box.dataset.type = details.type;
+      else delete box?.dataset?.type;
+    }
+
+    // Event
+    document.dispatchEvent(new CustomEvent('attentus:contact-insight', { detail: { ticketId, details } }));
+
+    // Subscribers
+    _subs.forEach(fn => {
+      try { fn({ ticketId, details }); } catch {}
+    });
+  }
+
+  // Expose a stable API
+  window.AttentusContactInsight = window.AttentusContactInsight || {
+    get(ticketId) { return ticketId ? (_registry.get(ticketId) || null) : null; },
+    getCurrent()  { const t = getTicketId(); return t ? (_registry.get(t) || null) : null; },
+    subscribe(fn) { if (typeof fn === 'function') { _subs.add(fn); return () => _subs.delete(fn); } return () => {}; }
+  };
 
   /** ---------- UI pod ---------- */
   function ensureInsightBox(afterRow) {
@@ -273,7 +304,7 @@
     return b;
   }
 
-  const hasDataByTicket = new Map(); // ticketId -> boolean (did we render real data?)
+  const hasDataByTicket = new Map(); // ticketId -> boolean
 
   async function renderInsight(details, { blocked=false, throttled=false } = {}) {
     if (!isTicketPage()) { unmountInsightBox(); return false; }
@@ -286,30 +317,33 @@
     const typeRow  = q('[data-field="type"]',  box);
     const badges   = q('[data-field="badges"]',box);
 
-    // helper: do we already show actual values?
     const ticketId = getTicketId();
     const alreadyHasData = hasDataByTicket.get(ticketId) === true;
 
-    // Only clear if we are going to show something substantive or blocked/hint states when we didn't have data yet
-    const allowHint = !alreadyHasData;
+    // wipe prior render
     titleRow.textContent = '';
     typeRow.textContent  = '';
     badges.textContent   = '';
+    box.removeAttribute('data-title');
+    box.removeAttribute('data-type');
+
+    const allowHint = !alreadyHasData;
 
     if (blocked) {
       if (allowHint) {
         titleRow.textContent = 'Select a contact to load insight.';
         titleRow.style.color = '#6b7280';
       }
+      publish(ticketId, null);
       return true;
     }
 
     if (throttled && !details) {
-      // If throttled, try not to overwrite existing content. We'll only show a hint if we had no data.
       if (allowHint) {
         titleRow.textContent = 'Info previously loaded. Click Refresh to re-fetch now.';
         titleRow.style.color = '#6b7280';
       }
+      publish(ticketId, null);
       return true;
     }
 
@@ -318,6 +352,7 @@
         titleRow.textContent = 'Open the contact flyout or click Refresh to load details.';
         titleRow.style.color = '#6b7280';
       }
+      publish(ticketId, null);
       return true;
     }
 
@@ -350,10 +385,14 @@
       }
     } catch {}
     hasDataByTicket.set(ticketId, !!(title || type || email || name));
+
+    // PUBLISH for other scripts
+    publish(ticketId, details);
+
     return true;
   }
 
-  /** ---------- orchestration (identity-first) ---------- */
+  /** ---------- orchestration ---------- */
   const lastRenderedIdentityByTicket = new Map(); // ticketId -> identity
   let isBusy = false;
   let ignoreMutationsUntil = 0;
@@ -380,7 +419,7 @@
     }
 
     if (!force && idUI && lastId && idUI === lastId) return;
-    if (isBusy || SCRAPE_IN_PROGRESS) return;
+    if (isBusy) return;
 
     isBusy = true;
     try {
@@ -393,27 +432,24 @@
         return false;
       };
 
-      // If not forced, attempt cache first
       if (!force && await tryRenderCache()) {
         lastRenderedIdentityByTicket.set(ticketId, idUI);
         hasDataByTicket.set(ticketId, true);
-        ignoreMutationsUntil = Date.now() + 800; // brief mute
+        ignoreMutationsUntil = Date.now() + 800;
         return;
       }
 
       const { blocked, data, throttled } = await scrapeContactDetailsStealth(idUI, { force });
 
-      // If throttled/no data, try cache *now*; only hint if no cache either
       if (throttled && !data) {
         const usedCache = await tryRenderCache();
         if (!usedCache) await renderInsight(null, { throttled:true });
-        lastRenderedIdentityByTicket.set(ticketId, idUI); // lock identity to prevent loop
+        lastRenderedIdentityByTicket.set(ticketId, idUI);
         ignoreMutationsUntil = Date.now() + 800;
         return;
       }
 
       await renderInsight(data, { blocked, throttled:false });
-      // Only lock identity if we actually displayed something (data or blocked message)
       lastRenderedIdentityByTicket.set(ticketId, idUI);
       if (data) hasDataByTicket.set(ticketId, true);
       ignoreMutationsUntil = Date.now() + 800;
@@ -432,18 +468,16 @@
     await maybeRender(true);
   }
 
-  /** ---------- debounced observer (guarded) ---------- */
+  /** ---------- observer & routing ---------- */
   let debounced = null;
   const schedule = (fn, ms = 300) => { if (debounced) clearTimeout(debounced); debounced = setTimeout(() => { debounced=null; fn(); }, ms); };
 
   const mo = new MutationObserver((mlist) => {
-    // Ignore flyout-only chatter and honor ignore window
     if (Date.now() < ignoreMutationsUntil) return;
     const relevant = mlist.some(m => !(m.target && m.target.closest && m.target.closest('.cw-gxt-wnd')));
     if (!relevant) return;
     schedule(() => {
       if (!isTicketPage()) { unmountInsightBox(); return; }
-      // Only react if identity actually changed or we have no data yet
       const tid = getTicketId();
       const idUI = identityFromUI();
       const lastId = lastRenderedIdentityByTicket.get(tid) || '';
@@ -453,7 +487,6 @@
     }, 200);
   });
 
-  /** ---------- route handling & boot ---------- */
   function onRouteChange() {
     if (!isTicketPage()) { unmountInsightBox(); return; }
     until(() => getEmailCell() || getContactButton(), { timeout: 15000 }).then(() => { maybeRender(false); });
