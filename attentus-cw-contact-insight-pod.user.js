@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         attentus-cw-contact-insight-pod
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.7.0
+// @version      1.8.0
 // @description  Ticket-only contact insight under Company pod Email. No-flash stealth scrape. Publishes a stable API for other userscripts (title/type). Uses cache when throttled, and never overwrites shown data with a hint. Should only re-run on contact change.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
@@ -196,7 +196,6 @@
   }
 
   /** ---------- PUBLICATION LAYER (new) ---------- */
-  // A small registry keyed by ticketId
   const _registry = new Map(); // ticketId -> details
   const _subs = new Set();     // subscriber callbacks
 
@@ -204,7 +203,6 @@
     if (!ticketId) return;
     _registry.set(ticketId, details || null);
 
-    // DOM data attributes (easy no-dep consumption)
     const box = document.getElementById('attentus-contact-insight-box');
     if (box) {
       if (details?.title) box.dataset.title = details.title;
@@ -213,16 +211,10 @@
       else delete box?.dataset?.type;
     }
 
-    // Event
     document.dispatchEvent(new CustomEvent('attentus:contact-insight', { detail: { ticketId, details } }));
-
-    // Subscribers
-    _subs.forEach(fn => {
-      try { fn({ ticketId, details }); } catch {}
-    });
+    _subs.forEach(fn => { try { fn({ ticketId, details }); } catch {} });
   }
 
-  // Expose a stable API
   window.AttentusContactInsight = window.AttentusContactInsight || {
     get(ticketId) { return ticketId ? (_registry.get(ticketId) || null) : null; },
     getCurrent()  { const t = getTicketId(); return t ? (_registry.get(t) || null) : null; },
@@ -367,11 +359,17 @@
       const label = document.createElement('strong'); label.textContent = 'Type: ';
       const val = document.createElement('span'); val.textContent = type;
       typeRow.append(label, val);
-      if (decisionish(type)) badges.appendChild(badge('Decision Maker', 'highlight'));
-      if (/\bowner\b/i.test(type)) badges.appendChild(badge('Owner', 'highlight'));
     }
-    if (decisionish(title)) badges.appendChild(badge('Decision Maker', 'highlight'));
-    if (title && /\b(owner|partner|principal)\b/i.test(title)) badges.appendChild(badge('Owner', 'highlight'));
+
+    // ---------- Badge de-dupe (one per intent) ----------
+    const showDecision =
+      decisionish(type) || decisionish(title);
+    const showOwner =
+      (/\bowner\b/i.test(type || '')) || (title && /\b(owner|partner|principal)\b/i.test(title));
+
+    if (showDecision) badges.appendChild(badge('Decision Maker', 'highlight'));
+    if (showOwner)     badges.appendChild(badge('Owner', 'highlight'));
+    // ----------------------------------------------------
 
     if (!title && !type) {
       titleRow.textContent = 'No Job Title/Type found for this contact.';
