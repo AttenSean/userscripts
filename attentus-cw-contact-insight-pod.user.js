@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         attentus-cw-contact-insight-pod
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.8.0
+// @version      1.10.1
 // @description  Ticket-only contact insight under Company pod Email. No-flash stealth scrape. Publishes a stable API for other userscripts (title/type). Uses cache when throttled, and never overwrites shown data with a hint. Should only re-run on contact change.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
@@ -58,17 +58,14 @@
   const storageKeyFor = ({ email, ticketId, name }) =>
     `${STORAGE_PREFIX}${(email || '').toLowerCase() || `t-${ticketId || ''}|n-${(name || '').toLowerCase()}`}`;
 
-  /** ---------- heuristics ---------- */
-  const decisionish = (s) => s && ['owner','decision','decision-maker','decision maker','primary decision','signatory','vp','c-suite','ceo','cto','cfo','coo','president','principal'].some(k => s.toLowerCase().includes(k));
-
   /** ---------- contact button state ---------- */
   function getContactButton() { return qa('.cw_ToolbarButton_User').find(el => vis(el)) || null; }
   function contactActionEnabled() {
     const btn = getContactButton(); if (!btn) return false;
     const inner = q('.mm_button', btn);
-    const tabBlocked  = inner && inner.getAttribute('tabindex') === '-1';
-    const ariaBlocked = (btn.getAttribute('aria-disabled') === 'true') || (inner && inner.getAttribute('aria-disabled') === 'true');
-    const classBlocked= btn.className && /\bdisabled\b/i.test(btn.className);
+    const tabBlocked   = inner && inner.getAttribute('tabindex') === '-1';
+    const ariaBlocked  = (btn.getAttribute('aria-disabled') === 'true') || (inner && inner.getAttribute('aria-disabled') === 'true');
+    const classBlocked = btn.className && /\bdisabled\b/i.test(btn.className);
     return !(tabBlocked || ariaBlocked || classBlocked);
   }
 
@@ -195,26 +192,20 @@
     }
   }
 
-  /** ---------- PUBLICATION LAYER (new) ---------- */
-  const _registry = new Map(); // ticketId -> details
-  const _subs = new Set();     // subscriber callbacks
-
+  /** ---------- PUBLICATION LAYER ---------- */
+  const _registry = new Map();
+  const _subs = new Set();
   function publish(ticketId, details) {
     if (!ticketId) return;
     _registry.set(ticketId, details || null);
-
     const box = document.getElementById('attentus-contact-insight-box');
     if (box) {
-      if (details?.title) box.dataset.title = details.title;
-      else delete box?.dataset?.title;
-      if (details?.type) box.dataset.type = details.type;
-      else delete box?.dataset?.type;
+      if (details?.title) box.dataset.title = details.title; else delete box.dataset.title;
+      if (details?.type)  box.dataset.type  = details.type;  else delete box.dataset.type;
     }
-
     document.dispatchEvent(new CustomEvent('attentus:contact-insight', { detail: { ticketId, details } }));
     _subs.forEach(fn => { try { fn({ ticketId, details }); } catch {} });
   }
-
   window.AttentusContactInsight = window.AttentusContactInsight || {
     get(ticketId) { return ticketId ? (_registry.get(ticketId) || null) : null; },
     getCurrent()  { const t = getTicketId(); return t ? (_registry.get(t) || null) : null; },
@@ -287,12 +278,28 @@
     btn.style.display = v ? 'inline-block' : 'none';
     btn.disabled = !v;
   }
-  function badge(text, intent='neutral') {
+
+  // Base badge + per-kind palette
+  function badge(text, kind='neutral') {
     const b = document.createElement('span');
     b.textContent = text;
-    Object.assign(b.style, { fontSize:'11px', padding:'2px 6px', borderRadius:'999px', border:'1px solid', userSelect:'none' });
-    if (intent==='highlight') Object.assign(b.style, { background:'#fff7ed', borderColor:'#fdba74', color:'#9a3412', fontWeight:'600' });
-    else Object.assign(b.style, { background:'#eef2ff', borderColor:'#c7d2fe', color:'#3730a3' });
+    Object.assign(b.style, {
+      fontSize:'11px',
+      padding:'2px 6px',
+      borderRadius:'999px',
+      border:'1px solid',
+      fontWeight:'600',
+      userSelect:'none'
+    });
+    // palettes (light bg, mid border, dark text) — accessible contrast
+    const palettes = {
+      decision: { bg:'#fff7ed', border:'#fdba74', text:'#9a3412' }, // orange
+      owner:    { bg:'#ecfeff', border:'#67e8f9', text:'#155e75' }, // cyan
+      selective:{ bg:'#f0fdf4', border:'#86efac', text:'#14532d' }, // green
+      neutral:  { bg:'#eef2ff', border:'#c7d2fe', text:'#3730a3' }  // indigo
+    };
+    const p = palettes[kind] || palettes.neutral;
+    Object.assign(b.style, { background:p.bg, borderColor:p.border, color:p.text });
     return b;
   }
 
@@ -350,6 +357,7 @@
 
     const { title, type, email, name } = details;
 
+    // Raw fields (no inference)
     if (title) {
       const label = document.createElement('strong'); label.textContent = 'Job Title: ';
       const val = document.createElement('span'); val.textContent = title;
@@ -361,15 +369,21 @@
       typeRow.append(label, val);
     }
 
-    // ---------- Badge de-dupe (one per intent) ----------
-    const showDecision =
-      decisionish(type) || decisionish(title);
-    const showOwner =
-      (/\bowner\b/i.test(type || '')) || (title && /\b(owner|partner|principal)\b/i.test(title));
+    // ---------- Badges ONLY from Type ----------
+    const t = type || '';
+    const hasAOwner       = /\bA\.\s*Owner\b/i.test(t);
+    const hasBPrimaryDM   = /\bB\.\s*Primary\s+Decision\s+Maker\b/i.test(t);
+    const hasCSecondaryDM = /\bC\.\s*Secondary\s+Decision\s+Maker\b/i.test(t);
+    const hasSelective    = /\bS\.\s*Selective\s+Approver\b/i.test(t) || /\bSelective\s+Approver\b/i.test(t);
 
-    if (showDecision) badges.appendChild(badge('Decision Maker', 'highlight'));
-    if (showOwner)     badges.appendChild(badge('Owner', 'highlight'));
-    // ----------------------------------------------------
+    const showDecision = hasAOwner || hasBPrimaryDM || hasCSecondaryDM;
+    const showOwner    = hasAOwner;
+    const showSelective= hasSelective;
+
+    if (showDecision) badges.appendChild(badge('Decision Maker', 'decision'));
+    if (showOwner)     badges.appendChild(badge('Owner', 'owner'));
+    if (showSelective) badges.appendChild(badge('Selective Approver', 'selective'));
+    // -------------------------------------------
 
     if (!title && !type) {
       titleRow.textContent = 'No Job Title/Type found for this contact.';
@@ -384,14 +398,12 @@
     } catch {}
     hasDataByTicket.set(ticketId, !!(title || type || email || name));
 
-    // PUBLISH for other scripts
     publish(ticketId, details);
-
     return true;
   }
 
   /** ---------- orchestration ---------- */
-  const lastRenderedIdentityByTicket = new Map(); // ticketId -> identity
+  const lastRenderedIdentityByTicket = new Map();
   let isBusy = false;
   let ignoreMutationsUntil = 0;
 
@@ -421,7 +433,6 @@
 
     isBusy = true;
     try {
-      // Cache path when throttled or as a fast path
       const tryRenderCache = async () => {
         if (/\S+@\S+/.test(idUI)) {
           const cached = await GM.getValue(storageKeyFor({ email:idUI, ticketId })) || null;
