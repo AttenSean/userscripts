@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         attentus-cw-tab-title-normalize
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.9.0
-// @description  Ticket tabs: “#123456 - Summary - Company” (company toggleable). Service Board tabs: set to the active View name (toggleable). Time Entry tabs: “#123456 - Time Entry” when possible.
+// @version      2.1.0
+// @description  Ticket tabs: “#123456 - Summary - Company” (company toggleable). Service Board tabs: set to the active View name (toggleable). Time Entry tabs: “#123456 - Time Entry” when possible. More reliable in background tabs; listens to the View combobox; responds to Open-Views event.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
 // @match        https://*.myconnectwise.com/*
@@ -19,7 +19,7 @@
 (() => {
   'use strict';
 
-  // -------------------- storage helpers (VM/TM + fallback) --------------------
+  // -------------------- storage helpers --------------------
   async function gmGet(key, defVal) {
     try { if (typeof GM !== 'undefined' && GM.getValue) return await GM.getValue(key, defVal); } catch {}
     try { if (typeof GM_getValue === 'function') return GM_getValue(key, defVal); } catch {}
@@ -33,11 +33,17 @@
   }
 
   // -------------------- settings --------------------
-  const K_COMPANY   = 'att_tab_title_add_company';        // boolean
-  const K_SB_RENAME = 'att_tab_title_rename_serviceboard';// boolean
-  const K_TE_TICKET = 'att_tab_title_timeentry_ticket';   // boolean
+  const K_COMPANY   = 'att_tab_title_add_company';
+  const K_SB_RENAME = 'att_tab_title_rename_serviceboard';
+  const K_TE_TICKET = 'att_tab_title_timeentry_ticket';
 
   const DEFAULTS = { [K_COMPANY]: true, [K_SB_RENAME]: true, [K_TE_TICKET]: true };
+  const SETTINGS = { ...DEFAULTS };
+  let settingsReady = (async () => {
+    SETTINGS[K_COMPANY]   = !!(await gmGet(K_COMPANY,   DEFAULTS[K_COMPANY]));
+    SETTINGS[K_SB_RENAME] = !!(await gmGet(K_SB_RENAME, DEFAULTS[K_SB_RENAME]));
+    SETTINGS[K_TE_TICKET] = !!(await gmGet(K_TE_TICKET, DEFAULTS[K_TE_TICKET]));
+  })();
 
   // -------------------- tiny utils --------------------
   const ORIGINAL_TITLE = document.title;
@@ -55,10 +61,8 @@
 
   // -------------------- page kind detection --------------------
   function isServiceBoardList() {
-    // presence of the grid is the most reliable indicator
     return !!document.querySelector('table.srboard-grid tr.cw-ml-row');
   }
-
   function isTimeEntryPage() {
     const href = location.href.toLowerCase();
     if (/\btime[_-]?entry\b/.test(href) || /timeentry/.test(href)) return true;
@@ -93,9 +97,7 @@
     }
     return '';
   }
-  function getTicketId() {
-    return ticketIdFromUrl() || ticketIdFromDom() || '';
-  }
+  function getTicketId() { return ticketIdFromUrl() || ticketIdFromDom() || ''; }
 
   function getSummary() {
     const input =
@@ -111,7 +113,6 @@
     }
     return '';
   }
-
   function getCompany() {
     const labels = document.querySelectorAll('[id$="-label"], .gwt-Label, .mm_label, .GMDB3DUBORG, .GMDB3DUBBPG');
     for (const el of labels) {
@@ -124,7 +125,7 @@
     return '';
   }
 
-  // ----- Time Entry: resolve ticket from Charge To (matches our other scripts) -----
+  // ----- Time Entry: resolve ticket from Charge To -----
   function parseTicketId(raw) { const m = String(raw || '').match(/(\d{5,})/); return m ? m[1] : null; }
   function getTicketIdFromChargeToOnce() {
     const sel = 'input.cw_ChargeToTextBox, input[id$="ChargeToTextBox"], input.GKV5JQ3DMVF.cw_ChargeToTextBox';
@@ -145,64 +146,111 @@
 
   // -------------------- Service Board View name --------------------
   function getServiceBoardViewName() {
-    // Look for the dropdown container, then the input with the current value (placeholder often "(No View)")
     const root = document.querySelector('.cw-toolbar-view-dropdown') || document;
     const inp = root.querySelector('input.cw_CwComboBox') || root.querySelector('input[placeholder*="view" i]');
     const v = (inp && (inp.value || inp.getAttribute('value'))) || '';
     return norm(v);
   }
 
+  // -------------------- scheduler (background-safe) --------------------
+  const schedule = (() => {
+    let pending = false, lastRun = 0;
+    const MIN_MS = 120;
+
+    const run = () => {
+      pending = false;
+      const now = Date.now();
+      if (now - lastRun < MIN_MS) {
+        pending = true;
+        setTimeout(run, MIN_MS);
+        return;
+      }
+      lastRun = now;
+      updateTitle();
+    };
+
+    return () => {
+      if (pending) return;
+      pending = true;
+
+      // Hidden tabs: rIC/rAF stall — use setTimeout
+      if (document.hidden) { setTimeout(run, 0); return; }
+
+      if ('requestIdleCallback' in window) requestIdleCallback(run, { timeout: 400 });
+      else if ('requestAnimationFrame' in window) requestAnimationFrame(run);
+      else setTimeout(run, 0);
+    };
+  })();
+
+  // Background poller to catch CW rehydration while hidden
+  let hiddenPoller = null;
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      if (!hiddenPoller) hiddenPoller = setInterval(() => updateTitle(), 1500);
+    } else {
+      if (hiddenPoller) { clearInterval(hiddenPoller); hiddenPoller = null; }
+      schedule();
+    }
+  }, { passive: true });
+
+  // Open-Views integration: refresh title immediately after a view is applied
+  window.addEventListener('att:openviews-applied', () => schedule(), { passive: true });
+
+  const sig = (o) => Object.values(o).map(v => String(v ?? '')).join('|');
+
+  function pageSnapshot() {
+    const ticketId = getTicketId();
+    if (ticketId) {
+      return { kind: 'ticket', id: ticketId, summary: getSummary(), company: getCompany(), url: location.pathname + location.search };
+    }
+    if (isTimeEntryPage()) {
+      const tid = getTicketIdFromChargeToOnce() || ticketIdFromUrl() || '';
+      return { kind: 'time', id: tid, url: location.pathname + location.search };
+    }
+    if (isServiceBoardList()) {
+      return { kind: 'board', view: getServiceBoardViewName(), url: location.pathname + location.search };
+    }
+    return { kind: 'other', url: location.pathname + location.search };
+  }
+
+  let lastSnapshotSig = '';
+
   // -------------------- title update engine --------------------
-  let rafTick = false;
   async function updateTitle() {
-    if (rafTick) return;
-    rafTick = true;
-    requestAnimationFrame(async () => {
-      rafTick = false;
+    const snap = pageSnapshot();
+    const snapSig = sig(snap);
+    if (snapSig === lastSnapshotSig) return;
+    lastSnapshotSig = snapSig;
 
-      const addCompany   = !!(await gmGet(K_COMPANY,   DEFAULTS[K_COMPANY]));
-      const sbRename     = !!(await gmGet(K_SB_RENAME, DEFAULTS[K_SB_RENAME]));
-      const teUseTicket  = !!(await gmGet(K_TE_TICKET, DEFAULTS[K_TE_TICKET]));
+    await settingsReady;
 
-      // 1) Ticket pages
-      const id = getTicketId();
-      if (id) {
-        const next = titleParts(id, getSummary(), getCompany(), addCompany);
-        if (next && document.title !== next) document.title = next;
+    if (snap.kind === 'ticket') {
+      const next = titleParts(snap.id, snap.summary, snap.company, !!SETTINGS[K_COMPANY]);
+      if (next && document.title !== next) document.title = next;
+      return;
+    }
+
+    if (snap.kind === 'time') {
+      let title = 'Time Entry';
+      if (SETTINGS[K_TE_TICKET] && snap.id) title = `#${snap.id} - Time Entry`;
+      if (document.title !== title) document.title = title;
+      return;
+    }
+
+    if (snap.kind === 'board') {
+      if (SETTINGS[K_SB_RENAME]) {
+        const view = snap.view && snap.view.trim();
+        if (view && document.title !== view) document.title = view;
         return;
       }
+    }
 
-      // 2) Time Entry pages
-      if (isTimeEntryPage()) {
-        let title = 'Time Entry';
-        if (teUseTicket) {
-          const fromCharge = getTicketIdFromChargeToOnce();
-          const fallbackUrl = ticketIdFromUrl();
-          const tid = fromCharge || fallbackUrl;
-          if (tid) title = `#${tid} - Time Entry`;
-        }
-        if (document.title !== title) document.title = title;
-        return;
+    // Unknown: restore original if necessary
+    if (!isServiceBoardList()) {
+      if (document.title !== ORIGINAL_TITLE && !document.title) {
+        document.title = ORIGINAL_TITLE;
       }
-
-      // 3) Service Board (ticket queue) list pages
-      if (isServiceBoardList()) {
-        if (sbRename) {
-          const view = getServiceBoardViewName();
-          if (view && document.title !== view) {
-            document.title = view; // set to active View name
-          }
-          return;
-        }
-      }
-
-      // 4) Fallback: keep original for unknown pages
-      if (!isServiceBoardList()) {
-        if (document.title !== ORIGINAL_TITLE && !document.title) {
-          document.title = ORIGINAL_TITLE;
-        }
-      }
-    });
+    }
   }
 
   function attachFieldListeners() {
@@ -211,46 +259,39 @@
       'input.cw_summary',
       'input.cw_company',
       'input[placeholder*="summary" i]',
-      'input[placeholder*="company" i]'
+      'input[placeholder*="company" i]',
+      // Listen to the Service Board View combobox directly
+      '.cw-toolbar-view-dropdown input.cw_CwComboBox, .cw-toolbar-view-dropdown input[type="text"]'
     ];
     document.querySelectorAll(sels.join(',')).forEach(el => {
-      el.removeEventListener('input', updateTitle);
-      el.removeEventListener('change', updateTitle);
-      el.addEventListener('input', updateTitle, { passive: true });
-      el.addEventListener('change', updateTitle, { passive: true });
+      ['input','change','keyup','keydown','blur'].forEach(ev => {
+        el.removeEventListener(ev, schedule);
+        el.addEventListener(ev, schedule, { passive: true });
+      });
     });
   }
 
-  // -------------------- Settings UI + placement --------------------
+  // -------------------- Settings UI + placement (unchanged) --------------------
   const BTN_ID = 'cw-tabtitle-settings-btn';
   const TD_ID  = 'cw-tabtitle-settings-td';
 
   function buildSettingsButton() {
     const b = document.createElement('button');
-    b.id = BTN_ID;
-    b.type = 'button';
-    b.title = 'Tab Title Settings';
-    b.textContent = '⚙︎';
+    b.id = BTN_ID; b.type = 'button'; b.title = 'Tab Title Settings'; b.textContent = '⚙︎';
     Object.assign(b.style, {
-      padding: '3px 7px',
-      borderRadius: '6px',
-      border: '1px solid rgba(0,0,0,.2)',
-      background: '#fff',
-      cursor: 'pointer',
-      height: '26px',
-      lineHeight: '18px',
-      font: '14px system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif',
-      userSelect: 'none',
-      whiteSpace: 'nowrap'
+      padding: '3px 7px', borderRadius: '6px', border: '1px solid rgba(0,0,0,.2)', background: '#fff',
+      cursor: 'pointer', height: '26px', lineHeight: '18px',
+      font: '14px system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif', userSelect: 'none', whiteSpace: 'nowrap'
     });
     b.addEventListener('click', openSettings);
     return b;
   }
 
   async function openSettings() {
-    const addCompany  = !!(await gmGet(K_COMPANY,   DEFAULTS[K_COMPANY]));
-    const sbRename    = !!(await gmGet(K_SB_RENAME, DEFAULTS[K_SB_RENAME]));
-    const teUseTicket = !!(await gmGet(K_TE_TICKET, DEFAULTS[K_TE_TICKET]));
+    await settingsReady;
+    const addCompany  = !!SETTINGS[K_COMPANY];
+    const sbRename    = !!SETTINGS[K_SB_RENAME];
+    const teUseTicket = !!SETTINGS[K_TE_TICKET];
 
     const overlay = document.createElement('div');
     Object.assign(overlay.style, { position: 'fixed', inset: 0, background: 'rgba(0,0,0,.35)', zIndex: 2147483646 });
@@ -286,35 +327,40 @@
 
     modal.querySelector('#att_cancel').onclick = () => overlay.remove();
     modal.querySelector('#att_save').onclick = async () => {
-      await gmSet(K_COMPANY,   !!modal.querySelector('#att_cc').checked);
-      await gmSet(K_SB_RENAME, !!modal.querySelector('#att_sb').checked);
-      await gmSet(K_TE_TICKET, !!modal.querySelector('#att_te').checked);
+      const newAddCompany  = !!modal.querySelector('#att_cc').checked;
+      const newSbRename    = !!modal.querySelector('#att_sb').checked;
+      const newTeUseTicket = !!modal.querySelector('#att_te').checked;
+
+      await gmSet(K_COMPANY,   newAddCompany);
+      await gmSet(K_SB_RENAME, newSbRename);
+      await gmSet(K_TE_TICKET, newTeUseTicket);
+
+      SETTINGS[K_COMPANY]   = newAddCompany;
+      SETTINGS[K_SB_RENAME] = newSbRename;
+      SETTINGS[K_TE_TICKET] = newTeUseTicket;
+      settingsReady = Promise.resolve();
+
       overlay.remove();
-      updateTitle();
+      schedule();
     };
   }
 
   function ensureSettingsPlaced() {
     if (document.getElementById(BTN_ID)) return true;
 
-    // Prefer: immediately left of Quick-Nav ticket input (our userscript)
     const quickNavInput = document.getElementById('cw-ticket-input');
     if (quickNavInput) {
       const qTd = quickNavInput.closest('td');
       const qTr = qTd && qTd.closest('tr');
       if (qTd && qTr) {
         const newTd = document.createElement('td');
-        newTd.id = TD_ID;
-        newTd.align = 'left';
-        newTd.style.verticalAlign = 'middle';
-        newTd.style.paddingLeft = '8px';
+        newTd.id = TD_ID; newTd.align = 'left'; newTd.style.verticalAlign = 'middle'; newTd.style.paddingLeft = '8px';
         newTd.appendChild(buildSettingsButton());
-        qTr.insertBefore(newTd, qTd); // left of Quick-Nav
+        qTr.insertBefore(newTd, qTd);
         return true;
       }
     }
 
-    // Fallback: immediately left of the native "Tickets" label/button
     let ticketsLabel = Array.from(document.querySelectorAll('.GMDB3DUBORG, [class*="ORG"]'))
       .find(el => norm(el.textContent).toLowerCase() === 'tickets');
     if (!ticketsLabel) ticketsLabel = document.querySelector('.cw_CwTextMenuButton .GMDB3DUBORG');
@@ -323,12 +369,9 @@
     const tTr = tTd && tTd.closest('tr');
     if (tTd && tTr) {
       const newTd = document.createElement('td');
-      newTd.id = TD_ID;
-      newTd.align = 'left';
-      newTd.style.verticalAlign = 'middle';
-      newTd.style.paddingLeft = '8px';
+      newTd.id = TD_ID; newTd.align = 'left'; newTd.style.verticalAlign = 'middle'; newTd.style.paddingLeft = '8px';
       newTd.appendChild(buildSettingsButton());
-      tTr.insertBefore(newTd, tTd); // left of Tickets
+      tTr.insertBefore(newTd, tTd);
       return true;
     }
 
@@ -337,35 +380,42 @@
 
   // -------------------- observers / SPA hooks --------------------
   const mo = new MutationObserver((muts) => {
-    let relevant = false;
     for (const m of muts) {
       if (m.type === 'childList') {
-        relevant = true; break;
+        attachFieldListeners();
+        ensureSettingsPlaced();
+        schedule();
+        return;
       }
-      if (m.type === 'attributes' || m.type === 'characterData') {
-        relevant = true; break;
+      if (m.type === 'attributes') {
+        const name = m.attributeName || '';
+        if (name === 'value' || name === 'placeholder' || name === 'title' || name === 'aria-activedescendant') {
+          attachFieldListeners();
+          ensureSettingsPlaced();
+          schedule();
+          return;
+        }
       }
-    }
-    if (relevant) {
-      attachFieldListeners();
-      ensureSettingsPlaced();
-      updateTitle();
     }
   });
-  mo.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
+  mo.observe(document.body || document.documentElement, {
+    subtree: true,
+    childList: true,
+    attributes: true,
+    attributeFilter: ['value', 'placeholder', 'title', 'aria-activedescendant']
+  });
 
   ['pushState', 'replaceState'].forEach(k => {
     const orig = history[k];
     history[k] = function () {
       const r = orig.apply(this, arguments);
-      queueMicrotask(() => { attachFieldListeners(); ensureSettingsPlaced(); updateTitle(); });
+      queueMicrotask(() => { attachFieldListeners(); ensureSettingsPlaced(); schedule(); });
       return r;
     };
   });
-  window.addEventListener('popstate', () => { attachFieldListeners(); ensureSettingsPlaced(); updateTitle(); });
+  window.addEventListener('popstate', () => { attachFieldListeners(); ensureSettingsPlaced(); schedule(); });
+  window.addEventListener('focus', () => schedule(), { passive: true });
 
   // -------------------- kick off --------------------
-  attachFieldListeners();
-  ensureSettingsPlaced();
-  updateTitle();
+  (async () => { await settingsReady; attachFieldListeners(); ensureSettingsPlaced(); schedule(); })();
 })();
