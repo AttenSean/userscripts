@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         attentus-cw-ticket-quick-triage
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      2.17.0
-// @description  Quick Triage bar with Junk, Spam/Phishing, Invoice, and MAC (dropdown). MAC sets Board/Type/Subtype/MAC Ticket Type? (UDF) and, if enabled, Summary. Spam/Phishing also sets SLA Low/Low (Priority 4 fallback) and summary. Invoice clears Contact/Phone/Email. Shift+Click any triage button to apply + Save & Close (opt-in). SPA-safe. Hides on Project tickets.
+// @version      2.18.0
+// @description  Quick Triage bar with Junk, Spam/Phishing, Invoice, and MAC (dropdown). Per-action Save pop-up settings, summary settings, and Shift+Click auto Save & Close. Invoice clears Contact/Phone/Email. SPA-safe, waits for dependent list refresh after Board changes. Hides on Project tickets.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
 // @match        https://*.myconnectwise.com/*
@@ -44,7 +44,9 @@
 
   // ---------- persistent settings ----------
   const PREF_KEY_SHIFT_AUTOSAVE = 'att_cw_shiftAutoSave';
-  const PREF_KEY_SUMMARY_FLAGS  = 'att_cw_triage_summaryFlags'; // { spam: true, invoice: false, mac: true }
+  const PREF_KEY_SUMMARY_FLAGS  = 'att_cw_triage_summaryFlags'; // { spam:true, invoice:false (hidden), mac:true, junk:false (hidden) }
+  const PREF_KEY_SAVE_PROMPTS   = 'att_cw_triage_savePrompts';  // { junk:true, spam:true, invoice:true, mac:false }
+
   async function getPref(key, defVal) {
     try { if (window.GM?.getValue) return await window.GM.getValue(key, defVal); } catch {}
     try { const raw = localStorage.getItem(key); return raw == null ? defVal : JSON.parse(raw); } catch {}
@@ -54,11 +56,18 @@
     try { if (window.GM?.setValue) await window.GM.setValue(key, val); } catch {}
     try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
   }
+
+  const defaultSummaryFlags = { spam:true, invoice:false, mac:true, junk:false };
+  const defaultSavePrompts  = { junk:true, spam:true, invoice:true, mac:false };
+
   let shiftAutoSaveEnabled = false;
-  let summaryFlags = { spam: true, invoice: false, mac: true }; // invoice toggle hidden by design
+  let summaryFlags = { ...defaultSummaryFlags };
+  let savePrompts  = { ...defaultSavePrompts };
+
   (async () => {
     shiftAutoSaveEnabled = await getPref(PREF_KEY_SHIFT_AUTOSAVE, false);
-    summaryFlags = await getPref(PREF_KEY_SUMMARY_FLAGS, summaryFlags);
+    summaryFlags = { ...defaultSummaryFlags, ...(await getPref(PREF_KEY_SUMMARY_FLAGS, defaultSummaryFlags)) };
+    savePrompts  = { ...defaultSavePrompts,  ...(await getPref(PREF_KEY_SAVE_PROMPTS,  defaultSavePrompts )) };
   })();
 
   // ---------- input helpers ----------
@@ -316,28 +325,6 @@
     }
   }
 
-  // ---------- Board-change status watcher ----------
-  async function waitStatusRefresh(prevStatus) {
-    const statusInput = await until(() => $('input.cw_status'), { tries: 20, delay: 40 });
-    if (!statusInput) return false;
-    let resolved = false;
-    const done = () => { resolved = true; };
-    const prev = norm(prevStatus || '');
-    const onChange = () => {
-      const val = norm(statusInput.value || '');
-      if (val && val !== prev) done();
-    };
-    statusInput.addEventListener('change', onChange, { once: true, passive: true });
-    for (let i = 0; i < 30 && !resolved; i++) {
-      const val = norm(statusInput.value || '');
-      if (val && val !== prev) { resolved = true; break; }
-      await sleep(40);
-    }
-    statusInput.removeEventListener('change', onChange);
-    if (resolved) await sleep(100);
-    return resolved;
-  }
-
   // ---------- clear helpers (Invoice) ----------
   function dispatchAll(el) {
     if (!el) return;
@@ -380,20 +367,89 @@
     return norm(summary.value) === norm(newText);
   }
 
+  // ---------- action dialog (with Shift-click toggle) ----------
+  function showActionDialog(title, { onSave, onSaveClose, onRevert, onDismiss }) {
+    const overlay = document.createElement('div');
+    Object.assign(overlay.style, {
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,.38)', zIndex: 2147483645,
+      display: 'flex', alignItems: 'center', justifyContent: 'center'
+    });
+    const card = document.createElement('div');
+    Object.assign(card.style, {
+      background: '#fff', borderRadius: '12px', minWidth: '360px', maxWidth: '580px',
+      padding: '16px', boxShadow: '0 10px 30px rgba(0,0,0,.25)',
+      font: '14px system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif'
+    });
+    const h = document.createElement('div');
+    h.textContent = title;
+    Object.assign(h.style, { fontSize: '15px', fontWeight: 600, marginBottom: '8px' });
+
+    const blurb = document.createElement('div');
+    blurb.innerHTML = `<div style="font-size:12px;color:#4B5563;margin:6px 0 10px;">
+      <strong>Tip:</strong> <kbd>Shift</kbd> + Click any triage button to <em>apply</em> and <em>Save & Close</em> immediately (no prompt).
+    </div>`;
+
+    const row = document.createElement('div');
+    Object.assign(row.style, { display: 'flex', gap: '8px', justifyContent: 'flex-end' });
+
+    function mkBtn(label, action, primary=false) {
+      const b = document.createElement('button');
+      b.textContent = label;
+      Object.assign(b.style, {
+        borderRadius: '10px', padding: '8px 12px', cursor: 'pointer',
+        border: '1px solid', fontWeight: 600
+      });
+      if (primary) Object.assign(b.style, { background: '#111827', color: '#fff', borderColor: '#111827' });
+      else Object.assign(b.style, { background: '#fff', color: '#111827', borderColor: '#D1D5DB' });
+      b.addEventListener('click', () => { action?.(); overlay.remove(); });
+      return b;
+    }
+
+    // Order: Dismiss (keep changes), Cancel (revert), Save & Close, Save
+    row.append(
+      mkBtn('Dismiss (keep changes)', () => onDismiss?.(), false),
+      mkBtn('Cancel (revert)',        () => onRevert?.(), false),
+      mkBtn('Save & Close',           () => onSaveClose?.(), false),
+      mkBtn('Save',                   () => onSave?.(), true)
+    );
+
+    card.append(h, blurb, row);
+    overlay.appendChild(card);
+    document.body.appendChild(overlay);
+  }
+
+  // ---------- Board-change status watcher ----------
+  async function waitStatusRefresh(prevStatus) {
+    const statusInput = await until(() => $('input.cw_status'), { tries: 20, delay: 40 });
+    if (!statusInput) return false;
+
+    let resolved = false;
+    const prev = norm(prevStatus || '');
+    const onChange = () => {
+      const val = norm(statusInput.value || '');
+      if (val && val !== prev) resolved = true;
+    };
+    statusInput.addEventListener('change', onChange, { once: true, passive: true });
+
+    for (let i = 0; i < 30 && !resolved; i++) {
+      const val = norm(statusInput.value || '');
+      if (val && val !== prev) { resolved = true; break; }
+      await sleep(40);
+    }
+    statusInput.removeEventListener('change', onChange);
+    if (resolved) await sleep(100);
+    return resolved;
+  }
+
   // ---------- actions ----------
   async function applySpamPhish({ showPrompt = true, autoSaveClose = false } = {}) {
     const prev = captureValues();
 
-    // Board -> Help Desk (if not already)
+    // Board: Help Desk (if not already)
     const boardInput = await until(() => $('input.cw_serviceBoard'), { tries: 40, delay: 60 });
-    let boardChanged = false;
-    if (boardInput) {
-      const curr = norm(boardInput.value);
-      if (!curr.includes('help desk')) {
-        const prevStatus = $('input.cw_status')?.value || '';
-        const setOk = await commitComboOnElement(boardInput, 'Help Desk');
-        if (setOk) { boardChanged = true; await waitStatusRefresh(prevStatus); }
-      }
+    if (boardInput && !norm(boardInput.value).includes('help desk')) {
+      const prevStatus = $('input.cw_status')?.value || '';
+      if (await commitComboOnElement(boardInput, 'Help Desk')) await waitStatusRefresh(prevStatus);
     }
 
     // Status / Type / Subtype
@@ -427,35 +483,27 @@
       await commitSummary(`Spam/Phishing${contact ? ` (${contact})` : ''}`);
     }
 
-    if (autoSaveClose) {
-      await sleep(120);
-      if (!clickSaveAndClose()) toast('Save & Close button not found');
-      return;
+    if (autoSaveClose) { await sleep(120); if (!clickSaveAndClose()) toast('Save & Close button not found'); return; }
+
+    if (showPrompt) {
+      showActionDialog('Apply Spam/Phishing triage — Save changes?', {
+        onSave:      async () => { await sleep(120); if (!clickSave()) toast('Save button not found'); },
+        onSaveClose: async () => { await sleep(120); if (!clickSaveAndClose()) toast('Save & Close button not found'); },
+        onRevert:    async () => { await restoreValues(prev); toast('Reverted changes'); },
+        onDismiss:   () => {} // keep changes, do nothing
+      });
     }
-
-    showPrompt && showActionDialog(
-      'Apply Spam/Phishing triage — Save changes?',
-      async () => { await sleep(120); if (!clickSave()) toast('Save button not found'); },
-      async () => { await sleep(120); if (!clickSaveAndClose()) toast('Save & Close button not found'); },
-      async () => { await restoreValues(prev); toast('Reverted changes'); }
-    );
-
     toast('Spam/Phishing defaults applied');
   }
 
   async function applyInvoice({ showPrompt = true, autoSaveClose = false } = {}) {
     const prev = captureValues();
 
-    // Board -> Help Desk (if not already)
+    // Board: Help Desk (if not already)
     const boardInput = await until(() => $('input.cw_serviceBoard'), { tries: 40, delay: 60 });
-    let boardChanged = false;
-    if (boardInput) {
-      const curr = norm(boardInput.value);
-      if (!curr.includes('help desk')) {
-        const prevStatus = $('input.cw_status')?.value || '';
-        const setOk = await commitComboOnElement(boardInput, 'Help Desk');
-        if (setOk) { boardChanged = true; await waitStatusRefresh(prevStatus); }
-      }
+    if (boardInput && !norm(boardInput.value).includes('help desk')) {
+      const prevStatus = $('input.cw_status')?.value || '';
+      if (await commitComboOnElement(boardInput, 'Help Desk')) await waitStatusRefresh(prevStatus);
     }
 
     // Status / Type / Subtype
@@ -480,31 +528,25 @@
       if (!tierOk) toast('Could not set Ticket Tier? to "N/A - Cancelled Ticket"');
     }
 
-    // Clear Contact, Phone, Email (keeps Company)
+    // Clear Contact/Phone/Email (leave Company)
     clearContactPhoneEmail_BakedIn();
 
-    // Summary (hidden toggle; default false)
-    if (summaryFlags.invoice) {
-      await commitSummary('Invoice');
+    // (Summary toggle hidden; default false)
+    if (summaryFlags.invoice) await commitSummary('Invoice');
+
+    if (autoSaveClose) { await sleep(120); if (!clickSaveAndClose()) toast('Save & Close button not found'); return; }
+
+    if (showPrompt) {
+      showActionDialog('Apply Invoice triage — Save changes?', {
+        onSave:      async () => { await sleep(120); if (!clickSave()) toast('Save button not found'); },
+        onSaveClose: async () => { await sleep(120); if (!clickSaveAndClose()) toast('Save & Close button not found'); },
+        onRevert:    async () => { await restoreValues(prev); toast('Reverted changes'); },
+        onDismiss:   () => {}
+      });
     }
-
-    if (autoSaveClose) {
-      await sleep(120);
-      if (!clickSaveAndClose()) toast('Save & Close button not found');
-      return;
-    }
-
-    showPrompt && showActionDialog(
-      'Apply Invoice triage — Save changes?',
-      async () => { await sleep(120); if (!clickSave()) toast('Save button not found'); },
-      async () => { await sleep(120); if (!clickSaveAndClose()) toast('Save & Close button not found'); },
-      async () => { await restoreValues(prev); toast('Reverted changes'); }
-    );
-
     toast('Invoice defaults applied');
   }
 
-  // NEW: Junk action (board only, as before)
   async function applyJunk({ showPrompt = true, autoSaveClose = false } = {}) {
     const boardInput = await until(() => $('input.cw_serviceBoard'), { tries: 40, delay: 60 });
     if (!boardInput) { toast('Board input not found'); return; }
@@ -517,18 +559,20 @@
 
     if (autoSaveClose) { if (!clickSaveAndClose()) toast('Save & Close button not found'); return; }
 
-    showPrompt && showActionDialog(
-      'Board set to “Junk”. Save changes?',
-      async () => { await sleep(150); if (!clickSave()) toast('Save button not found'); },
-      async () => { await sleep(150); if (!clickSaveAndClose()) toast('Save & Close button not found'); },
-      () => {
-        if (prevBoard) {
-          commitComboValue('input.cw_serviceBoard', prevBoard).then(ret => toast(ret ? `Reverted to "${prevBoard}"` : 'Revert failed'));
-        } else {
-          commitComboValue('input.cw_serviceBoard', '').then(() => toast('Reverted (cleared Board)'));
-        }
-      }
-    );
+    if (showPrompt) {
+      showActionDialog('Board set to “Junk”. Save changes?', {
+        onSave:      async () => { await sleep(150); if (!clickSave()) toast('Save button not found'); },
+        onSaveClose: async () => { await sleep(150); if (!clickSaveAndClose()) toast('Save & Close button not found'); },
+        onRevert:    () => {
+          if (prevBoard) {
+            commitComboValue('input.cw_serviceBoard', prevBoard).then(ret => toast(ret ? `Reverted to "${prevBoard}"` : 'Revert failed'));
+          } else {
+            commitComboValue('input.cw_serviceBoard', '').then(() => toast('Reverted (cleared Board)'));
+          }
+        },
+        onDismiss:   () => {}
+      });
+    }
   }
 
   // ---------- MAC actions ----------
@@ -540,19 +584,14 @@
     { key: 'move',        label: 'User/Workstation Move',subtype: 'User Workstation Move',udf: 'User/Computer Move/Change (Ex. User moving from one computer to another)', summaryPrefix: 'User/Workstation Move -' },
   ];
 
-  async function applyMacOption(opt, { showPrompt = true, autoSaveClose = false } = {}) {
+  async function applyMacOption(opt, { showPrompt = false, autoSaveClose = false } = {}) {
     const prev = captureValues();
 
     // Board: MoveAddChange (if not already)
     const boardInput = await until(() => $('input.cw_serviceBoard'), { tries: 40, delay: 60 });
-    let boardChanged = false;
-    if (boardInput) {
-      const curr = norm(boardInput.value);
-      if (!curr.includes('moveaddchange')) {
-        const prevStatus = $('input.cw_status')?.value || '';
-        const setOk = await commitComboOnElement(boardInput, 'MoveAddChange');
-        if (setOk) { boardChanged = true; await waitStatusRefresh(prevStatus); }
-      }
+    if (boardInput && !norm(boardInput.value).includes('moveaddchange')) {
+      const prevStatus = $('input.cw_status')?.value || '';
+      if (await commitComboOnElement(boardInput, 'MoveAddChange')) await waitStatusRefresh(prevStatus);
     }
 
     // Type / Subtype
@@ -583,81 +622,18 @@
       await commitSummary(`${opt.summaryPrefix} ${suffix}`.replace(/\s+$/, ''));
     }
 
-    if (autoSaveClose) {
-      await sleep(120);
-      if (!clickSaveAndClose()) toast('Save & Close button not found');
-      return;
-    }
+    if (autoSaveClose) { await sleep(120); if (!clickSaveAndClose()) toast('Save & Close button not found'); return; }
 
-    showPrompt && showActionDialog(
-      `Apply MAC: ${opt.label} — Save changes?`,
-      async () => { await sleep(120); if (!clickSave()) toast('Save button not found'); },
-      async () => { await sleep(120); if (!clickSaveAndClose()) toast('Save & Close button not found'); },
-      async () => { await restoreValues(prev); toast('Reverted changes'); }
-    );
+    if (showPrompt) {
+      showActionDialog(`Apply MAC: ${opt.label} — Save changes?`, {
+        onSave:      async () => { await sleep(120); if (!clickSave()) toast('Save button not found'); },
+        onSaveClose: async () => { await sleep(120); if (!clickSaveAndClose()) toast('Save & Close button not found'); },
+        onRevert:    async () => { await restoreValues(prev); toast('Reverted changes'); },
+        onDismiss:   () => {}
+      });
+    }
 
     toast(`MAC applied: ${opt.label}`);
-  }
-
-  // ---------- action dialog (with Shift-click toggle) ----------
-  function showActionDialog(title, onSave, onSaveClose, onRevert) {
-    const overlay = document.createElement('div');
-    Object.assign(overlay.style, {
-      position: 'fixed', inset: 0, background: 'rgba(0,0,0,.38)', zIndex: 2147483645,
-      display: 'flex', alignItems: 'center', justifyContent: 'center'
-    });
-    const card = document.createElement('div');
-    Object.assign(card.style, {
-      background: '#fff', borderRadius: '12px', minWidth: '340px', maxWidth: '560px',
-      padding: '16px', boxShadow: '0 10px 30px rgba(0,0,0,.25)',
-      font: '14px system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif'
-    });
-    const h = document.createElement('div');
-    h.textContent = title;
-    Object.assign(h.style, { fontSize: '15px', fontWeight: 600, marginBottom: '8px' });
-
-    const blurb = document.createElement('div');
-    blurb.innerHTML = `<div style="font-size:12px;color:#4B5563;margin:6px 0 10px;">
-      <strong>Tip:</strong> <kbd>Shift</kbd> + Click any triage button to <em>apply</em> and <em>Save & Close</em> immediately (no prompt).
-    </div>`;
-    const prefRow = document.createElement('label');
-    prefRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin:4px 0 12px 0;color:#111827;font-size:13px;';
-    const cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.checked = !!shiftAutoSaveEnabled;
-    cb.addEventListener('change', async () => {
-      shiftAutoSaveEnabled = cb.checked;
-      await setPref(PREF_KEY_SHIFT_AUTOSAVE, shiftAutoSaveEnabled);
-      toast(`Shift-click auto Save & Close ${shiftAutoSaveEnabled ? 'enabled' : 'disabled'}`);
-    });
-    const cbLbl = document.createElement('span');
-    cbLbl.textContent = 'Enable Shift-click auto Save & Close (applies to all triage buttons)';
-    prefRow.append(cb, cbLbl);
-
-    const row = document.createElement('div');
-    Object.assign(row.style, { display: 'flex', gap: '8px', justifyContent: 'flex-end' });
-
-    function mkBtn(label, action, primary=false) {
-      const b = document.createElement('button');
-      b.textContent = label;
-      Object.assign(b.style, {
-        borderRadius: '10px', padding: '8px 12px', cursor: 'pointer',
-        border: '1px solid', fontWeight: 600
-      });
-      if (primary) Object.assign(b.style, { background: '#111827', color: '#fff', borderColor: '#111827' });
-      else Object.assign(b.style, { background: '#fff', color: '#111827', borderColor: '#D1D5DB' });
-      b.addEventListener('click', () => { action(); overlay.remove(); });
-      return b;
-    }
-
-    row.append(
-      mkBtn('Cancel (revert)', () => onRevert?.()),
-      mkBtn('Save & Close',     () => onSaveClose?.()),
-      mkBtn('Save',             () => onSave?.(), true)
-    );
-    card.append(h, blurb, prefRow, row);
-    overlay.appendChild(card);
-    document.body.appendChild(overlay);
   }
 
   // ---------- triage UI ----------
@@ -698,18 +674,18 @@
 
   const makeJunkButton = () => mkActionButton(
     JUNK_BTN_ID, 'Junk', 'Set Board to Junk (Shift-click = apply + Save & Close)',
-    ({ useAuto }) => applyJunk({ showPrompt: !useAuto, autoSaveClose: useAuto })
+    ({ useAuto }) => applyJunk({ showPrompt: !useAuto && !!savePrompts.junk, autoSaveClose: useAuto })
   );
   const makeSpamButton = () => mkActionButton(
     SPAM_BTN_ID, 'Spam/Phishing', 'Apply Spam/Phishing triage (Shift-click = apply + Save & Close)',
-    ({ useAuto }) => applySpamPhish({ showPrompt: !useAuto, autoSaveClose: useAuto })
+    ({ useAuto }) => applySpamPhish({ showPrompt: !useAuto && !!savePrompts.spam, autoSaveClose: useAuto })
   );
   const makeInvoiceButton = () => mkActionButton(
     INVOICE_BTN_ID, 'Invoice', 'Apply Invoice triage (Shift-click = apply + Save & Close)',
-    ({ useAuto }) => applyInvoice({ showPrompt: !useAuto, autoSaveClose: useAuto })
+    ({ useAuto }) => applyInvoice({ showPrompt: !useAuto && !!savePrompts.invoice, autoSaveClose: useAuto })
   );
 
-  // Floating MAC menu rendered to <body> (prevents clipping; max z-index)
+  // Floating MAC menu (portal to <body>) to avoid clipping behind CW panels
   function ensureMacMenu() {
     let menu = document.getElementById(MAC_MENU_ID);
     if (menu) return menu;
@@ -753,7 +729,7 @@
         e.preventDefault(); e.stopPropagation();
         hideMacMenu();
         const useAuto = e.shiftKey && shiftAutoSaveEnabled;
-        await applyMacOption(opt, { showPrompt: !useAuto, autoSaveClose: useAuto });
+        await applyMacOption(opt, { showPrompt: !useAuto && !!savePrompts.mac, autoSaveClose: useAuto });
       };
       item.addEventListener('click', click);
       item.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') click(e); });
@@ -764,13 +740,11 @@
     document.body.appendChild(menu);
     return menu;
   }
-
   function showMacMenu(anchorEl) {
     const menu = ensureMacMenu();
     const rect = anchorEl.getBoundingClientRect();
-    // position just below, left-aligned to the MAC button
-    const top = Math.min(window.innerHeight - menu.offsetHeight - 10, rect.bottom + 6);
-    const left = Math.max(10, Math.min(window.innerWidth - 10 - 260, rect.left));
+    const top = Math.min(window.innerHeight - 20, rect.bottom + 6);
+    const left = Math.max(10, Math.min(window.innerWidth - 270, rect.left));
     Object.assign(menu.style, { top: `${top}px`, left: `${left}px`, display: 'block' });
 
     const close = (ev) => { if (!menu.contains(ev.target)) hideMacMenu(); };
@@ -782,12 +756,9 @@
     const menu = document.getElementById(MAC_MENU_ID);
     if (menu) menu.style.display = 'none';
   }
-
   function makeMacButton() {
     return mkActionButton(
-      MAC_BTN_ID,
-      'MAC ▾',
-      'Choose a MAC option (Shift-click = apply + Save & Close)',
+      MAC_BTN_ID, 'MAC ▾', 'Choose a MAC option (Shift-click = apply + Save & Close)',
       ({ outer }) => {
         const menu = document.getElementById(MAC_MENU_ID);
         if (menu && menu.style.display === 'block') hideMacMenu();
@@ -796,7 +767,7 @@
     );
   }
 
-  // Settings gear (per-button summary toggles) — Invoice/Junk options hidden
+  // ---------- Settings gear ----------
   function makeSettingsButton() {
     const outer = document.createElement('div');
     outer.className = 'GMDB3DUBHFJ GMDB3DUBAQG GMDB3DUBOFJ cw_CwActionButton';
@@ -826,36 +797,49 @@
       });
       const card = document.createElement('div');
       Object.assign(card.style, {
-        background: '#fff', borderRadius: '12px', minWidth: '320px', maxWidth: '520px',
+        background: '#fff', borderRadius: '12px', minWidth: '340px', maxWidth: '560px',
         padding: '16px', boxShadow: '0 10px 30px rgba(0,0,0,.25)',
         font: '14px system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif'
       });
+
       const h = document.createElement('div');
       h.textContent = 'Quick Triage Settings';
-      Object.assign(h.style, { fontSize: '15px', fontWeight: 600, marginBottom: '12px' });
+      Object.assign(h.style, { fontSize: '15px', fontWeight: 600, marginBottom: '10px' });
 
-      const desc = document.createElement('div');
-      desc.textContent = 'When enabled, the action updates the ticket Summary automatically.';
-      Object.assign(desc.style, { color: '#4B5563', fontSize: '12px', marginBottom: '10px' });
+      const sec1 = document.createElement('div');
+      sec1.textContent = 'Summary updates';
+      Object.assign(sec1.style, { fontWeight: 600, fontSize: '12px', margin: '8px 0 4px', color: '#374151' });
 
-      function mkRow(key, labelText) {
+      function mkRow(getter, setter, key, labelText) {
         const row = document.createElement('label');
-        row.style.cssText = 'display:flex;align-items:center;gap:8px;margin:6px 0;color:#111827;font-size:13px;';
+        row.style.cssText = 'display:flex;align-items:center;gap:8px;margin:4px 0;color:#111827;font-size:13px;';
         const cb = document.createElement('input');
         cb.type = 'checkbox';
-        cb.checked = !!summaryFlags[key];
-        cb.addEventListener('change', () => { summaryFlags[key] = cb.checked; });
+        cb.checked = !!getter()[key];
+        cb.addEventListener('change', () => { setter(key, cb.checked); });
         const span = document.createElement('span');
         span.textContent = labelText;
         row.append(cb, span);
         return row;
       }
 
-      const rows = document.createElement('div');
-      // Hide Junk/Invoice toggles per request:
-      rows.append(
-        mkRow('spam', 'Update Summary for Spam/Phishing'),
-        mkRow('mac',  'Update Summary for MAC options')
+      const rows1 = document.createElement('div');
+      // Hide Junk/Invoice summary toggles as requested
+      rows1.append(
+        mkRow(() => summaryFlags, (k,v)=>{ summaryFlags[k]=v; }, 'spam', 'Update Summary for Spam/Phishing'),
+        mkRow(() => summaryFlags, (k,v)=>{ summaryFlags[k]=v; }, 'mac',  'Update Summary for MAC options')
+      );
+
+      const sec2 = document.createElement('div');
+      sec2.textContent = 'Save pop-up';
+      Object.assign(sec2.style, { fontWeight: 600, fontSize: '12px', margin: '12px 0 4px', color: '#374151' });
+
+      const rows2 = document.createElement('div');
+      rows2.append(
+        mkRow(() => savePrompts, (k,v)=>{ savePrompts[k]=v; }, 'junk',    'Show Save pop-up for Junk'),
+        mkRow(() => savePrompts, (k,v)=>{ savePrompts[k]=v; }, 'spam',    'Show Save pop-up for Spam/Phishing'),
+        mkRow(() => savePrompts, (k,v)=>{ savePrompts[k]=v; }, 'invoice', 'Show Save pop-up for Invoice'),
+        mkRow(() => savePrompts, (k,v)=>{ savePrompts[k]=v; }, 'mac',     'Show Save pop-up for MAC (all options)')
       );
 
       const actions = document.createElement('div');
@@ -872,11 +856,16 @@
         b.addEventListener('click', onClick);
         return b;
       }
-      const saveBtn   = mkBtn('Save', async () => { await setPref(PREF_KEY_SUMMARY_FLAGS, summaryFlags); toast('Settings saved'); overlay.remove(); }, true);
-      const cancelBtn = mkBtn('Cancel', () => overlay.remove(), false);
+      const saveBtn   = mkBtn('Save', async () => {
+        await setPref(PREF_KEY_SUMMARY_FLAGS, summaryFlags);
+        await setPref(PREF_KEY_SAVE_PROMPTS,  savePrompts);
+        toast('Settings saved'); overlay.remove();
+      }, true);
+      const cancelBtn = mkBtn('Cancel', () => overlay.remove());
 
       actions.append(cancelBtn, saveBtn);
-      card.append(h, desc, rows, actions);
+
+      card.append(h, sec1, rows1, sec2, rows2, actions);
       overlay.appendChild(card);
       document.body.appendChild(overlay);
     }
@@ -888,6 +877,7 @@
     return outer;
   }
 
+  // ---------- Bar / placement ----------
   function makeLabel() {
     const wrap = document.createElement('div');
     Object.assign(wrap.style, { display: 'inline-flex', alignItems: 'center', gap: '6px' });
@@ -903,16 +893,16 @@
 
   function makeBar() {
     const bar = document.createElement('div');
-    bar.id = BAR_ID;
+    bar.id = 'att-cw-triage-bar';
     Object.assign(bar.style, {
       display: 'flex', alignItems: 'center', gap: '10px',
       padding: '6px 0 8px 0', flexWrap: 'wrap', position: 'relative', zIndex: '0', marginLeft: '8px'
     });
     const left = makeLabel();
     const slot = document.createElement('div');
-    slot.id = SLOT_ID;
+    slot.id = 'att-cw-triage-slot';
     Object.assign(slot.style, { display: 'inline-flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' });
-    // ORDER: Junk, Spam/Phishing, Invoice, MAC, Settings
+    // ORDER: Junk • Spam/Phishing • Invoice • MAC • ⚙︎
     slot.appendChild(makeJunkButton());
     slot.appendChild(makeSpamButton());
     slot.appendChild(makeInvoiceButton());
@@ -922,7 +912,6 @@
     return bar;
   }
 
-  // ---------- placement & SPA ----------
   function isProjectTicket() {
     const n = (s) => (s || '').toLowerCase();
     const has = (sel, needle) => $$(sel).some(el => visible(el) && n(el.textContent).includes(n(needle)));
@@ -939,19 +928,19 @@
   }
 
   function ensureBarPlaced() {
-    if (isProjectTicket()) { $('#'+BAR_ID)?.remove(); hideMacMenu(); return false; }
-    const existingSlot = $('#'+SLOT_ID);
+    if (isProjectTicket()) { $('#att-cw-triage-bar')?.remove(); hideMacMenu(); return false; }
+    const existingSlot = $('#att-cw-triage-slot');
     if (existingSlot) return true;
     const pod = findTicketPodRoot();
     const header = pod && findHeaderBlock(pod);
     if (!header) return false;
-    if (!$('#'+BAR_ID)) header.insertAdjacentElement('afterend', makeBar());
+    if (!$('#att-cw-triage-bar')) header.insertAdjacentElement('afterend', makeBar());
     return true;
   }
 
   let lastHref = location.href;
   const mo = new MutationObserver(() => {
-    if (lastHref !== location.href) { lastHref = location.href; $('#'+BAR_ID)?.remove(); hideMacMenu(); }
+    if (lastHref !== location.href) { lastHref = location.href; $('#att-cw-triage-bar')?.remove(); hideMacMenu(); }
     ensureBarPlaced();
   });
   mo.observe(document.documentElement, { subtree: true, childList: true });
