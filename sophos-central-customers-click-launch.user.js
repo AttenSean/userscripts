@@ -4,7 +4,6 @@
 // @version      1.3.0
 // @description  Click a customer name to immediately launch that customer (auto-select row; skip flyout). Shift+Click to open the original flyout.
 // @match        https://*.sophos.com/*
-// @match        https://*.sophos-central.com/*
 // @run-at       document-idle
 // @grant        none
 // @noframes
