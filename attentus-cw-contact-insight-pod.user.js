@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         attentus-cw-contact-insight-pod
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.16.0
-// @description  Compact Contact Insight pod under Company > Email. Type badges (hierarchy), Notes badge w/ inline flyout, tiny refresh. Job Title is a subtle header-line text (not a badge). Mounted exactly like the original pod (own <tr> after Email) to avoid any label/field shifting.
+// @version      1.16
+// @description  Compact Contact Insight pod under Company > Email. Badges (title + type hierarchy), Notes badge with count that toggles inline notes panel, tiny refresh. Mounted exactly like the original pod (own <tr> after Email) to avoid any label/field shifting. Stealth-scrape with throttling + cache.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
 // @match        https://*.myconnectwise.com/*
@@ -12,6 +12,8 @@
 // @grant        GM.getValue
 // @grant        GM.setValue
 // @noframes
+// @downloadURL  https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-contact-insight-pod.user.js
+// @updateURL    https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-contact-insight-pod.user.js
 // ==/UserScript==
 
 (() => {
