@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         attentus-cw-contact-insight-pod
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.15.1
-// @description  Compact Contact Insight pod under Company > Email. Badges (title + type hierarchy), Notes badge with count that toggles inline notes panel, tiny refresh. Mounted exactly like the original pod (own <tr> after Email) to avoid any label/field shifting. Stealth-scrape with throttling + cache.
+// @version      1.16.0
+// @description  Compact Contact Insight pod under Company > Email. Type badges (hierarchy), Notes badge w/ inline flyout, tiny refresh. Job Title is a subtle header-line text (not a badge). Mounted exactly like the original pod (own <tr> after Email) to avoid any label/field shifting.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
 // @match        https://*.myconnectwise.com/*
@@ -12,15 +12,13 @@
 // @grant        GM.getValue
 // @grant        GM.setValue
 // @noframes
-// @downloadURL  https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-contact-insight-pod.user.js
-// @updateURL    https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-contact-insight-pod.user.js
 // ==/UserScript==
 
 (() => {
   'use strict';
 
   /** ---------- utils ---------- */
-  const q = (sel, root = document) => root.querySelector(sel);
+  const q  = (sel, root = document) => root.querySelector(sel);
   const qa = (sel, root = document) => Array.from(root.querySelectorAll(sel));
   const vis = (el) => !!(el && el.offsetParent && el.getClientRects().length);
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -151,7 +149,7 @@
     }
   }
 
-  /** ---------- locate Email row / identity ---------- */
+  /** ---------- Email row / identity ---------- */
   function findCompanyEmailRow() {
     const nodes = qa('.gwt-Label, label, td, div').filter(el => {
       if (!vis(el)) return false;
@@ -189,7 +187,7 @@
     return '';
   }
 
-  /** ---------- CW rails ---------- */
+  /** ---------- CW rails helpers ---------- */
   function cwBase() {
     const m = location.pathname.match(/\/v\d+_\d+/);
     return `${location.origin}${m ? m[0] : ''}`;
@@ -210,7 +208,7 @@
     return res.json();
   }
 
-  /** ---------- contactRecId from ticket JSON ---------- */
+  /** ---------- contactRecId + notes ---------- */
   async function getContactRecIdFromTicketByEmail(ticketId, emailLower) {
     const url = `${cwBase()}/services/system_io/actionprocessor/Service/GetServiceTicketDetailViewAction.rails`;
     const payload = {
@@ -227,6 +225,22 @@
     if (first?.contactRecID) return String(first.contactRecID);
     const alt = svm?.initialDescriptionPod?.discussion?.contactRecId;
     return alt && Number(alt) > 0 ? String(alt) : null;
+  }
+  async function fetchContactNotes(contactRecId) {
+    const url = `${cwBase()}/services/system_io/actionprocessor/ServerCommon/NotesViewModelAction.rails`;
+    const actionMessage = {
+      payload: JSON.stringify({ recordID: Number(contactRecId), screenID: 'ct300' }),
+      payloadClassName: 'NotesViewModelAction',
+      project: 'ServerCommon',
+    };
+    const json = await postRails(url, actionMessage);
+    const notes = json?.data?.action?.notesViewModel?.notes || [];
+    return notes.filter(n => n?.note).map(n => ({
+      type: n.noteTypeName || n.noteType?.name || '',
+      note: n.note || '',
+      updated: n.lastUpdate ? new Date(n.lastUpdate).toLocaleDateString() : '',
+      by: n.updatedBy || ''
+    }));
   }
 
   /** ---------- PUBLICATION LAYER ---------- */
@@ -251,19 +265,18 @@
 
   /** ---------- UI (compact; ORIGINAL mount behavior) ---------- */
   function ensureInsightBox(afterRow) {
-    // remove any old inline-slot attempts
     qa('.att-contact-insight-slot').forEach(n => n.remove());
 
     const id = 'attentus-contact-insight-box';
     const exist = document.getElementById(id);
     if (exist && exist.isConnected) return exist;
 
-    // *** ORIGINAL mounting approach: its own <tr> right after the Email row, no width forcing ***
+    // ORIGINAL: its own <tr> right after the Email row
     let container;
     if (afterRow && afterRow.tagName === 'TR' && afterRow.parentElement) {
       const tr = document.createElement('tr');
       const td = document.createElement('td');
-      td.colSpan = Math.max(2, afterRow.children.length); // usually 3 — label, star, value
+      td.colSpan = Math.max(2, afterRow.children.length);
       tr.appendChild(td);
       afterRow.insertAdjacentElement('afterend', tr);
       container = td;
@@ -286,7 +299,7 @@
       fontSize:'12px',
       lineHeight:'1.35',
       display:'grid',
-      gridTemplateColumns:'auto 1fr auto', // ORIGINAL header layout
+      gridTemplateColumns:'auto 1fr auto',
       gap:'4px 8px',
       alignItems:'center'
     });
@@ -295,6 +308,20 @@
     heading.textContent = 'Contact Insight';
     heading.style.fontWeight = '600';
     heading.style.gridColumn = '1';
+
+    // NEW: job title line (right side of header row)
+    const titleLine = document.createElement('div');
+    titleLine.dataset.field = 'jobtitle';
+    Object.assign(titleLine.style, {
+      gridColumn:'2',
+      justifySelf:'start',
+      fontSize:'11px',
+      color:'#475569',
+      whiteSpace:'nowrap',
+      overflow:'hidden',
+      textOverflow:'ellipsis',
+      display:'none'
+    });
 
     const refresh = document.createElement('button');
     refresh.type = 'button';
@@ -322,7 +349,7 @@
       <div data-role="notes-footer" style="margin-top:6px;display:none;"></div>
     `;
 
-    box.append(heading, refresh, badges, notesWrap);
+    box.append(heading, titleLine, refresh, badges, notesWrap);
     container.appendChild(box);
     return box;
   }
@@ -372,27 +399,6 @@
   }
 
   /** ---------- Notes helpers ---------- */
-  function cwBase() {
-    const m = location.pathname.match(/\/v\d+_\d+/);
-    return `${location.origin}${m ? m[0] : ''}`;
-  }
-  async function fetchContactNotes(contactRecId) {
-    const url = `${cwBase()}/services/system_io/actionprocessor/ServerCommon/NotesViewModelAction.rails`;
-    const actionMessage = {
-      payload: JSON.stringify({ recordID: Number(contactRecId), screenID: 'ct300' }),
-      payloadClassName: 'NotesViewModelAction',
-      project: 'ServerCommon',
-    };
-    const json = await postRails(url, actionMessage);
-    const notes = json?.data?.action?.notesViewModel?.notes || [];
-    return notes.filter(n => n?.note).map(n => ({
-      type: n.noteTypeName || n.noteType?.name || '',
-      note: n.note || '',
-      updated: n.lastUpdate ? new Date(n.lastUpdate).toLocaleDateString() : '',
-      by: n.updatedBy || ''
-    }));
-  }
-
   const notesCacheByContact = new Map(); // contactId -> { notes, ts }
 
   async function setupNotesUI(details) {
@@ -439,8 +445,8 @@
     const openBtn = document.createElement('button');
     openBtn.type = 'button'; openBtn.textContent = 'Open full contact notes';
     Object.assign(openBtn.style, { fontSize:'11px', padding:'4px 8px', borderRadius:'999px', border:'1px solid rgba(0,0,0,.2)', background:'#fff', cursor:'pointer' });
-    openBtn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation();
-      // safest generic action: focus the Contact label (opens the contact panel), from there user can open the full notes
+    openBtn.addEventListener('click', (e) => {
+      e.preventDefault(); e.stopPropagation();
       const lbl = qa('.gwt-Label[title="Contact"]').find(el => vis(el));
       if (lbl) lbl.dispatchEvent(new MouseEvent('click', { bubbles:true, cancelable:true }));
     });
@@ -455,7 +461,7 @@
     });
   }
 
-  /** ---------- render (badges + notes) ---------- */
+  /** ---------- render (title line + badges + notes) ---------- */
   const hasDataByTicket = new Map();
 
   async function renderInsight(details, { blocked=false, throttled=false } = {}) {
@@ -466,7 +472,10 @@
     setRefreshVisible(contactActionEnabled());
 
     const badges = q('[data-field="badges"]', box);
+    const titleLine = q('[data-field="jobtitle"]', box);
     badges.textContent = '';
+    titleLine.textContent = '';
+    titleLine.style.display = 'none';
     box.removeAttribute('data-title'); box.removeAttribute('data-type');
 
     const ticketId = getTicketId();
@@ -478,8 +487,14 @@
 
     const { title, type, email, name } = details;
 
-    if (title) badges.appendChild(badgeEl(title, { kind:'neutral', title:'Job Title' }));
+    // Title is NOT a badge — subtle header-line text
+    if (title) {
+      titleLine.textContent = `Title: ${title}`;
+      titleLine.title = title;
+      titleLine.style.display = 'block';
+    }
 
+    // ----- Type hierarchy badges -----
     const tRaw = type || '';
     const isOwner          = /\ba\.\s*owner\b/i.test(tRaw) || /\bowner\b/i.test(tRaw);
     const isPrimaryDM      = /\bb\.\s*primary\s*decision\s*maker\b/i.test(tRaw);
@@ -502,6 +517,7 @@
       else if (isContractor)      badges.appendChild(badgeEl('Contractor',       { kind:'neutral' }));
       else if (isVendor)          badges.appendChild(badgeEl('Vendor',           { kind:'neutral' }));
     }
+    // ----------------------------------
 
     try { if (email || name) await GMset(storageKeyFor({ email, ticketId, name }), details); } catch {}
     publish(ticketId, details);
