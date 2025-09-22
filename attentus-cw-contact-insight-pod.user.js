@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         attentus-cw-contact-insight-pod
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.16
+// @version      1.17
 // @description  Compact Contact Insight pod under Company > Email. Badges (title + type hierarchy), Notes badge with count that toggles inline notes panel, tiny refresh. Mounted exactly like the original pod (own <tr> after Email) to avoid any label/field shifting. Stealth-scrape with throttling + cache.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
@@ -436,8 +436,21 @@
     }
     if (!notes.length) return;
 
+    // Create the toggle button and make it loud & clear (amber + icon)
     const notesBtn = badgeEl(`Notes (${notes.length})`, { kind:'info', asButton:true, title:'Show/Hide recent contact notes' });
     notesBtn.dataset.role = 'attentus-notes-toggle';
+    // Stronger default styling + emoji for visibility
+    notesBtn.textContent = `📝 Notes (${notes.length})`;
+    Object.assign(notesBtn.style, {
+      background: '#fff7db',                    // light amber
+      borderColor: '#f59e0b',                   // amber-500
+      color: '#111827',                         // slate-900 contrast
+      fontWeight: '600',
+      padding: '3px 8px',
+      boxShadow: '0 1px 0 rgba(0,0,0,.05), 0 0 0 3px rgba(245,158,11,.20) inset'
+    });
+    notesBtn.setAttribute('aria-label', 'Toggle contact notes');
+
     badges.prepend(notesBtn);
 
     wrap.style.display = 'none';
