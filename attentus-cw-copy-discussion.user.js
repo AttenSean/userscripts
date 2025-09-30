@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         attentus-cw-copy-discussion
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.1.0
-// @description  Adds a compact "Copy" button by New Note to copy visible Discussion notes with a header (Ticket, Company, Contact, and Contact Insight when available). SPA-safe with rich+plain clipboard.
+// @version      1.2.0
+// @description  Adds a compact "Copy" button by New Note to copy visible Discussion notes with a header (Ticket, Company, Contact, and Contact Insight when available). SPA-safe with rich+plain clipboard; no dependency on other userscripts.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
 // @match        https://*.myconnectwise.com/*
@@ -18,7 +18,14 @@
   'use strict';
 
   /** ---------------- utils ---------------- */
+  const q  = (sel, root=document) => root.querySelector(sel);
+  const qa = (sel, root=document) => Array.from(root.querySelectorAll(sel));
+  const vis = (el) => !!(el && el.offsetParent && el.getClientRects().length);
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const norm = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
+
+  function once(fn) { let ran=false, val; return (...a)=>{ if(!ran){ ran=true; val=fn(...a);} return val;}; }
+
   const esc = (s) =>
     String(s ?? '')
       .replace(/&/g, '&amp;')
@@ -67,21 +74,32 @@
     return false;
   }
 
-  /** ---------------- header fields ---------------- */
-  function getTicketId() {
+  /** ---------------- gating ---------------- */
+  function getTicketIdFromHeader() {
+    const hdr = q('.pod_service_ticket_ticket_header, .mm_podHeader.pod_service_ticket_ticket_header');
+    if (!hdr || !vis(hdr)) return '';
+    const lbl = document.getElementById(hdr.id + '-label') || hdr.nextElementSibling || hdr;
+    const m = norm(lbl.textContent).match(/\b(?:service\s+)?ticket\s*#\s*(\d{3,})\b/i);
+    return m ? m[1] : '';
+  }
+  function getTicketIdFromUrl() {
     try {
       const u = new URL(location.href);
-      const qid = u.searchParams.get('service_recid');
-      if (qid && /^\d+$/.test(qid)) return qid;
-    } catch {}
-    // fallback: title or path
-    const mTitle = (document.title || '').match(/#(\d{3,})/);
-    if (mTitle) return mTitle[1];
-    const mPath = location.pathname.match(/(?:^|\/)(?:ticket|tickets|sr|service[_-]?ticket)s?\/(\d{3,})/i);
-    return mPath ? mPath[1] : '';
+      const p = u.searchParams;
+      const idQ = p.get('service_recid') || p.get('srRecID') || p.get('recid');
+      if (idQ && /^\d{3,}$/.test(idQ)) return idQ;
+      const m = u.pathname.match(/(?:^|\/)(?:ticket|tickets|sr|service[_-]?ticket)s?\/(\d{3,})/i);
+      return m ? m[1] : '';
+    } catch { return ''; }
   }
+  const getTicketId = () => getTicketIdFromUrl() || getTicketIdFromHeader();
+  const isTicketPage = () =>
+    !!(getTicketIdFromUrl() ||
+       getTicketIdFromHeader() ||
+       q('.pod_service_ticket_ticket_header, .mm_podHeader.pod_service_ticket_ticket_header'));
 
-  const getVal = (sel) => document.querySelector(sel)?.value?.trim() || '';
+  /** ---------------- header fields ---------------- */
+  const getVal = (sel) => q(sel)?.value?.trim() || '';
   function getCompany() {
     return (
       getVal('input.cw_company') ||
@@ -97,40 +115,99 @@
     );
   }
 
-  /** ---------------- Contact Insight (API-first, no scraping) ---------------- */
-  function getContactInsight() {
-    const ticketId = getTicketId();
-    // Preferred API exposed by attentus-cw-contact-insight-pod >= 1.7.0
+  /** ---------------- Rails helpers (fallback for CI) ---------------- */
+  const normPath = () => (location.pathname.match(/\/v\d+_\d+/) || ['',''])[0];
+  const cwBase   = () => location.origin + normPath();
+
+  async function postRails(url, actionMessage) {
+    const controller = new AbortController();
+    const to = setTimeout(() => controller.abort('timeout'), 8000);
     try {
-      const api = window.AttentusContactInsight;
-      if (api && typeof api.get === 'function') {
-        const det = api.get(ticketId);
-        if (det && (det.title || det.type)) {
-          return { jobTitle: det.title || det.jobTitle || '', type: det.type || '' };
-        }
-      }
-    } catch {}
-    // Fallback to pod data-* attributes (no text scraping)
-    const pod = document.getElementById('attentus-contact-insight-box');
-    if (pod) {
-      const title = pod.dataset.title || '';
-      const type = pod.dataset.type || '';
-      if (title || type) return { jobTitle: title, type };
+      const body = new URLSearchParams({
+        actionMessage: JSON.stringify(actionMessage),
+        clientTimezoneOffset: String(-new Date().getTimezoneOffset()),
+        clientTimezoneName: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+      }).toString();
+      const r = await fetch(url, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body,
+        signal: controller.signal
+      });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    } finally {
+      clearTimeout(to);
     }
+  }
+
+  async function fetchTicketSVM(ticketId) {
+    const url = `${cwBase()}/services/system_io/actionprocessor/Service/GetServiceTicketDetailViewAction.rails`;
+    const actionMessage = {
+      payload: JSON.stringify({ serviceRecId: Number(ticketId) }),
+      payloadClassName: 'GetServiceTicketDetailViewAction',
+      project: 'ServiceCommon'
+    };
+    const j = await postRails(url, actionMessage);
+    return j?.data?.action?.serviceTicketViewModel || null;
+  }
+
+  function resolveContactMetaFromSVM(svm) {
+    const meta = { title: '', type: '' };
+    try {
+      meta.title =
+        svm?.companyPodViewModel?.contact?.title ||
+        svm?.companyPod?.contactViewModel?.title ||
+        svm?.contactPod?.contactViewModel?.title || '';
+      meta.type =
+        svm?.companyPodViewModel?.contact?.type ||
+        svm?.companyPod?.contactViewModel?.type ||
+        svm?.contactPod?.contactViewModel?.type || '';
+    } catch {}
+    return meta;
+  }
+
+  /** ---------------- Contact Insight (pod-first; SVM fallback) ---------------- */
+  async function getContactInsight() {
+    // 1) Read from our Contact Insight pod if present
+    const pod = q('#attentus-contact-insight-box');
+    if (pod) {
+      const titleLine = q('[data-field="jobtitle"]', pod);
+      let jobTitle = '';
+      if (titleLine && vis(titleLine)) {
+        const t = norm(titleLine.textContent || '');
+        jobTitle = t.replace(/^Title:\s*/i, '');
+      }
+      const badges = qa('[data-att-badge]', pod).map(x => norm(x.textContent || '')).filter(Boolean);
+      const typeBadges = (badges.length ? badges.join(', ') : '');
+      if (jobTitle || typeBadges) {
+        return { jobTitle, type: typeBadges };
+      }
+    }
+
+    // 2) Lightweight fallback via SVM fetch
+    const tid = getTicketId();
+    if (!tid) return null;
+    try {
+      const svm = await fetchTicketSVM(tid);
+      const meta = resolveContactMetaFromSVM(svm);
+      if (meta.title || meta.type) return { jobTitle: meta.title || '', type: meta.type || '' };
+    } catch {}
     return null;
   }
 
   /** ---------------- note extraction (visible tab) ---------------- */
   function extractNotes(podRoot) {
-    const rows = podRoot.querySelectorAll('.TicketNote-rowWrap .TicketNote-row');
+    // Compatible with current CW DOM: rows hold author/date/note blocks
+    const rows = podRoot.querySelectorAll('.TicketNote-rowWrap .TicketNote-row, .TicketNote-row');
     const out = [];
     rows.forEach((row) => {
+      if (!vis(row)) return;
       const author =
-        row.querySelector('.TicketNote-clickableName, .TicketNote-basicName, .TicketNote-skittleAvatar')?.textContent?.trim() ||
-        '';
-      const date = row.querySelector('.TimeText-date')?.textContent?.trim() || '';
-      // Only capture dedicated note blocks to avoid side text/labels
-      const blocks = row.querySelectorAll('.TicketNote-rowNote');
+        q('.TicketNote-clickableName, .TicketNote-basicName, .TicketNote-skittleAvatar', row)?.textContent?.trim() || '';
+      const date = q('.TimeText-date', row)?.textContent?.trim() || '';
+      const blocks = row.querySelectorAll('.TicketNote-rowNote, .TicketNote-note');
       const parts = [];
       blocks.forEach((b) => {
         const txt = (b.innerText || '').trim();
@@ -144,9 +221,9 @@
   }
 
   /** ---------------- payload composer ---------------- */
-  function buildPayload(podRoot) {
+  async function buildPayload(podRoot) {
     // Current tab label (e.g., "Discussion")
-    const tab = podRoot.querySelector('.TicketNote-ticketNoteTable .TicketNote-ticketNoteTabSelected');
+    const tab = q('.TicketNote-ticketNoteTable .TicketNote-ticketNoteTabSelected', podRoot);
     const tabLabel = tab ? tab.textContent.replace(/\s+\d+$/, '').trim() : 'Visible';
 
     // Header basics
@@ -158,8 +235,8 @@
     const contact = getContact();
     if (contact) headerBits.push(`Contact: ${contact}`);
 
-    // Optional Contact Insight (from API/pod only)
-    const ci = getContactInsight();
+    // Optional Contact Insight (pod-first; SVM fallback if missing)
+    const ci = await getContactInsight();
     const ciPlain = ci
       ? ['Contact Insight', ci.jobTitle ? `Job Title: ${ci.jobTitle}` : '', ci.type ? `Type: ${ci.type}` : '']
           .filter(Boolean)
@@ -237,12 +314,12 @@
       whiteSpace: 'nowrap',
     });
 
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
       const pod =
         btn.closest('[data-cwid="cw_ticketnotes"], [data-cwid="pod_service_ticket_notes"]') ||
         document.getElementById('cw-manage-service_service_ticket_discussion') ||
         document;
-      const { html, plain, count } = buildPayload(pod);
+      const { html, plain, count } = await buildPayload(pod);
       copyRichPlain(html, plain).then((ok) => {
         btn.disabled = true;
         const old = btn.textContent;
@@ -266,14 +343,13 @@
   }
 
   function mount() {
-    if (document.querySelector('.att-cw-copy-discussion-wrap')) return;
+    if (!isTicketPage()) return;
+    if (q('.att-cw-copy-discussion-wrap')) return;
 
     const newNoteBtn =
-      document.querySelector(
-        '[data-cwid="pod_service_ticket_notes"] [data-cwid="btn_addnew"].TicketNote-newNoteButton'
-      ) ||
-      document.querySelector('#cw-manage-service_service_ticket_discussion [data-cwid="btn_addnew"].TicketNote-newNoteButton') ||
-      document.querySelector('.TicketNote-newNoteButton');
+      q('[data-cwid="pod_service_ticket_notes"] [data-cwid="btn_addnew"].TicketNote-newNoteButton') ||
+      q('#cw-manage-service_service_ticket_discussion [data-cwid="btn_addnew"].TicketNote-newNoteButton') ||
+      q('.TicketNote-newNoteButton');
 
     if (!newNoteBtn || !newNoteBtn.parentElement) return;
 
@@ -286,22 +362,24 @@
 
   /** ---------------- boot ---------------- */
   (async function init() {
-    // quick retries to catch initial SPA render
-    for (let i = 0; i < 24; i++) {
+    // Quick tries to land during initial SPA hydration
+    for (let i = 0; i < 20; i++) {
       mount();
-      // try to pick up Contact Insight API init (if the other script loads slightly later)
-      await sleep(200);
+      await sleep(150);
     }
-    // observe SPA updates
-    new MutationObserver(() => mount()).observe(document.documentElement, {
-      childList: true,
-      subtree: true,
+    // Observe SPA updates (debounced by mount logic itself)
+    const mo = new MutationObserver(() => mount());
+    mo.observe(document.documentElement, { childList: true, subtree: true });
+
+    // Re-mount on route changes
+    const onRoute = once(() => setTimeout(mount, 0));
+    ['pushState','replaceState'].forEach(k => {
+      const orig = history[k];
+      history[k] = function () { const r = orig.apply(this, arguments); onRoute(); return r; };
     });
-    // listen to Contact Insight updates to keep future copies fresh (no-op here, but holds a reference if needed)
-    if (window.AttentusContactInsight?.subscribe) {
-      window.AttentusContactInsight.subscribe(() => {
-        /* noop: we read at click-time */
-      });
-    }
+    window.addEventListener('popstate', onRoute);
+    window.addEventListener('hashchange', onRoute);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) setTimeout(mount, 60); });
+    window.addEventListener('focus', () => setTimeout(mount, 60), { passive:true });
   })();
 })();
