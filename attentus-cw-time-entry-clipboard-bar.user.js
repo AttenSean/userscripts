@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         attentus-cw-time-entry-clipboard-bar
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.8.0
-// @description  Clipboard buttons by the Notes timestamp (Signature, Review+Signature) with settings. Now: disables on Time Sheet time entries and prevents duplicate toolbars.
+// @version      1.9.0
+// @description  Clipboard buttons by the Notes timestamp (Signature, Review+Signature) with settings. Also mounts under Thread: Auto time entries (pod 16) on ticket pages. Disables on Time Sheet screens; prevents duplicate toolbars.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
+// @match        https://*.myconnectwise.com/*
 // @run-at       document-idle
 // @grant        GM_setClipboard
 // @grant        GM.setClipboard
@@ -52,6 +53,8 @@
   // ---------- tiny utils ----------
   const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const rand = arr => arr[Math.floor(Math.random() * arr.length)];
+  const $ = (s, r=document) => r.querySelector(s);
+  const $$ = (s, r=document) => Array.from(r.querySelectorAll(s));
 
   // ---------- storage helpers ----------
   async function gmGet(key, defVal) {
@@ -97,18 +100,16 @@
 
   // ---------- view detection ----------
   function isTimesheetContext() {
-    // Breadcrumb labels often include "Open Time Sheets" / "Time Sheet" in the timesheet UI
+    // Timesheet breadcrumb / containers (keeps toolbar off Daily/Weekly Time sheets)
     const crumbs = Array.from(document.querySelectorAll('.cw-main-banner .navigationEntry, .cw-main-banner .cw_CwLabel'))
       .map(e => (e.textContent || '').trim().toLowerCase());
     if (crumbs.some(t => t.includes('open time sheets') || t === 'time sheet')) return true;
-
-    // Timesheet-specific containers/grids also present
     if (document.querySelector('.mytimesheetlist, .TimeSheet')) return true;
-
     return false;
   }
 
-  // ---------- locate Notes timestamp button ----------
+  // ---------- locate anchors ----------
+  // A) Classic Notes timestamp button on legacy time-entry form
   function findNotesTimestampButton() {
     const stamps = document.querySelectorAll('.cw_ToolbarButton_TimeStamp');
     for (const st of stamps) {
@@ -117,6 +118,22 @@
       if (label && /notes$/i.test((label.textContent || '').trim())) return st;
     }
     return null;
+  }
+
+  // B) Thread: Auto time entries pod (pod 16) — mount just below header (host page, not inside iframe)
+  function findThreadTimepadHeader() {
+    // stable CW hosted pod header for Thread: Auto time entries
+    return document.querySelector('.mm_podHeader.pod_hosted_16_header');
+  }
+  function threadTimepadMountTarget() {
+    const header = findThreadTimepadHeader();
+    if (!header) return null;
+
+    // Prefer a slim inline mount just after the header’s built-in toolbar region if present,
+    // otherwise insert a small strip immediately after the header block.
+    // We avoid the cross-origin iframe entirely.
+    const toolbar = header.querySelector('.mm_toolbar') || header; // best-effort
+    return toolbar;
   }
 
   // ---------- content builders ----------
@@ -155,35 +172,20 @@
   }
 
   function reviewHTMLParts(url, { headline, prefix, linkText, suffix, closing }) {
-    const gap1 = /\s$/.test(prefix) ? '' : ' ';
-    const gap2 = suffix && !/^\s/.test(suffix) ? ' ' : '';
+    const safe = (s) => esc(String(s||''));
     return [
-      `<div style="margin:0;line-height:1.35">`,
-      `<div style="margin:0">—</div>`,
-      `<div style="margin:0"><strong>${esc(headline)}</strong></div>`,
-      `<div style="margin:0">${esc(prefix)}${gap1}<a href="${url}">${esc(linkText)}</a>${gap2}${esc(suffix || '')}</div>`,
-      `<div style="margin:0">${esc(closing)}</div>`,
-      `</div>`
+      `<div style="margin:0"><strong>${safe(headline)}</strong></div>`,
+      `<div style="margin:0">${safe(prefix)}<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${safe(linkText)}</a>${safe(suffix)}</div>`,
+      `<div style="margin:0">${safe(closing)}</div>`
     ].join('');
   }
-  function reviewTextParts(_url, { headline, prefix, linkText, suffix, closing }) {
-    const gap1 = /\s$/.test(prefix) ? '' : ' ';
-    const gap2 = suffix && !/^\s/.test(suffix) ? ' ' : '';
-    return ['—', headline, `${prefix}${gap1}${linkText}${gap2}${suffix || ''}`, closing].join('\n');
-  }
-
-  // ---------- toasts ----------
-  function toast(msg) {
-    const t = document.createElement('div');
-    t.textContent = msg;
-    Object.assign(t.style, {
-      position: 'fixed', top: '16px', left: '50%', transform: 'translateX(-50%)',
-      zIndex: 2147483646, background: '#111827', color: '#fff',
-      padding: '8px 10px', borderRadius: '8px', border: '1px solid rgba(255,255,255,.2)',
-      font: '12px system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif'
-    });
-    document.body.appendChild(t);
-    setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity .25s'; setTimeout(() => t.remove(), 250); }, 1100);
+  function reviewTextParts(url, { headline, prefix, linkText, suffix, closing }) {
+    const lines = [
+      headline,
+      `${prefix}${linkText} ${url}${suffix ? ' ' + suffix : ''}`,
+      closing
+    ].filter(Boolean);
+    return lines.join('\n');
   }
 
   // ---------- inline UI (single instance) ----------
@@ -278,9 +280,8 @@
     intoWrap.append(sel, settingsBtn, sigBtn, bothBtn);
   }
 
-  // Build the wrapper immediately (prevents async double-insert),
-  // then populate it asynchronously.
-  async function mountGroup(nextToStamp) {
+  // Build wrapper next to a button (legacy timestamp)
+  async function mountGroupAfterButton(nextToStamp) {
     // If an existing group isn't adjacent to this stamp, move it.
     const existing = document.getElementById(GROUP_ID);
     if (existing) {
@@ -288,7 +289,6 @@
       existing.remove();
     }
 
-    // Create wrapper synchronously to avoid races
     const wrap = document.createElement('span');
     wrap.id = GROUP_ID;
     Object.assign(wrap.style, {
@@ -301,13 +301,48 @@
     nextToStamp.style.display = 'inline-block';
     nextToStamp.insertAdjacentElement('afterend', wrap);
 
-    // fill children
     await buildGroupChildren(wrap);
+    return true;
+  }
+
+  // Build wrapper under/after a pod header (Thread pod 16)
+  async function mountGroupUnderHeader(headerOrToolbar) {
+    const existing = document.getElementById(GROUP_ID);
+    if (existing) {
+      // If we already sit right after this header/toolbar, keep it
+      if (existing.previousElementSibling === headerOrToolbar) return true;
+      existing.remove();
+    }
+
+    const strip = document.createElement('div');
+    strip.id = GROUP_ID;
+    Object.assign(strip.style, {
+      display: 'flex', alignItems: 'center', gap: '8px',
+      padding: '6px 8px', marginTop: '6px',
+      background: 'rgba(17,24,39,.04)', border: '1px solid rgba(0,0,0,.08)',
+      borderRadius: '8px'
+    });
+
+    headerOrToolbar.insertAdjacentElement('afterend', strip);
+    await buildGroupChildren(strip);
     return true;
   }
 
   // ---------- settings panel ----------
   function closeModal(el) { el?.remove(); }
+  function toast(msg, ms = 1100) {
+    const n = document.createElement('div');
+    n.textContent = msg;
+    Object.assign(n.style, {
+      position: 'fixed', right: '12px', bottom: '12px', zIndex: 2147483646,
+      background: '#111827', color: '#fff', padding: '8px 10px',
+      borderRadius: '8px', border: '1px solid rgba(255,255,255,.25)',
+      font: '12px system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif'
+    });
+    document.body.appendChild(n);
+    setTimeout(() => n.remove(), ms);
+  }
+
   async function showSettings() {
     const name     = await gmGet(KEYS.name,     DEFAULTS.name);
     const headline = await gmGet(KEYS.headline, DEFAULTS.headline);
@@ -320,69 +355,41 @@
 
     const overlay = document.createElement('div');
     Object.assign(overlay.style, { position: 'fixed', inset: 0, background: 'rgba(0,0,0,.35)', zIndex: 2147483646 });
-
     const modal = document.createElement('div');
     Object.assign(modal.style, {
-      position: 'absolute', top: '10%', left: '50%', transform: 'translateX(-50%)',
-      width: 'min(560px, 92vw)', background: '#fff', color: '#111',
-      borderRadius: '10px', boxShadow: '0 10px 30px rgba(0,0,0,.2)',
-      padding: '16px', font: '13px system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif'
+      position: 'fixed', left: '50%', top: '14%', transform: 'translateX(-50%)',
+      minWidth: '320px', maxWidth: '460px', background: '#0b1220', color: '#fff',
+      borderRadius: '12px', padding: '12px', border: '1px solid rgba(255,255,255,.18)',
+      boxShadow: '0 10px 30px rgba(0,0,0,.35)', font: '13px system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif'
     });
     modal.innerHTML = `
-      <div style="font-weight:600; font-size:14px; margin-bottom:10px;">Clipboard Bar Settings</div>
-      <div style="display:grid; grid-template-columns:180px 1fr; gap:8px; align-items:center;">
-        <label>Name</label>
-        <input type="text" id="att_name" value="${esc(name)}" style="padding:6px; border:1px solid #ccc; border-radius:6px;">
-
-        <div style="grid-column:1/-1; height:1px; background:#eee; margin:6px 0;"></div>
-
-        <label>Headline</label>
-        <input type="text" id="att_headline" value="${esc(headline)}" style="padding:6px; border:1px solid #ccc; border-radius:6px;">
-
-        <label>Prefix</label>
-        <input type="text" id="att_prefix" value="${esc(prefix)}" style="padding:6px; border:1px solid #ccc; border-radius:6px;">
-
-        <label>Link text</label>
-        <input type="text" id="att_linktext" value="${esc(linkText)}" style="padding:6px; border:1px solid #ccc; border-radius:6px;">
-
-        <label>Suffix</label>
-        <input type="text" id="att_suffix" value="${esc(suffix)}" style="padding:6px; border:1px solid #ccc; border-radius:6px;">
-
-        <label>Closing</label>
-        <input type="text" id="att_closing" value="${esc(closing)}" style="padding:6px; border:1px solid #ccc; border-radius:6px;">
-
-        <div style="grid-column:1/-1; height:1px; background:#eee; margin:6px 0;"></div>
-
-        <label>Randomize location on open</label>
-        <label style="display:flex; align-items:center; gap:6px;">
-          <input type="checkbox" id="att_random">
-          <span style="color:#555;">Pick a random location each time the toolbar appears</span>
-        </label>
-
-        <label id="att_defloc_label">Default location</label>
-        <select id="att_defloc" style="height:30px; padding:0 6px; border:1px solid #ccc; border-radius:6px;">
+      <div style="font-weight:600;margin-bottom:8px">Clipboard Bar Settings</div>
+      <label style="display:block;margin:6px 0">Name<br><input id="att_name" style="width:100%" value="${esc(name)}"></label>
+      <label style="display:block;margin:6px 0">Headline<br><input id="att_headline" style="width:100%" value="${esc(headline)}"></label>
+      <label style="display:block;margin:6px 0">Prefix<br><input id="att_prefix" style="width:100%" value="${esc(prefix)}"></label>
+      <label style="display:block;margin:6px 0">Link text<br><input id="att_linktext" style="width:100%" value="${esc(linkText)}"></label>
+      <label style="display:block;margin:6px 0">Suffix (optional)<br><input id="att_suffix" style="width:100%" value="${esc(suffix)}"></label>
+      <label style="display:block;margin:6px 0">Closing<br><input id="att_closing" style="width:100%" value="${esc(closing)}"></label>
+      <label style="display:flex;align-items:center;gap:8px;margin:8px 0">
+        <input id="att_random" type="checkbox" ${randomOn ? 'checked' : ''}> Randomize location
+      </label>
+      <label id="att_defloc_label" style="display:block;margin:6px 0">Default location
+        <select id="att_defloc" style="width:100%">
           <option value="bellevue">Bellevue</option>
           <option value="seattle">Seattle</option>
           <option value="tacoma">Tacoma</option>
           <option value="renton">Renton</option>
         </select>
-      </div>
-      <div style="font-size:12px; color:#555; margin-top:8px;">
-        Middle line renders as: <code>Prefix</code> + <code>&lt;a href="LOCATION_URL"&gt;Link text&lt;/a&gt;</code> + <code>Suffix</code>
-      </div>
-      <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:12px;">
-        <button id="att_reset" style="padding:6px 10px; border:1px solid #ddd; border-radius:6px; background:#fff; cursor:pointer;">Reset defaults</button>
-        <button id="att_cancel" style="padding:6px 10px; border:1px solid #ddd; border-radius:6px; background:#fff; cursor:pointer;">Cancel</button>
-        <button id="att_save"   style="padding:6px 10px; border:1px solid rgba(0,0,0,.2); border-radius:6px; background:#2563eb; color:#fff; cursor:pointer;">Save</button>
+      </label>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px">
+        <button id="att_reset">Reset</button>
+        <button id="att_cancel">Cancel</button>
+        <button id="att_save" style="background:#2563eb;color:#fff;border:1px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 10px">Save</button>
       </div>
     `;
-    overlay.appendChild(modal);
-    document.body.appendChild(overlay);
-
-    const defSel   = modal.querySelector('#att_defloc');
+    const defSel = modal.querySelector('#att_defloc');
     const defLabel = modal.querySelector('#att_defloc_label');
     const randomCb = modal.querySelector('#att_random');
-
     defSel.value   = defloc;
     randomCb.checked = !!randomOn;
 
@@ -394,6 +401,9 @@
     }
     randomCb.addEventListener('change', syncDefLocVisibility);
     syncDefLocVisibility();
+
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
 
     modal.querySelector('#att_cancel').onclick = () => closeModal(overlay);
     modal.querySelector('#att_reset').onclick  = async () => {
@@ -432,13 +442,19 @@
   }
 
   async function ensure() {
-    // Do NOT show on timesheet-derived time entries
-    if (isTimesheetContext()) { removeGroupIfAny(); return; }
+    // Do NOT show on timesheet-derived screens
+    if (isTimesheetContext()) { removeGroupIfAny(); return; } // gating preserved
 
+    // Primary anchor: legacy Notes timestamp
     const stamp = findNotesTimestampButton();
-    if (!stamp) { removeGroupIfAny(); return; }
+    if (stamp) { await mountGroupAfterButton(stamp); return; }
 
-    await mountGroup(stamp);
+    // Fallback: Thread Auto time entries pod (pod 16) on ticket pages
+    const tpHeader = threadTimepadMountTarget();
+    if (tpHeader) { await mountGroupUnderHeader(tpHeader); return; }
+
+    // Otherwise, remove if present
+    removeGroupIfAny();
   }
 
   const mo = new MutationObserver(() => ensure());
