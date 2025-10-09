@@ -136,31 +136,50 @@
     return toolbar;
   }
 
+  // Build ONE <pre> block for review + signature (uniform font size)
+function reviewAndSignatureHTML(name, url, { headline, prefix, linkText, suffix, closing }) {
+  const safe = s => esc(String(s || ''));
+  const gap1 = /\s$/.test(prefix) ? '' : ' ';
+  const gap2 = suffix && !/^\s/.test(suffix) ? ' ' : '';
+  return `<pre style="font-family:inherit;line-height:1.35;white-space:pre-wrap;margin:0">
+--
+<b>${safe(headline)}</b>
+${safe(prefix)}${gap1}<a href="${esc(url)}">${safe(linkText)}</a>${gap2}${safe(suffix || '')}
+${safe(closing)}
+
+Thank you,
+
+${esc(name)}
+Attentus Technologies
+<b>Support:</b> (253) 218-6015 x1
+<b>Call</b> or <b>Text Us:</b> (253) 218-6015
+</pre>`;
+}
+
   // ---------- content builders ----------
-  function signatureHTML(name, { spacedThankYou = false } = {}) {
-    const n = esc(name);
-    return [
-      `<div style="margin:0;line-height:1.35">`,
-      `<div style="margin:0">Thank you,</div>`,
-      spacedThankYou ? `<div style="margin:0"><br></div>` : ``,
-      `<div style="margin:0"><strong>${n}</strong></div>`,
-      `<div style="margin:0">Attentus Technologies</div>`,
-      `<div style="margin:0"><strong>Support:</strong> (253) 218-6015 x1</div>`,
-      `<div style="margin:0"><strong>Call</strong> or <strong>Text Us:</strong> (253) 218-6015</div>`,
-      `</div>`
-    ].join('');
-  }
-  function signatureText(name, { spacedThankYou = false } = {}) {
-    const lines = [
-      'Thank you,',
-      spacedThankYou ? '' : null,
-      name,
-      'Attentus Technologies',
-      'Support: (253) 218-6015 x1',
-      'Call or Text Us: (253) 218-6015'
-    ].filter(v => v !== null);
-    return lines.join('\n');
-  }
+function signatureHTML(name) {
+  const n = esc(name);
+  return `<pre style="font-family:inherit;line-height:1.35;white-space:pre-wrap;margin:0">
+Thank you,
+
+${n}
+Attentus Technologies
+<b>Support:</b> (253) 218-6015 x1
+<b>Call</b> or <b>Text Us:</b> (253) 218-6015
+</pre>`;
+}
+
+function signatureText(name) {
+  return [
+    '',
+    'Thank you,',
+    '',
+    name,
+    'Attentus Technologies',
+    'Support: (253) 218-6015 x1',
+    'Call or Text Us: (253) 218-6015'
+  ].join('\n');
+}
 
   async function getReviewMsg() {
     const headline = await gmGet(KEYS.headline, DEFAULTS.headline);
@@ -171,22 +190,27 @@
     return { headline, prefix, linkText, suffix, closing };
   }
 
-  function reviewHTMLParts(url, { headline, prefix, linkText, suffix, closing }) {
-    const safe = (s) => esc(String(s||''));
-    return [
-      `<div style="margin:0"><strong>${safe(headline)}</strong></div>`,
-      `<div style="margin:0">${safe(prefix)}<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${safe(linkText)}</a>${safe(suffix)}</div>`,
-      `<div style="margin:0">${safe(closing)}</div>`
-    ].join('');
-  }
-  function reviewTextParts(url, { headline, prefix, linkText, suffix, closing }) {
-    const lines = [
-      headline,
-      `${prefix}${linkText} ${url}${suffix ? ' ' + suffix : ''}`,
-      closing
-    ].filter(Boolean);
-    return lines.join('\n');
-  }
+function reviewHTMLParts(url, { headline, prefix, linkText, suffix, closing }) {
+  const safe = s => esc(String(s || ''));
+  const gap1 = /\s$/.test(prefix) ? '' : ' ';
+  const gap2 = suffix && !/^\s/.test(suffix) ? ' ' : '';
+  return `<pre style="font-family:inherit;line-height:1.35;white-space:pre-wrap;margin:0">
+--
+<b>${safe(headline)}</b>
+${safe(prefix)}${gap1}${safe(linkText)} ${esc(url)}${gap2}${safe(suffix || '')}
+${safe(closing)}
+</pre>`;
+}
+function reviewTextParts(url, { headline, prefix, linkText, suffix, closing }) {
+  const gap1 = /\s$/.test(prefix) ? '' : ' ';
+  const gap2 = suffix && !/^\s/.test(suffix) ? ' ' : '';
+  return [
+    '--',
+    headline,
+    `${prefix}${gap1}${linkText} ${url}${gap2}${suffix || ''}`,
+    closing
+  ].join('\n');
+}
 
   // ---------- inline UI (single instance) ----------
   const GROUP_ID = 'cw-notes-inline-copy-group';
@@ -235,50 +259,65 @@
     return REVIEW_URLS[sel.value] || REVIEW_URLS.bellevue;
   }
 
-  async function buildGroupChildren(intoWrap) {
-    // location dropdown
-    const sel = document.createElement('select');
-    sel.innerHTML = `
-      <option value="bellevue">Bellevue</option>
-      <option value="seattle">Seattle</option>
-      <option value="tacoma">Tacoma</option>
-      <option value="renton">Renton</option>
-    `;
-    Object.assign(sel.style, {
-      height: '26px', padding: '0 6px',
-      border: '1px solid rgba(0,0,0,.2)', borderRadius: '6px',
-      font: '12px system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif'
-    });
+async function buildGroupChildren(intoWrap) {
+  // location dropdown
+  const sel = document.createElement('select');
+  sel.innerHTML = `
+    <option value="bellevue">Bellevue</option>
+    <option value="seattle">Seattle</option>
+    <option value="tacoma">Tacoma</option>
+    <option value="renton">Renton</option>
+  `;
+  Object.assign(sel.style, {
+    height: '26px', padding: '0 6px',
+    border: '1px solid rgba(0,0,0,.2)', borderRadius: '6px',
+    font: '12px system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif'
+  });
 
-    // choose initial value (settings)
-    const randomOn = await gmGet(KEYS.random, DEFAULTS.randomizeLocation);
-    const defloc   = await gmGet(KEYS.defloc, DEFAULTS.defaultLocation);
-    sel.value = randomOn ? rand(LOCATIONS) : (LOCATIONS.includes(defloc) ? defloc : DEFAULTS.defaultLocation);
+  // choose initial value (settings)
+  const randomOn = await gmGet(KEYS.random, DEFAULTS.randomizeLocation);
+  const defloc   = await gmGet(KEYS.defloc, DEFAULTS.defaultLocation);
+  sel.value = randomOn ? rand(LOCATIONS) : (LOCATIONS.includes(defloc) ? defloc : DEFAULTS.defaultLocation);
 
-    const settingsBtn = mkIconBtn('⚙︎', 'Set name, review message, and default location', showSettings);
-    const sigBtn  = mkBtn('Copy signature', async () => {
-      const name = await gmGet(KEYS.name, DEFAULTS.name);
-      const html = signatureHTML(name, { spacedThankYou: true });
-      const text = signatureText(name,  { spacedThankYou: true });
-      const res  = await copyRich(html, text);
-      toast(res.ok ? 'Copied signature' : 'Copy failed');
-    });
-    const bothBtn = mkBtn('Copy review + signature', async () => {
-      const name   = await gmGet(KEYS.name, DEFAULTS.name);
-      const parts  = await getReviewMsg();
-      const url    = getReviewUrlFrom(sel);
-      const revH   = reviewHTMLParts(url, parts);
-      const revT   = reviewTextParts(url, parts);
-      const sigH   = signatureHTML(name, { spacedThankYou: false });
-      const sigT   = signatureText(name,  { spacedThankYou: false });
-      const html   = `<div style="margin:0;line-height:1.35">${revH}<div style="margin:0"><br></div>${sigH}</div>`;
-      const text   = [revT, '', sigT].join('\n');
-      const res    = await copyRich(html, text);
-      toast(res.ok ? 'Copied review + signature' : 'Copy failed');
-    });
+  const settingsBtn = mkIconBtn('⚙︎', 'Set name, review message, and default location', showSettings);
 
-    intoWrap.append(sel, settingsBtn, sigBtn, bothBtn);
-  }
+  // --- Button callbacks ---
+  const sigBtn = mkBtn('Copy signature', async () => {
+    const name = await gmGet(KEYS.name, DEFAULTS.name);
+    const html = signatureHTML(name);
+    const text = signatureText(name);
+    const res  = await copyRich(html, text);
+    toast(res.ok ? 'Copied signature' : 'Copy failed');
+  });
+
+const bothBtn = mkBtn('Copy review + signature', async () => {
+  const name   = await gmGet(KEYS.name, DEFAULTS.name);
+  const parts  = await getReviewMsg();
+  const url    = getReviewUrlFrom(sel);
+
+  const html = reviewAndSignatureHTML(name, url, parts);
+
+  // Plain-text version (mirrors spacing above)
+  const text = [
+    '--',
+    parts.headline,
+    `${parts.prefix}${/\s$/.test(parts.prefix) ? '' : ' '}${parts.linkText} ${url}${parts.suffix ? ' ' + parts.suffix : ''}`,
+    parts.closing,
+    '',
+    'Thank you,',
+    '',
+    name,
+    'Attentus Technologies',
+    'Support: (253) 218-6015 x1',
+    'Call or Text Us: (253) 218-6015'
+  ].join('\n');
+
+  const res = await copyRich(html, text);
+  toast(res.ok ? 'Copied review + signature' : 'Copy failed');
+});
+
+  intoWrap.append(sel, settingsBtn, sigBtn, bothBtn);
+}
 
   // Build wrapper next to a button (legacy timestamp)
   async function mountGroupAfterButton(nextToStamp) {
