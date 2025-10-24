@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         attentus-cw-summary-tag-popup
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.5.0
-// @description  Center top popup that appends "  <Sch M/D @ H:MMAM|PM>" for timed future appts or "  <Rem M/D>" for date only rows, one click then hides
+// @version      1.6.2
+// @description  Popup that appends "<Sch M/D @ HH:MM TZ>" (24h + TZ) for timed future appts or "<Rem M/D>" for date-only rows; one click then hides. Uses CT for Logan Horsley, otherwise PT.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
 // @match        https://*.myconnectwise.com/*
@@ -16,10 +16,18 @@
 (function () {
   'use strict';
 
-  const VERSION = 'v150';
+  const VERSION = 'v162';
   const MAX_SUMMARY = 100;
   const POPUP_ID = 'att-schrem-popup';
+
+  // SPA state
   let ranForThisView = false;
+  let anchorObserver = null;
+  let spaMO = null;
+  let anchorWindowTimer = null;
+  let runScheduledAt = 0;
+  let dirty = false;
+  let idleScheduled = false;
 
   // ---------- tiny utils ----------
   const $  = (s, r = document) => r.querySelector(s);
@@ -27,6 +35,8 @@
   const text = el => (el && el.textContent || '').trim();
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const isVisible = el => !!(el && el.offsetParent !== null);
+  const nowMs = () => Date.now();
+  const inModal = el => !!(el && el.closest && el.closest('.cw-gxt-wnd'));
 
   function dispatchAll(el) {
     if (!el) return;
@@ -35,23 +45,14 @@
     el.dispatchEvent(new Event('blur',   { bubbles: true }));
   }
 
-  async function waitForSummary(timeoutMs = 6000) {
-    const t0 = Date.now();
-    while (Date.now() - t0 < timeoutMs) {
-      const el = findSummaryInput();
-      if (el) return el;
-      await sleep(100);
-    }
-    return null;
-  }
-
   // ---------- ticket id memory ----------
   function getTicketId() {
     try {
       const url = new URL(location.href);
       const id = url.searchParams.get('srRecID') ||
                  url.searchParams.get('serviceTicketId') ||
-                 url.searchParams.get('recid');
+                 url.searchParams.get('recid') ||
+                 url.searchParams.get('service_recid');
       if (id && /^\d{3,}$/.test(id)) return id;
     } catch {}
     const banner = Array.from(document.querySelectorAll('.cw_CwLabel,.gwt-Label'))
@@ -75,12 +76,12 @@
            null;
   }
 
-  // More forgiving trailing tag trim: remove any final "<Sch ...>" or "<Rem ...>"
+  // Remove any trailing "<Sch ...>" or "<Rem ...>"
   function removeExistingTagAtEnd(v) {
     return (v || '').replace(/\s*<\s*(?:Sch|Rem)\b[^>]*>\s*$/i, '').trimEnd();
   }
 
-  // Loose detection to suppress popup if user already has *any* <Sch... or <Rem... in the summary
+  // Suppress popup if *any* <Sch... or <Rem... appears anywhere
   function hasAnySchRemTagAnywhere(v) {
     return /<\s*(?:Sch|Rem)\b/i.test(v || '');
   }
@@ -88,9 +89,7 @@
   function appendTag(tag) {
     const inp = findSummaryInput();
     if (!inp) return false;
-
-    // If user has *any* Sch/Rem tag already, don't append a second one.
-    if (hasAnySchRemTagAnywhere(inp.value)) return true;
+    if (hasAnySchRemTagAnywhere(inp.value)) return true; // don't stack tags
 
     const cur = inp.value || '';
     const sameEnd = new RegExp(tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*$','i').test(cur);
@@ -140,58 +139,112 @@
 
     m = s.match(RE_DATE_ONLY);
     if (m) {
-      const date = toLocalDate(m[3], m[1], m[2], 0, 0, null); // start of day
-      const endD = toLocalDate(m[6], m[4], m[5], 23, 59, null); // end of day
+      const date = toLocalDate(m[3], m[1], m[2], 0, 0, null);      // start of day
+      const endD = toLocalDate(m[6], m[4], m[5], 23, 59, null);    // end of day
       if (date && endD) return { kind: 'date', date, endOfDay: endD };
     }
 
     return null;
   }
 
-  function buildSchTag(start) {
-    const mm = start.getMonth() + 1;
-    const dd = start.getDate();
-    const minutes = String(start.getMinutes()).padStart(2, '0');
-    const h24 = start.getHours();
-    const h12 = h24 % 12 || 12;
-    const ampm = h24 < 12 ? 'AM' : 'PM';
-    return ` <Sch ${mm}/${dd} @ ${h12}:${minutes}${ampm}>`;
+  // ---------- owner + timezone formatting ----------
+  function norm(s){ return String(s||'').replace(/\s+/g,' ').trim(); }
+
+  function getTicketOwnerName() {
+    // 1) Direct input (if present)
+    const direct = $('input.cw_ticketOwner');
+    if (direct && direct.value) return norm(direct.value);
+
+    // 2) Pod row labeled "Owner" (stable label/value pattern)
+    const rows = $$('.pod-element-row');
+    for (const row of rows) {
+      const lbl = $('.mm_label, .cw_CwLabel, [id$="-label"], .gwt-Label', row);
+      const t = norm(lbl && lbl.textContent);
+      if (/^owner:?$/i.test(t)) {
+        const v = row.querySelector('input[type="text"], .gwt-Label, .gwt-HTML, .cw_CwTextField, div, span');
+        const val = v && ('value' in v ? v.value : v.textContent);
+        if (val) return norm(val);
+      }
+    }
+
+    // 3) Last-chance scan for any label “Owner” then sibling value
+    const labels = $$('.mm_label, .cw_CwLabel, [id$="-label"], .gwt-Label');
+    for (const el of labels) {
+      if (!/owner:?/i.test(norm(el.textContent))) continue;
+      const row = el.closest('tr, .pod-element-row, .gwt-Panel, .x-form-item, div');
+      const v = row && row.querySelector('input[type="text"], .gwt-Label, .gwt-HTML, .cw_CwTextField, div, span');
+      const val = v && ('value' in v ? v.value : v.textContent);
+      if (val) return norm(val);
+    }
+    return '';
   }
+
+  function partsInZone(date, timeZone) {
+    const fmt = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      hourCycle: 'h23',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+    const parts = fmt.formatToParts(date).reduce((a,p)=>{a[p.type]=p.value;return a;}, {});
+    return {
+      month: String(parts.month||'').replace(/^0/,'') || String(date.getMonth()+1),
+      day:   String(parts.day||'').replace(/^0/,'')   || String(date.getDate()),
+      hour:  parts.hour || String(date.getHours()).padStart(2,'0'),
+      minute: parts.minute || String(date.getMinutes()).padStart(2,'0')
+    };
+  }
+
+  function pickZoneAbbrAndId(ownerName) {
+    if (ownerName === 'Logan Horsley') return { id: 'America/Chicago', abbr: 'CT' };
+    return { id: 'America/Los_Angeles', abbr: 'PT' };
+  }
+
+  function buildSchTagTZ(start) {
+    const owner = getTicketOwnerName();
+    const { id: zone, abbr } = pickZoneAbbrAndId(owner);
+    const p = partsInZone(start, zone);
+    return ` <Sch ${p.month}/${p.day} @ ${p.hour}:${p.minute} ${abbr}>`;
+  }
+
   function buildRemTag(date) {
     const mm = date.getMonth() + 1;
     const dd = date.getDate();
     return ` <Rem ${mm}/${dd}>`;
   }
 
-  // Pick earliest future, dedupe, ignore hidden
+  // ---------- candidate finder (scoped) ----------
   function getNextFutureCandidate() {
     const now = new Date();
-    const roots = [$('.GMDB3DUBGRD') || document];
+
+    // Scope scans to the nearest container of the summary input (avoids full-document scans)
+    const sum = findSummaryInput();
+    const scope = (sum && sum.closest('.cw-ViewRoot, #contentPanel, #cwApp, body')) || document;
+
     const seen = new Set();
-    const candidates = []; // each is {sortAt: Date, tag: string}
+    const candidates = []; // {sortAt: Date, tag: string}
 
-    for (const root of roots) {
-      const cells = root.querySelectorAll('.slashFieldContent, .GMDB3DUBDPD');
-      for (const cell of cells) {
-        if (!isVisible(cell)) continue;
-        const parsed = parseCellText(text(cell));
-        if (!parsed) continue;
+    const cells = scope.querySelectorAll('.slashFieldContent, .GMDB3DUBDPD, .multilineText, .gwt-Label, .gwt-HTML');
+    for (const cell of cells) {
+      if (!isVisible(cell) || inModal(cell)) continue;
+      const parsed = parseCellText(text(cell));
+      if (!parsed) continue;
 
-        if (parsed.kind === 'time') {
-          if (parsed.start <= now) continue;
-          const t = parsed.start.getTime();
-          if (seen.has(`t_${t}`)) continue;
-          seen.add(`t_${t}`);
-          candidates.push({ sortAt: parsed.start, tag: buildSchTag(parsed.start) });
-        } else if (parsed.kind === 'date') {
-          if (parsed.endOfDay <= now) continue; // treat as future if the day has not fully passed
-          const dKey = parsed.date.toDateString();
-          if (seen.has(`d_${dKey}`)) continue;
-          seen.add(`d_${dKey}`);
-          candidates.push({ sortAt: parsed.date, tag: buildRemTag(parsed.date) });
-        }
+      if (parsed.kind === 'time') {
+        if (parsed.start <= now) continue;
+        const t = parsed.start.getTime();
+        if (seen.has(`t_${t}`)) continue;
+        seen.add(`t_${t}`);
+        candidates.push({ sortAt: parsed.start, tag: buildSchTagTZ(parsed.start) });
+      } else if (parsed.kind === 'date') {
+        if (parsed.endOfDay <= now) continue; // future if the day not fully passed
+        const dKey = parsed.date.toDateString();
+        if (seen.has(`d_${dKey}`)) continue;
+        seen.add(`d_${dKey}`);
+        candidates.push({ sortAt: parsed.date, tag: buildRemTag(parsed.date) });
       }
-      if (candidates.length) break;
     }
 
     if (!candidates.length) return null;
@@ -204,12 +257,8 @@
     const sum = findSummaryInput();
     if (!sum) return;
 
-    // NEW: if any <Sch... or <Rem... tag already present (even messy), don't show the popup.
-    if (hasAnySchRemTagAnywhere(sum.value)) return;
-
-    // If exact tag is already at end, also skip (existing behavior).
+    if (hasAnySchRemTagAnywhere(sum.value)) return; // already has a tag
     if (new RegExp(tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*$','i').test(sum.value || '')) return;
-
     if (!shouldShow(ticketId, tag)) return;
 
     let pop = document.getElementById(POPUP_ID);
@@ -219,7 +268,7 @@
     pop.id = POPUP_ID;
     Object.assign(pop.style, {
       position: 'fixed',
-      top: '80px',          // near top
+      top: '80px',
       left: '50%',
       transform: 'translateX(-50%)',
       zIndex: 2147483646,
@@ -229,12 +278,12 @@
       background: '#111827',
       color: '#fff',
       boxShadow: '0 6px 18px rgba(0,0,0,.25)',
-      maxWidth: '480px',
+      maxWidth: '520px',
       font: '12px system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif'
     });
 
     const msg = document.createElement('div');
-    msg.textContent = `Upcoming item detected, append ${tag.trim()} to Summary, then hide this,`;
+    msg.textContent = `Upcoming item detected, append ${tag.trim()} to Summary?`;
     msg.style.marginBottom = '8px';
 
     const row = document.createElement('div');
@@ -282,31 +331,116 @@
     document.body.appendChild(pop);
   }
 
-  // ---------- main ----------
+  // ---------- scheduling (debounced + idle) ----------
+  function scheduleRun() {
+    dirty = true;
+    const now = nowMs();
+    if (now - runScheduledAt < 350) return; // ~350ms debounce
+    runScheduledAt = now;
+    if (idleScheduled) return;
+    idleScheduled = true;
+    const go = () => { idleScheduled = false; if (dirty) runOnceLight(); };
+    (window.requestIdleCallback ? requestIdleCallback(go, { timeout: 1000 }) : setTimeout(go, 0));
+  }
+
+  async function waitForSummary(timeoutMs = 6000) {
+    const t0 = nowMs();
+    while (nowMs() - t0 < timeoutMs) {
+      const el = findSummaryInput();
+      if (el && !inModal(el)) return el;
+      await sleep(100);
+    }
+    return null;
+  }
+
   async function runOnceLight() {
     if (ranForThisView) return;
     const summary = await waitForSummary(6000);
     if (!summary) return;
     ranForThisView = true;
+    dirty = false; // we’re about to scan
 
     for (let i = 0; i < 5; i++) {
       const cand = getNextFutureCandidate();
       if (cand) {
         const tid = getTicketId();
         showPopup(cand.tag, tid);
+        stopAnchorObserver(); // done for this view
         return;
       }
       await sleep(500);
     }
+    // No candidate: stop the anchor window too; don’t keep watching forever
+    stopAnchorObserver();
   }
 
-  function resetOnNav() { ranForThisView = false; setTimeout(runOnceLight, 250); }
+  // ---------- observers ----------
+  function startAnchorObserver() {
+    stopAnchorObserver();
+    // short window to catch late-rendered fields
+    anchorObserver = new MutationObserver(muts => {
+      for (const m of muts) {
+        for (const n of m.addedNodes || []) {
+          if (!(n instanceof HTMLElement)) continue;
+          if (inModal(n)) continue;
+          if (n.matches && (n.matches('input.cw_PsaSummaryHeader') ||
+                            n.matches('.slashFieldContent, .GMDB3DUBDPD, .multilineText, .gwt-Label, .gwt-HTML'))) {
+            scheduleRun();
+            return;
+          }
+          if (n.querySelector && (n.querySelector('input.cw_PsaSummaryHeader') ||
+                                  n.querySelector('.slashFieldContent, .GMDB3DUBDPD, .multilineText, .gwt-Label, .gwt-HTML'))) {
+            scheduleRun();
+            return;
+          }
+        }
+      }
+    });
+    const root = document.querySelector('#cwApp, .cw-ViewRoot, #contentPanel, #applicationRoot, body') || document.body;
+    try {
+      anchorObserver.observe(root, { childList: true, subtree: true });
+    } catch {}
+    anchorWindowTimer = setTimeout(stopAnchorObserver, 8000);
+  }
 
+  function stopAnchorObserver() {
+    if (anchorObserver) { try { anchorObserver.disconnect(); } catch {} anchorObserver = null; }
+    if (anchorWindowTimer) { clearTimeout(anchorWindowTimer); anchorWindowTimer = null; }
+  }
+
+  function initSpaObserver() {
+    if (spaMO) { try { spaMO.disconnect(); } catch {} spaMO = null; }
+    const root = document.querySelector('#cwApp, .cw-ViewRoot, #contentPanel, #applicationRoot, body') || document.body;
+    spaMO = new MutationObserver(() => scheduleRun());
+    try { spaMO.observe(root, { childList: true, subtree: true }); } catch {}
+  }
+
+  function resetOnNav() {
+    ranForThisView = false;
+    dirty = false;
+    scheduleRun();
+    startAnchorObserver();
+  }
+
+  // History API hooks
   ['pushState','replaceState'].forEach(k => {
     const orig = history[k];
-    history[k] = function () { const r = orig.apply(this, arguments); resetOnNav(); return r; };
+    history[k] = function () {
+      const r = orig.apply(this, arguments);
+      resetOnNav();
+      return r;
+    };
   });
   window.addEventListener('popstate', resetOnNav);
+  window.addEventListener('visibilitychange', () => { if (!document.hidden) scheduleRun(); });
+  window.addEventListener('focus', scheduleRun);
 
-  runOnceLight();
+  // Initial ladder + observers (soft ramp)
+  (function prime() {
+    initSpaObserver();
+    scheduleRun();                // t=0
+    setTimeout(scheduleRun, 400); // softer ramp
+    setTimeout(scheduleRun, 1200);
+    startAnchorObserver();        // short late-load window
+  })();
 })();
