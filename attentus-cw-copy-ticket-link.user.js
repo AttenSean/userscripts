@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         attentus-cw-copy-ticket-link
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.3.0
-// @description  Adds Copy Ticket button next to Clear Contact, copies rich HTML with plain text fallback (fix: full title incl. parentheses; now with 'Copied' flash)
+// @version      1.4.0
+// @description  Copy ticket link. Left-click = quick link. Right-click = detailed (newline: Company — Contact). No Insight pod dependency.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
+// @match        https://*.myconnectwise.com/*
 // @run-at       document-idle
 // @grant        GM_setClipboard
 // @grant        GM.setClipboard
@@ -18,12 +19,11 @@
 
   const BTN_ID = 'cw-copy-ticket-link-btn';
 
-  // -------- utils --------
+  // ------- utils -------
   const $  = (s, r = document) => r.querySelector(s);
   const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
   const txt = el => (el && el.textContent || '').trim();
 
-  // Inject tiny CSS once for the flash effect
   function ensureFlashStyles() {
     if (document.getElementById('cw-copy-flash-styles')) return;
     const css = document.createElement('style');
@@ -34,7 +34,6 @@
     `;
     document.head.appendChild(css);
   }
-
   function showToast(msg) {
     const n = document.createElement('div');
     n.textContent = msg;
@@ -46,55 +45,37 @@
     document.body.appendChild(n);
     setTimeout(() => n.remove(), 1200);
   }
-
   function flashCopied(btnRoot, labelEl) {
     if (!labelEl) return;
     const original = labelEl.textContent;
     labelEl.textContent = 'Copied';
     btnRoot.classList.add('cw-flash-pulse');
     btnRoot.setAttribute('aria-live', 'polite');
-    setTimeout(() => {
-      labelEl.textContent = original;
-      btnRoot.classList.remove('cw-flash-pulse');
-    }, 900);
+    setTimeout(() => { labelEl.textContent = original; btnRoot.classList.remove('cw-flash-pulse'); }, 900);
   }
 
-  // -------- data extraction --------
+  // ------- ticket basics -------
+  function getBannerLine() {
+    return $$('.cw_CwLabel,.gwt-Label').map(txt)
+      .find(t => /service\s*ticket\s*#\s*\d+/i.test(t || '')) || '';
+  }
   function getTicketIdFromBanner() {
-    const line = $$('.cw_CwLabel,.gwt-Label').map(txt)
-      .find(t => /service\s*ticket\s*#\s*\d+/i.test(t || ''));
-    const m = line && line.match(/#\s*(\d{3,})/);
+    const m = getBannerLine().match(/#\s*(\d{3,})/);
     return m ? m[1] : null;
   }
-
-  // NEW: capture everything after "#ID - " to the end (don’t stop at parentheses)
   function getSummaryFromBannerFull() {
-    const line = $$('.cw_CwLabel,.gwt-Label').map(txt)
-      .find(t => /service\s*ticket\s*#\s*\d+/i.test(t || ''));
-    if (!line) return '';
-    const m = line.match(/#\s*\d+\s*-\s*(.+)$/);
+    const m = getBannerLine().match(/#\s*\d+\s*-\s*(.+)$/);
     return m ? m[1].trim() : '';
   }
-
-  // Fallback: derive full label from the tab title
   function getLabelFromTitle() {
     let t = (document.title || '').trim();
     if (!t) return '';
-
-    // Strip vendor suffix like " | ConnectWise Manage" / " - ConnectWise ..."
     t = t.replace(/\s*[|\-–—]\s*ConnectWise.*$/i, '').trim();
-
-    // If title already starts with #123..., we can use it directly
     if (/^#\d+/.test(t)) return t;
-
-    // Or if it has "#123 - rest", rebuild in our style
     const m = t.match(/#\s*(\d{3,})\s*-\s*(.+)$/);
     if (m) return `#${m[1]} - ${m[2].trim()}`;
-
     return '';
   }
-
-  // Optional: Need-by tag (unchanged)
   function getNeedByTag() {
     const rows = $$('.gwt-Label, .mm_label, .detailLabel, .cw_CwLabel');
     for (const el of rows) {
@@ -110,36 +91,49 @@
     }
     return '';
   }
-
-  // Build label (prefer full banner; then title; else minimal)
-  function buildLabel() {
+  function buildBaseLabel() {
     const id   = getTicketIdFromBanner() || '????';
     const need = getNeedByTag();
-
     const fullFromBanner = getSummaryFromBannerFull();
-    if (fullFromBanner) {
-      let base = `#${id} - ${fullFromBanner}`;
-      if (need) base += ` ${need}`;
-      return base;
-    }
-
-    const fromTitle = getLabelFromTitle();
-    if (fromTitle) {
-      return need ? `${fromTitle} ${need}` : fromTitle;
-    }
-
-    // Last-resort minimal
-    return need ? `#${id} ${need}` : `#${id}`;
+    const base = fullFromBanner ? `#${id} - ${fullFromBanner}` : (getLabelFromTitle() || `#${id}`);
+    return need ? `${base} ${need}` : base;
   }
 
+  // ------- Company / Contact -------
+  function getContactName() {
+    const valOf = (sel) => $(sel)?.value?.trim() || '';
+    return (
+      valOf('input.cw_contact') ||
+      valOf('[data-cwid="contact"] input[readonly]') ||
+      valOf('[data-cwid="contact"] input') ||
+      ''
+    );
+  }
+  function getCompanyName() {
+    const valOf = (sel) => $(sel)?.value?.trim() || '';
+    let v =
+      valOf('input.cw_company') ||
+      valOf('[data-cwid="company"] input[readonly]') ||
+      valOf('[data-cwid="company"] input');
+    if (v) return v;
+
+    // label/link fallback
+    const label = $$('td,div,span').find(n => /(^|\s)company[:\s]*$/i.test(txt(n)));
+    if (label) {
+      const container = label.closest('tr,div,td') || label.parentElement;
+      const linkish = container && (container.querySelector('a, .gwt-Label, .gwt-HTML, span:last-child'));
+      v = txt(linkish);
+    }
+    return v || '';
+  }
+
+  // ------- clipboard -------
   function escapeHtml(s) {
     return String(s)
       .replace(/&/g,'&amp;').replace(/</g,'&lt;')
       .replace(/>/g,'&gt;').replace(/"/g,'&quot;')
       .replace(/'/g,'&#39;');
   }
-
-  // -------- clipboard, prefers true HTML flavor --------
   async function copyRich(html, text) {
     try {
       if (navigator.clipboard?.write && window.ClipboardItem) {
@@ -151,7 +145,6 @@
         return { ok: true, via: 'ClipboardItem' };
       }
     } catch {}
-
     try {
       if (typeof GM !== 'undefined' && GM && typeof GM.setClipboard === 'function') {
         try { GM.setClipboard(html, 'html'); return { ok: true, via: "GM.setClipboard('html')" }; } catch {}
@@ -163,7 +156,6 @@
         try { GM_setClipboard(html, 'html'); return { ok: true, via: "GM_setClipboard('html')" }; } catch {}
       }
     } catch {}
-
     try {
       if (navigator.clipboard?.writeText) {
         await navigator.clipboard.writeText(text);
@@ -184,7 +176,43 @@
     return { ok: false, via: 'manual' };
   }
 
-  // -------- UI --------
+  // ------- copy modes -------
+  function buildTailParts() {
+    const company = getCompanyName();
+    const contact = getContactName();
+    const parts = [];
+    if (company) parts.push(company);
+    if (contact) parts.push(contact);
+    return parts;
+  }
+
+  async function copySimple(btn, labelEl) {
+    const href = location.href;
+    const base = buildBaseLabel();
+
+    const html = `<a href="${href}">${escapeHtml(base)}</a>`;
+    const text = base;
+
+    const res = await copyRich(html, text);
+    if (res.ok) flashCopied(btn, labelEl); else showToast('Copy failed, manual paste');
+  }
+
+  async function copyDetailed(btn, labelEl) {
+    const href = location.href;
+    const base = buildBaseLabel();
+
+    const parts = buildTailParts(); // Company — Contact
+    const tailText = parts.length ? `\n${parts.join(' — ')}` : '';
+    const tailHTML = parts.length ? `<br>${escapeHtml(parts.join(' — '))}` : '';
+
+    const html = `<a href="${href}">${escapeHtml(base)}</a>${tailHTML}`;
+    const text = `${base}${tailText}`;
+
+    const res = await copyRich(html, text);
+    if (res.ok) flashCopied(btn, labelEl); else showToast('Copy failed, manual paste');
+  }
+
+  // ------- UI + placement -------
   function makeButton() {
     ensureFlashStyles();
 
@@ -207,23 +235,16 @@
     btn.appendChild(inner);
     outer.appendChild(btn);
 
-    outer.title = 'Copy formatted ticket link for Teams';
-    outer.addEventListener('click', async (e) => {
-      e.preventDefault();
-      const href = location.href;
-      const labelText = buildLabel();
-      const html = `<a href="${href}">${escapeHtml(labelText)}</a>`;
-      const text = labelText; // keep URL out of plain text to avoid unfurl spam
-      const res = await copyRich(html, text);
-      if (res.ok) {
-        flashCopied(btn, label);
-      } else {
-        showToast('Copy failed, manual paste');
-      }
-    });
-
+    outer.title = 'Left-click: quick link · Right-click: detailed (newline: Company — Contact)';
+    outer.addEventListener('click', (e) => { e.preventDefault(); copySimple(btn, label); });
+    outer.addEventListener('contextmenu', (e) => { e.preventDefault(); copyDetailed(btn, label); });
     outer.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); outer.click(); }
+      if (e.key === 'Enter') { e.preventDefault(); copySimple(btn, label); }
+      if (e.key === ' ')     { e.preventDefault(); copyDetailed(btn, label); }
+    });
+    // Optional: Shift+Click to force detailed with mouse
+    outer.addEventListener('mousedown', (e) => {
+      if (e.button === 0 && e.shiftKey) { e.preventDefault(); copyDetailed(btn, label); }
     });
 
     return outer;
@@ -232,23 +253,35 @@
   function placeButton() {
     if (document.getElementById(BTN_ID)) return true;
 
+    // Primary: after Clear Contact (if present from our other script)
     const clearBtn = document.getElementById('cw-clear-contact-btn');
-    if (clearBtn) {
-      clearBtn.insertAdjacentElement('afterend', makeButton());
-      return true;
-    }
+    if (clearBtn) { clearBtn.insertAdjacentElement('afterend', makeButton()); return true; }
 
-    const followLabel = $$('.GMDB3DUBBPG').find(el => (txt(el).toLowerCase() === 'follow'));
-    const followBtn = followLabel && followLabel.closest('.cw_CwActionButton');
-    if (followBtn) {
-      followBtn.insertAdjacentElement('afterend', makeButton());
-      return true;
-    }
+    // Secondary: after a “Follow” action by accessible name (class-agnostic)
+    const findToolbarButtonByName = (name) => {
+      name = String(name).trim().toLowerCase();
+      const candidates = $$('.cw_CwActionButton, [role="button"], .mm_button, .gwt-Button');
+      for (const c of candidates) {
+        const text = txt(c).toLowerCase();
+        if (text === name || text.split(/\s+/)[0] === name) return c.closest('.cw_CwActionButton') || c;
+        const al = (c.getAttribute('aria-label') || '').toLowerCase();
+        if (al === name) return c.closest('.cw_CwActionButton') || c;
+      }
+      return null;
+    };
+    const followBtn = findToolbarButtonByName('follow');
+    if (followBtn) { (followBtn.closest('.cw_CwActionButton') || followBtn).insertAdjacentElement('afterend', makeButton()); return true; }
+
+    // Tertiary: append to any action toolbar container
+    const anyAction = $('.cw_CwActionButton');
+    if (anyAction && anyAction.parentElement) { anyAction.parentElement.appendChild(makeButton()); return true; }
 
     return false;
   }
 
-  function ensure() { placeButton(); }
+  // SPA-safe ensure
+  let ensureTick = 0;
+  function ensure() { if (++ensureTick > 200) return; try { placeButton(); } catch {} }
 
   const mo = new MutationObserver(() => ensure());
   mo.observe(document.documentElement, { subtree: true, childList: true });
@@ -259,5 +292,9 @@
   });
   window.addEventListener('popstate', ensure);
 
+  setTimeout(ensure, 0);
+  setTimeout(ensure, 250);
+  setTimeout(ensure, 750);
+  setTimeout(ensure, 1500);
   ensure();
 })();
