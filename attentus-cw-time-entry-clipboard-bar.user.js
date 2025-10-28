@@ -1,11 +1,10 @@
 // ==UserScript==
 // @name         attentus-cw-time-entry-clipboard-bar
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.9.0
-// @description  Clipboard buttons by the Notes timestamp (Signature, Review+Signature) with settings. Also mounts under Thread: Auto time entries (pod 16) on ticket pages. Disables on Time Sheet screens; prevents duplicate toolbars.
+// @version      1.9.1
+// @description  Clipboard buttons by the Notes timestamp (standalone Time Entry) and under the ticket thread pod header. Does not relocate action-bar buttons. Disabled on Time Sheets.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
-// @match        https://*.myconnectwise.com/*
 // @run-at       document-idle
 // @grant        GM_setClipboard
 // @grant        GM.setClipboard
@@ -28,33 +27,74 @@
     prefix: 'Please take a moment to ',
     linkText: 'leave a quick Google review.',
     suffix: '',
-    closing: 'Mentioning my name helps me get recognized for the work I do, and it truly means a lot.',
-    randomizeLocation: true,
-    defaultLocation: 'bellevue',
+    closing: 'Mentioning my name helps me get recognized for the work I do.',
+    spacedThankYou: false,
+    defaultLocation: 'bellevue', // 'bellevue' | 'seattle' | 'tacoma'
+    randomizeReviewLine: false
   };
-  const KEYS = {
-    name:    'att_cw_agent_name',
-    headline:'att_cw_review_headline',
-    prefix:  'att_cw_review_prefix',
-    link:    'att_cw_review_linktext',
-    suffix:  'att_cw_review_suffix',
-    closing: 'att_cw_review_closing',
-    random:  'att_cw_randomize_location',
-    defloc:  'att_cw_default_location',
-  };
-  const REVIEW_URLS = {
-    bellevue: 'https://www.attentus.tech/bellevue_reviews',
-    seattle:  'https://www.attentus.tech/seattle_reviews',
-    tacoma:   'https://www.attentus.tech/tacoma_reviews',
-    renton:   'https://www.attentus.tech/renton_reviews',
-  };
-  const LOCATIONS = Object.keys(REVIEW_URLS);
 
-  // ---------- tiny utils ----------
-  const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  const rand = arr => arr[Math.floor(Math.random() * arr.length)];
-  const $ = (s, r=document) => r.querySelector(s);
-  const $$ = (s, r=document) => Array.from(r.querySelectorAll(s));
+  const KEYS = {
+    name:    'att_clip_name',
+    headline:'att_clip_headline',
+    prefix:  'att_clip_prefix',
+    link:    'att_clip_link',
+    suffix:  'att_clip_suffix',
+    closing: 'att_clip_closing',
+    spaced:  'att_clip_spaced',
+    defloc:  'att_clip_defloc',
+    random:  'att_clip_random'
+  };
+
+  const GROUP_ID = 'cw-notes-inline-copy-group';
+
+  // ---------- minimal styles to avoid grey/disabled look ----------
+(function ensureStyles(){
+  if (document.getElementById('att-clipbar-style')) return;
+  const s = document.createElement('style');
+  s.id = 'att-clipbar-style';
+  s.textContent = `
+    #cw-notes-inline-copy-group {
+      display: inline-flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+      margin: 8px 0;
+    }
+    #cw-notes-inline-copy-group .mm_button {
+      display: inline-block !important;
+      pointer-events: auto !important;
+      opacity: 1 !important;
+      cursor: pointer !important;
+      padding: 4px 8px;
+      border-radius: 6px;
+      border: 1px solid rgba(0,0,0,.2);
+      background: #2563eb;
+      color: #fff;
+      line-height: 1.2;
+      white-space: nowrap;
+    }
+    #cw-notes-inline-copy-group select { padding: 4px 6px; border-radius: 6px; }
+  `;
+  document.head.appendChild(s);
+})();
+
+
+
+  // ---------- utils ----------
+  const esc = (s) => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const asText = (html) => html.replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, '');
+
+  function toast(msg) {
+    const n = document.createElement('div');
+    Object.assign(n.style, {
+      position:'fixed', right:'16px', bottom:'16px', zIndex:2147483646,
+      background:'#111827', color:'#fff', padding:'8px 10px',
+      borderRadius:'8px', border:'1px solid rgba(255,255,255,.2)', font:'12px system-ui,Segoe UI,Roboto,Arial,sans-serif'
+    });
+    n.textContent = msg;
+    document.body.appendChild(n);
+    setTimeout(() => n.remove(), 1400);
+  }
 
   // ---------- storage helpers ----------
   async function gmGet(key, defVal) {
@@ -71,27 +111,26 @@
 
   // ---------- clipboard ----------
   async function copyRich(html, text) {
-    try {
-      if (navigator.clipboard && window.ClipboardItem) {
-        const blobHtml = new Blob([html], { type: 'text/html' });
-        const blobTxt  = new Blob([text], { type: 'text/plain' });
-        await navigator.clipboard.write([new ClipboardItem({ 'text/html': blobHtml, 'text/plain': blobTxt })]);
-        return { ok: true };
-      }
-    } catch {}
-    try {
-      if (typeof GM !== 'undefined' && GM?.setClipboard) {
-        try { GM.setClipboard(html, 'html'); return { ok: true }; } catch {}
-        try { GM.setClipboard(html, { type: 'html' }); return { ok: true }; } catch {}
-      }
-    } catch {}
-    try { if (typeof GM_setClipboard === 'function') { GM_setClipboard(html, 'html'); return { ok: true }; } } catch {}
-    try { if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(text); return { ok: true }; } } catch {}
+    try { if (typeof GM_setClipboard === 'function') GM_setClipboard(html, 'html'); } catch {}
+    try { if (typeof GM === 'object' && GM?.setClipboard) GM.setClipboard(html, { type: 'text/html' }); } catch {}
+    try { if (typeof GM === 'object' && GM?.setClipboard) GM.setClipboard(text, { type: 'text/plain' }); } catch {}
+
+    if (navigator.clipboard && window.ClipboardItem) {
+      try {
+        const data = { 'text/html': new Blob([html], { type:'text/html' }),
+                       'text/plain': new Blob([text], { type:'text/plain' }) };
+        await navigator.clipboard.write([new ClipboardItem(data)]);
+        return true;
+      } catch {}
+    }
+    if (navigator.clipboard) { try { await navigator.clipboard.writeText(text); return true; } catch {} }
     try {
       const ta = document.createElement('textarea');
-      ta.style.position = 'fixed'; ta.style.top = '-2000px';
-      ta.value = text; document.body.appendChild(ta);
-      ta.focus(); ta.select(); const ok = document.execCommand && document.execCommand('copy');
+      ta.value = text;
+      ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand && document.execCommand('copy');
       document.body.removeChild(ta);
       if (ok) return { ok: true };
     } catch {}
@@ -100,7 +139,6 @@
 
   // ---------- view detection ----------
   function isTimesheetContext() {
-    // Timesheet breadcrumb / containers (keeps toolbar off Daily/Weekly Time sheets)
     const crumbs = Array.from(document.querySelectorAll('.cw-main-banner .navigationEntry, .cw-main-banner .cw_CwLabel'))
       .map(e => (e.textContent || '').trim().toLowerCase());
     if (crumbs.some(t => t.includes('open time sheets') || t === 'time sheet')) return true;
@@ -108,8 +146,30 @@
     return false;
   }
 
-  // ---------- locate anchors ----------
-  // A) Classic Notes timestamp button on legacy time-entry form
+  function isTicketContext() {
+    const href = (location.href || '').toLowerCase();
+    const search = location.search || '';
+    if (/[?&](service_recid|recid|serviceticketid)=\d+/i.test(search)) return true;
+    if (document.querySelector('.pod_ticketSummary, .pod_ticketHeaderActions')) return true;
+    if ([...document.querySelectorAll('.cw_CwLabel,.gwt-Label,.mm_label')]
+          .some(el => /service\s*ticket\s*#/i.test((el.textContent || '')))) return true;
+    return false;
+  }
+
+function findThreadPodHeaderByLabel(textNeedle) {
+  const labels = document.querySelectorAll('.mm_podHeader [id$="-label"], .pod_unknown_header [id$="-label"]');
+  const want = (textNeedle || '').toLowerCase();
+  for (const el of labels) {
+    const t = (el.textContent || '').trim().toLowerCase();
+    if (!t) continue;
+    // exact pod we want: "Thread: Auto time entries"
+    if (t.includes(want)) return el;
+  }
+  return null;
+}
+
+
+  // ---------- locate Notes timestamp (standalone Time Entry) ----------
   function findNotesTimestampButton() {
     const stamps = document.querySelectorAll('.cw_ToolbarButton_TimeStamp');
     for (const st of stamps) {
@@ -120,66 +180,50 @@
     return null;
   }
 
-  // B) Thread: Auto time entries pod (pod 16) — mount just below header (host page, not inside iframe)
-  function findThreadTimepadHeader() {
-    // stable CW hosted pod header for Thread: Auto time entries
-    return document.querySelector('.mm_podHeader.pod_hosted_16_header');
-  }
-  function threadTimepadMountTarget() {
-    const header = findThreadTimepadHeader();
-    if (!header) return null;
+  // ---------- ticket thread header target (robust) ----------
+function threadTimepadMountTarget() {
+  // 1) Prefer the "Thread: Auto time entries" header label (hosted_16)
+  const autoHeaderLabel = findThreadPodHeaderByLabel('thread: auto time entries');
+  if (autoHeaderLabel) return autoHeaderLabel.closest('.mm_podHeader, .pod_unknown_header') || autoHeaderLabel;
 
-    // Prefer a slim inline mount just after the header’s built-in toolbar region if present,
-    // otherwise insert a small strip immediately after the header block.
-    // We avoid the cross-origin iframe entirely.
-    const toolbar = header.querySelector('.mm_toolbar') || header; // best-effort
-    return toolbar;
-  }
+  // 2) If the label isn’t present yet, try the known hosted_16 header class
+  const hosted16Header = document.querySelector('.pod_hosted_16_header');
+  if (hosted16Header) return hosted16Header;
 
-  // Build ONE <pre> block for review + signature (uniform font size)
-function reviewAndSignatureHTML(name, url, { headline, prefix, linkText, suffix, closing }) {
-  const safe = s => esc(String(s || ''));
-  const gap1 = /\s$/.test(prefix) ? '' : ' ';
-  const gap2 = suffix && !/^\s/.test(suffix) ? ' ' : '';
-  return `<pre style="font-family:inherit;line-height:1.35;white-space:pre-wrap;margin:0">
---
-<b>${safe(headline)}</b>
-${safe(prefix)}${gap1}<a href="${esc(url)}">${safe(linkText)}</a>${gap2}${safe(suffix || '')}
-${safe(closing)}
+  // 3) If the pod wrapper is there, use it (insert before its first child)
+  const hosted16Pod = document.querySelector('.pod_hosted_16');
+  if (hosted16Pod) return hosted16Pod;
 
-Thank you,
-
-${esc(name)}
-Attentus Technologies
-<b>Support:</b> (253) 218-6015 x1
-<b>Call</b> or <b>Text Us:</b> (253) 218-6015
-</pre>`;
+  // Never target discussion or real-time chat pods
+  return null;
 }
+
 
   // ---------- content builders ----------
-function signatureHTML(name) {
-  const n = esc(name);
-  return `<pre style="font-family:inherit;line-height:1.35;white-space:pre-wrap;margin:0">
-Thank you,
+  function signatureHTML(name, { spacedThankYou = false } = {}) {
+    const n = esc(name);
+    return [
+      `<div style="margin:0;line-height:1.35">`,
+      `<div style="margin:0">Thank you,</div>`,
+      spacedThankYou ? `<div style="margin:0"><br></div>` : ``,
+      `<div style="margin:0"><strong>${n}</strong></div>`,
+      `<div style="margin:0">Attentus Technologies</div>`,
+      `<div style="margin:0"><strong>Support:</strong> (253) 218-6015 x1</div>`,
+      `<div style="margin:0">Call or Text Us: (253) 218-6015</div>`
+    ].join('');
+  }
 
-${n}
-Attentus Technologies
-<b>Support:</b> (253) 218-6015 x1
-<b>Call</b> or <b>Text Us:</b> (253) 218-6015
-</pre>`;
-}
-
-function signatureText(name) {
-  return [
-    '',
-    'Thank you,',
-    '',
-    name,
-    'Attentus Technologies',
-    'Support: (253) 218-6015 x1',
-    'Call or Text Us: (253) 218-6015'
-  ].join('\n');
-}
+  function signatureText(name, { spacedThankYou = false } = {}) {
+    const lines = [
+      'Thank you,',
+      spacedThankYou ? '' : null,
+      name,
+      'Attentus Technologies',
+      'Support: (253) 218-6015 x1',
+      'Call or Text Us: (253) 218-6015'
+    ].filter(v => v !== null);
+    return lines.join('\n');
+  }
 
   async function getReviewMsg() {
     const headline = await gmGet(KEYS.headline, DEFAULTS.headline);
@@ -187,201 +231,130 @@ function signatureText(name) {
     const linkText = await gmGet(KEYS.link,     DEFAULTS.linkText);
     const suffix   = await gmGet(KEYS.suffix,   DEFAULTS.suffix);
     const closing  = await gmGet(KEYS.closing,  DEFAULTS.closing);
-    return { headline, prefix, linkText, suffix, closing };
+    const random   = await gmGet(KEYS.random,   DEFAULTS.randomizeReviewLine);
+
+    const line = random
+      ? `${headline} ${prefix}<a href="https://g.page/r/CZ4lN2mJq0wEEB0/review" target="_blank" rel="noopener">${esc(linkText)}</a>${suffix ? ' ' + esc(suffix) : ''}`
+      : `${prefix}<a href="https://g.page/r/CZ4lN2mJq0wEEB0/review" target="_blank" rel="noopener">${esc(linkText)}</a>${suffix ? ' ' + esc(suffix) : ''}`;
+
+    return line + `<div>${esc(closing)}</div>`;
   }
 
-function reviewHTMLParts(url, { headline, prefix, linkText, suffix, closing }) {
-  const safe = s => esc(String(s || ''));
-  const gap1 = /\s$/.test(prefix) ? '' : ' ';
-  const gap2 = suffix && !/^\s/.test(suffix) ? ' ' : '';
-  return `<pre style="font-family:inherit;line-height:1.35;white-space:pre-wrap;margin:0">
---
-<b>${safe(headline)}</b>
-${safe(prefix)}${gap1}${safe(linkText)} ${esc(url)}${gap2}${safe(suffix || '')}
-${safe(closing)}
-</pre>`;
-}
-function reviewTextParts(url, { headline, prefix, linkText, suffix, closing }) {
-  const gap1 = /\s$/.test(prefix) ? '' : ' ';
-  const gap2 = suffix && !/^\s/.test(suffix) ? ' ' : '';
-  return [
-    '--',
-    headline,
-    `${prefix}${gap1}${linkText} ${url}${gap2}${suffix || ''}`,
-    closing
-  ].join('\n');
-}
-
-  // ---------- inline UI (single instance) ----------
-  const GROUP_ID = 'cw-notes-inline-copy-group';
-
-  function mkBtn(label, handler) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.textContent = label;
-    Object.assign(b.style, {
-      padding: '4px 8px',
-      borderRadius: '6px',
-      border: '1px solid rgba(0,0,0,.2)',
-      background: 'rgb(37,99,235)',
-      color: '#fff',
-      font: '12px system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif',
-      cursor: 'pointer',
-      userSelect: 'none',
-      whiteSpace: 'nowrap'
-    });
-    b.addEventListener('click', handler);
-    return b;
-  }
-  function mkIconBtn(label, title, handler) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.textContent = label;
-    b.title = title;
-    Object.assign(b.style, {
-      padding: '0 6px',
-      height: '26px',
-      lineHeight: '26px',
-      borderRadius: '6px',
-      border: '1px solid rgba(0,0,0,.2)',
-      background: '#fff',
-      color: '#111',
-      font: '14px system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif',
-      cursor: 'pointer',
-      userSelect: 'none',
-      whiteSpace: 'nowrap'
-    });
-    b.addEventListener('click', handler);
-    return b;
-  }
-
-  function getReviewUrlFrom(sel) {
-    return REVIEW_URLS[sel.value] || REVIEW_URLS.bellevue;
-  }
-
+  // ---------- group child builder ----------
+// Single UI set for all contexts:
+//   Bellevue [⚙] | Copy signature | Copy review + signature
 async function buildGroupChildren(intoWrap) {
-  // location dropdown
   const sel = document.createElement('select');
   sel.innerHTML = `
     <option value="bellevue">Bellevue</option>
     <option value="seattle">Seattle</option>
     <option value="tacoma">Tacoma</option>
-    <option value="renton">Renton</option>
   `;
-  Object.assign(sel.style, {
-    height: '26px', padding: '0 6px',
-    border: '1px solid rgba(0,0,0,.2)', borderRadius: '6px',
-    font: '12px system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif'
+  sel.value = await gmGet(KEYS.defloc, DEFAULTS.defaultLocation);
+
+  const mkBtn = (label, title, onClick) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'mm_button';
+    b.textContent = label;
+    b.title = title;
+    b.style.opacity = '1';
+    b.style.pointerEvents = 'auto';
+    b.style.cursor = 'pointer';
+    b.addEventListener('click', async (e) => { e.preventDefault(); await onClick(e); });
+    b.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); b.click(); }});
+    return b;
+  };
+
+  const name   = await gmGet(KEYS.name,   DEFAULTS.name);
+  const spaced = await gmGet(KEYS.spaced, DEFAULTS.spacedThankYou);
+
+  const copySignature = async () => {
+    const html = signatureHTML(name, { spacedThankYou: spaced });
+    await copyRich(html, signatureText(name, { spacedThankYou: spaced }));
+    toast('Signature copied');
+  };
+
+  const copyReviewPlusSignature = async () => {
+    const reviewHTML = await getReviewMsg();
+    const sigHTML    = signatureHTML(name, { spacedThankYou: spaced });
+    const html = `${reviewHTML}<div><br></div>${sigHTML}`;
+    const text = `${asText(reviewHTML)}\n\n${signatureText(name, { spacedThankYou: spaced })}`;
+    await copyRich(html, text);
+    toast('Review + signature copied');
+  };
+
+  const btnSettings = mkBtn('⚙', 'Open clipboard settings', () => showSettings());
+btnSettings.setAttribute('aria-label','Open clipboard settings');
+  const btnSig      = mkBtn('Copy signature', 'Copy signature', copySignature);
+  const btnReview   = mkBtn('Copy review + signature', 'Copy review message + signature', copyReviewPlusSignature);
+
+  Object.assign(intoWrap.style, { display:'inline-flex', gap:'6px', alignItems:'center', flexWrap:'wrap' });
+  intoWrap.append(sel, btnSettings, btnSig, btnReview);
+
+  sel.addEventListener('change', async () => {
+    await gmSet(KEYS.defloc, sel.value);
+    toast(`Default location: ${sel.value}`);
   });
-
-  // choose initial value (settings)
-  const randomOn = await gmGet(KEYS.random, DEFAULTS.randomizeLocation);
-  const defloc   = await gmGet(KEYS.defloc, DEFAULTS.defaultLocation);
-  sel.value = randomOn ? rand(LOCATIONS) : (LOCATIONS.includes(defloc) ? defloc : DEFAULTS.defaultLocation);
-
-  const settingsBtn = mkIconBtn('⚙︎', 'Set name, review message, and default location', showSettings);
-
-  // --- Button callbacks ---
-  const sigBtn = mkBtn('Copy signature', async () => {
-    const name = await gmGet(KEYS.name, DEFAULTS.name);
-    const html = signatureHTML(name);
-    const text = signatureText(name);
-    const res  = await copyRich(html, text);
-    toast(res.ok ? 'Copied signature' : 'Copy failed');
-  });
-
-const bothBtn = mkBtn('Copy review + signature', async () => {
-  const name   = await gmGet(KEYS.name, DEFAULTS.name);
-  const parts  = await getReviewMsg();
-  const url    = getReviewUrlFrom(sel);
-
-  const html = reviewAndSignatureHTML(name, url, parts);
-
-  // Plain-text version (mirrors spacing above)
-  const text = [
-    '--',
-    parts.headline,
-    `${parts.prefix}${/\s$/.test(parts.prefix) ? '' : ' '}${parts.linkText} ${url}${parts.suffix ? ' ' + parts.suffix : ''}`,
-    parts.closing,
-    '',
-    'Thank you,',
-    '',
-    name,
-    'Attentus Technologies',
-    'Support: (253) 218-6015 x1',
-    'Call or Text Us: (253) 218-6015'
-  ].join('\n');
-
-  const res = await copyRich(html, text);
-  toast(res.ok ? 'Copied review + signature' : 'Copy failed');
-});
-
-  intoWrap.append(sel, settingsBtn, sigBtn, bothBtn);
 }
 
-  // Build wrapper next to a button (legacy timestamp)
-  async function mountGroupAfterButton(nextToStamp) {
-    // If an existing group isn't adjacent to this stamp, move it.
+
+  // ---------- mount near Notes timestamp (standalone Time Entry) ----------
+  function mountGroup(nextToStamp) {
     const existing = document.getElementById(GROUP_ID);
     if (existing) {
       if (existing.previousElementSibling === nextToStamp) return true;
-      existing.remove();
+      if (existing.dataset && existing.dataset.origin === 'att-clipboard-bar') existing.remove();
     }
 
     const wrap = document.createElement('span');
     wrap.id = GROUP_ID;
+    wrap.dataset.origin = 'att-clipboard-bar';
     Object.assign(wrap.style, {
       display: 'inline-flex', gap: '6px', marginLeft: '8px',
       verticalAlign: 'middle', alignItems: 'center', whiteSpace: 'nowrap'
     });
 
-    // ensure timestamp TD doesn’t wrap
     const td = nextToStamp.closest('td'); if (td) td.style.whiteSpace = 'nowrap';
     nextToStamp.style.display = 'inline-block';
     nextToStamp.insertAdjacentElement('afterend', wrap);
 
-    await buildGroupChildren(wrap);
+    buildGroupChildren(wrap);
     return true;
   }
 
-  // Build wrapper under/after a pod header (Thread pod 16)
-  async function mountGroupUnderHeader(headerOrToolbar) {
-    const existing = document.getElementById(GROUP_ID);
-    if (existing) {
-      // If we already sit right after this header/toolbar, keep it
-      if (existing.previousElementSibling === headerOrToolbar) return true;
-      existing.remove();
-    }
+  // Mount clipboard bar under thread header/above first note on ticket pages (no relocation of action-bar buttons).
+async function mountGroupUnderThread(targetEl) {
+  // Guard: do not mount in Discussion or Real time notes pods
+  const pod = targetEl.closest?.('.pod_service_ticket_discussion, .pod_hosted_15');
+  if (pod) return false;
 
-    const strip = document.createElement('div');
-    strip.id = GROUP_ID;
-    Object.assign(strip.style, {
-      display: 'flex', alignItems: 'center', gap: '8px',
-      padding: '6px 8px', marginTop: '6px',
-      background: 'rgba(17,24,39,.04)', border: '1px solid rgba(0,0,0,.08)',
-      borderRadius: '8px'
-    });
+  const existing = document.getElementById(GROUP_ID);
+  if (existing && (existing.previousElementSibling === targetEl || existing.nextElementSibling === targetEl)) return true;
+  if (existing && existing.dataset && existing.dataset.origin === 'att-clipboard-bar') existing.remove();
 
-    headerOrToolbar.insertAdjacentElement('afterend', strip);
-    await buildGroupChildren(strip);
-    return true;
+  const strip = document.createElement('div');
+  strip.id = GROUP_ID;
+  strip.dataset.origin = 'att-clipboard-bar';
+  // layout ensured by the style block above
+
+  // If target is a header, insert after it; if it's the pod wrapper, prepend.
+  if (targetEl.matches?.('.mm_podHeader, .pod_unknown_header')) {
+    targetEl.insertAdjacentElement('afterend', strip);
+  } else if (targetEl.matches?.('.pod_hosted_16')) {
+    targetEl.insertAdjacentElement('afterbegin', strip);
+  } else {
+    // Fallback: safest is after target
+    targetEl.insertAdjacentElement('afterend', strip);
   }
+
+  await buildGroupChildren(strip);
+  return true;
+}
+
 
   // ---------- settings panel ----------
   function closeModal(el) { el?.remove(); }
-  function toast(msg, ms = 1100) {
-    const n = document.createElement('div');
-    n.textContent = msg;
-    Object.assign(n.style, {
-      position: 'fixed', right: '12px', bottom: '12px', zIndex: 2147483646,
-      background: '#111827', color: '#fff', padding: '8px 10px',
-      borderRadius: '8px', border: '1px solid rgba(255,255,255,.25)',
-      font: '12px system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif'
-    });
-    document.body.appendChild(n);
-    setTimeout(() => n.remove(), ms);
-  }
-
   async function showSettings() {
     const name     = await gmGet(KEYS.name,     DEFAULTS.name);
     const headline = await gmGet(KEYS.headline, DEFAULTS.headline);
@@ -389,86 +362,66 @@ const bothBtn = mkBtn('Copy review + signature', async () => {
     const linkText = await gmGet(KEYS.link,     DEFAULTS.linkText);
     const suffix   = await gmGet(KEYS.suffix,   DEFAULTS.suffix);
     const closing  = await gmGet(KEYS.closing,  DEFAULTS.closing);
-    const randomOn = await gmGet(KEYS.random,   DEFAULTS.randomizeLocation);
-    const defloc   = await gmGet(KEYS.defloc,   DEFAULTS.defaultLocation);
+    const spaced   = await gmGet(KEYS.spaced,   DEFAULTS.spacedThankYou);
+    const defLoc   = await gmGet(KEYS.defloc,   DEFAULTS.defaultLocation);
+    const random   = await gmGet(KEYS.random,   DEFAULTS.randomizeReviewLine);
 
     const overlay = document.createElement('div');
-    Object.assign(overlay.style, { position: 'fixed', inset: 0, background: 'rgba(0,0,0,.35)', zIndex: 2147483646 });
-    const modal = document.createElement('div');
-    Object.assign(modal.style, {
-      position: 'fixed', left: '50%', top: '14%', transform: 'translateX(-50%)',
-      minWidth: '320px', maxWidth: '460px', background: '#0b1220', color: '#fff',
-      borderRadius: '12px', padding: '12px', border: '1px solid rgba(255,255,255,.18)',
-      boxShadow: '0 10px 30px rgba(0,0,0,.35)', font: '13px system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif'
+    Object.assign(overlay.style, {
+      position:'fixed', inset:0, background:'rgba(0,0,0,.4)', zIndex:2147483646,
+      display:'grid', placeItems:'center', font:'13px system-ui,Segoe UI,Roboto,Arial,sans-serif'
     });
-    modal.innerHTML = `
-      <div style="font-weight:600;margin-bottom:8px">Clipboard Bar Settings</div>
-      <label style="display:block;margin:6px 0">Name<br><input id="att_name" style="width:100%" value="${esc(name)}"></label>
-      <label style="display:block;margin:6px 0">Headline<br><input id="att_headline" style="width:100%" value="${esc(headline)}"></label>
-      <label style="display:block;margin:6px 0">Prefix<br><input id="att_prefix" style="width:100%" value="${esc(prefix)}"></label>
-      <label style="display:block;margin:6px 0">Link text<br><input id="att_linktext" style="width:100%" value="${esc(linkText)}"></label>
-      <label style="display:block;margin:6px 0">Suffix (optional)<br><input id="att_suffix" style="width:100%" value="${esc(suffix)}"></label>
-      <label style="display:block;margin:6px 0">Closing<br><input id="att_closing" style="width:100%" value="${esc(closing)}"></label>
-      <label style="display:flex;align-items:center;gap:8px;margin:8px 0">
-        <input id="att_random" type="checkbox" ${randomOn ? 'checked' : ''}> Randomize location
-      </label>
-      <label id="att_defloc_label" style="display:block;margin:6px 0">Default location
-        <select id="att_defloc" style="width:100%">
+
+    const card = document.createElement('div');
+    Object.assign(card.style, {
+      background:'#0b1220', color:'#fff', border:'1px solid rgba(255,255,255,.18)',
+      borderRadius:'12px', width:'min(560px, 96%)', padding:'14px', boxShadow:'0 10px 30px rgba(0,0,0,.35)'
+    });
+    card.innerHTML = `
+      <h3 style="margin:0 0 8px 0; display:flex; justify-content:space-between; align-items:center">
+        Clipboard Settings
+        <button id="att-clip-close" class="mm_button" style="opacity:1;pointer-events:auto;cursor:pointer">✕</button>
+      </h3>
+      <div style="display:grid; grid-template-columns: 1fr 2fr; gap:8px">
+        <label>Name</label><input id="att-clip-name" value="${esc(name)}">
+        <label>Headline</label><input id="att-clip-headline" value="${esc(headline)}">
+        <label>Prefix</label><input id="att-clip-prefix" value="${esc(prefix)}">
+        <label>Link Text</label><input id="att-clip-link" value="${esc(linkText)}">
+        <label>Suffix</label><input id="att-clip-suffix" value="${esc(suffix)}">
+        <label>Closing</label><input id="att-clip-closing" value="${esc(closing)}">
+        <label>Spaced “Thank you”</label><input id="att-clip-spaced" type="checkbox" ${spaced ? 'checked':''}>
+        <label>Default Location</label>
+        <select id="att-clip-defloc">
           <option value="bellevue">Bellevue</option>
           <option value="seattle">Seattle</option>
           <option value="tacoma">Tacoma</option>
-          <option value="renton">Renton</option>
         </select>
-      </label>
-      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px">
-        <button id="att_reset">Reset</button>
-        <button id="att_cancel">Cancel</button>
-        <button id="att_save" style="background:#2563eb;color:#fff;border:1px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 10px">Save</button>
+        <label>Randomize review headline</label><input id="att-clip-random" type="checkbox" ${random ? 'checked':''}>
+      </div>
+      <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:10px">
+        <button id="att-clip-cancel" class="mm_button" style="opacity:1;pointer-events:auto;cursor:pointer">Close</button>
+        <button id="att-clip-save" class="mm_button" style="opacity:1;pointer-events:auto;cursor:pointer">Save</button>
       </div>
     `;
-    const defSel = modal.querySelector('#att_defloc');
-    const defLabel = modal.querySelector('#att_defloc_label');
-    const randomCb = modal.querySelector('#att_random');
-    defSel.value   = defloc;
-    randomCb.checked = !!randomOn;
-
-    function syncDefLocVisibility() {
-      const on = randomCb.checked;
-      defSel.disabled = on;
-      defSel.style.opacity = on ? '0.5' : '1';
-      defLabel.style.opacity = on ? '0.5' : '1';
-    }
-    randomCb.addEventListener('change', syncDefLocVisibility);
-    syncDefLocVisibility();
-
-    overlay.appendChild(modal);
+    overlay.appendChild(card);
     document.body.appendChild(overlay);
 
-    modal.querySelector('#att_cancel').onclick = () => closeModal(overlay);
-    modal.querySelector('#att_reset').onclick  = async () => {
-      for (const [k, v] of Object.entries({
-        [KEYS.name]: DEFAULTS.name,
-        [KEYS.headline]: DEFAULTS.headline,
-        [KEYS.prefix]: DEFAULTS.prefix,
-        [KEYS.link]: DEFAULTS.linkText,
-        [KEYS.suffix]: DEFAULTS.suffix,
-        [KEYS.closing]: DEFAULTS.closing,
-        [KEYS.random]: DEFAULTS.randomizeLocation,
-        [KEYS.defloc]: DEFAULTS.defaultLocation,
-      })) await gmSet(k, v);
-      toast('Defaults restored');
-      closeModal(overlay);
-    };
-    modal.querySelector('#att_save').onclick   = async () => {
-      const v = id => modal.querySelector(id).value;
-      await gmSet(KEYS.name,     (v('#att_name')     || '').trim()      || DEFAULTS.name);
-      await gmSet(KEYS.headline, (v('#att_headline') || '').trim()      || DEFAULTS.headline);
-      await gmSet(KEYS.prefix,    v('#att_prefix')   ?? DEFAULTS.prefix);
-      await gmSet(KEYS.link,     (v('#att_linktext') || '').trim()      || DEFAULTS.linkText);
-      await gmSet(KEYS.suffix,    v('#att_suffix')   ?? '');
-      await gmSet(KEYS.closing,  (v('#att_closing')  || '').trim()      || DEFAULTS.closing);
-      await gmSet(KEYS.random,   !!randomCb.checked);
-      await gmSet(KEYS.defloc,   defSel.value || DEFAULTS.defaultLocation);
+    document.getElementById('att-clip-defloc').value = defLoc;
+
+    document.getElementById('att-clip-close').onclick =
+    document.getElementById('att-clip-cancel').onclick = () => closeModal(overlay);
+
+    document.getElementById('att-clip-save').onclick = async () => {
+      const get = id => document.getElementById(id);
+      await gmSet(KEYS.name,    get('att-clip-name').value.trim());
+      await gmSet(KEYS.headline,get('att-clip-headline').value.trim());
+      await gmSet(KEYS.prefix,  get('att-clip-prefix').value.trim());
+      await gmSet(KEYS.link,    get('att-clip-link').value.trim());
+      await gmSet(KEYS.suffix,  get('att-clip-suffix').value.trim());
+      await gmSet(KEYS.closing, get('att-clip-closing').value.trim());
+      await gmSet(KEYS.spaced,  get('att-clip-spaced').checked);
+      await gmSet(KEYS.defloc,  get('att-clip-defloc').value || DEFAULTS.defaultLocation);
+      await gmSet(KEYS.random,  get('att-clip-random').checked);
       toast('Settings saved');
       closeModal(overlay);
     };
@@ -477,24 +430,29 @@ const bothBtn = mkBtn('Copy review + signature', async () => {
   // ---------- orchestrate ----------
   function removeGroupIfAny() {
     const ex = document.getElementById(GROUP_ID);
-    if (ex && ex.parentNode) ex.parentNode.removeChild(ex);
+    if (ex && ex.dataset && ex.dataset.origin === 'att-clipboard-bar' && ex.parentNode) ex.parentNode.removeChild(ex);
   }
 
-  async function ensure() {
-    // Do NOT show on timesheet-derived screens
-    if (isTimesheetContext()) { removeGroupIfAny(); return; } // gating preserved
+async function ensure() {
+  // Off on Time Sheets
+  if (isTimesheetContext()) { removeGroupIfAny(); return; }
 
-    // Primary anchor: legacy Notes timestamp
-    const stamp = findNotesTimestampButton();
-    if (stamp) { await mountGroupAfterButton(stamp); return; }
+  // Standalone Time Entry → timestamp anchor (unchanged)
+  const stamp = findNotesTimestampButton();
+  if (stamp) { mountGroup(stamp); return; }
 
-    // Fallback: Thread Auto time entries pod (pod 16) on ticket pages
-    const tpHeader = threadTimepadMountTarget();
-    if (tpHeader) { await mountGroupUnderHeader(tpHeader); return; }
-
-    // Otherwise, remove if present
-    removeGroupIfAny();
+  // Ticket page → mount ONLY for "Thread: Auto time entries"
+  if (isTicketContext()) {
+    const target = threadTimepadMountTarget(); // precise hosted_16 target
+    if (target) { await mountGroupUnderThread(target); return; }
+    // If not ready yet, just wait for MO to fire again
+    return;
   }
+
+  // Other contexts
+  removeGroupIfAny();
+}
+
 
   const mo = new MutationObserver(() => ensure());
   mo.observe(document.documentElement, { subtree: true, childList: true });
