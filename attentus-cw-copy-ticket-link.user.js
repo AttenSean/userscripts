@@ -1,14 +1,16 @@
 // ==UserScript==
 // @name         attentus-cw-copy-ticket-link
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.6.0
-// @description  Click = formatted label link. Shift+Click = URL-only (as hyperlink in HTML). Right-click/Space = formatted + newline “Company — Contact”. SPA-safe, mounts with other action buttons; never on Time Sheets or modals.
+// @version      1.7.0
+// @description  Click = formatted label link. Shift+Click = URL-only (as hyperlink in HTML). Right-click/Space = formatted + newline “Company — Contact”. SPA-safe, mounts with other action buttons; never on Time Sheets or modals. Uses Rails ticket URL.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
 // @match        https://*.myconnectwise.com/*
 // @run-at       document-idle
 // @grant        GM_setClipboard
 // @grant        GM.setClipboard
+// @grant        GM_getValue
+// @grant        GM.setValue
 // @noframes
 // @downloadURL  https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-copy-ticket-link.user.js
 // @updateURL    https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-copy-ticket-link.user.js
@@ -48,19 +50,25 @@
   }
 
   // ---------- gating ----------
-  function isTicketOrTimeEntryPage() {
-    const href = (location.href || '').toLowerCase();
-    const path = (location.pathname || '').toLowerCase();
-    const qs   = location.search || '';
-    if (/[?&](service_recid|recid|serviceticketid)=\d+/i.test(qs)) return true;
-    if (/connectwise\.aspx/.test(path)) {
-      if (/\?\?[^#]*(ticket|service.?ticket)/i.test(href)) return true;
-      if (/\?\?[^#]*timeentry/i.test(href)) return true;
-    }
-    if (document.querySelector('.pod_ticketHeaderActions, .pod_ticketSummary, .pod_timeEntryDetails')) return true;
-    if (document.getElementById('mytimesheetdaygrid-listview-scroller')) return false; // explicit off on Time Sheet
-    return false;
+function isTicketOrTimeEntryPage() {
+  const href = (location.href || "").toLowerCase();
+  const path = (location.pathname || "").toLowerCase();
+  const search = location.search || "";
+
+  if (/[?&](service_recid|recid|serviceticketid|srrecid)=\d+/i.test(search)) return true;
+  if (/connectwise\.aspx/.test(path)) {
+    if (/\?\?[^#]*(ticket|service.?ticket)/i.test(href)) return true;
+    if (/\?\?[^#]*timeentry/i.test(href)) return true;
   }
+  if (document.querySelector(".pod_ticketHeaderActions, .pod_ticketSummary")) return true;
+  if ([...document.querySelectorAll(".cw_CwLabel,.gwt-Label")]
+      .some(el => /service\s*ticket\s*#/i.test(el.textContent || ""))) return true;
+  if (document.querySelector(".pod_timeEntryDetails, input.cw_ChargeToTextBox, input[id$='ChargeToTextBox']")) return true;
+
+  // explicit off on Time Sheet
+  if (document.getElementById("mytimesheetdaygrid-listview-scroller")) return false;
+  return false;
+}
 
   // ---------- DOM utils ----------
   const $  = (s, r = document) => r.querySelector(s);
@@ -74,19 +82,25 @@
   }
 
   // Find a stable container that holds action buttons
-  function findActionContainer() {
-    // Preferred: ticket header actions pod container
-    const pod = document.querySelector('.pod_ticketHeaderActions');
-    if (pod) {
-      const btn = pod.querySelector('.cw_CwActionButton');
-      if (btn && btn.parentElement) return btn.parentElement;
-      return pod;
-    }
-    // Fallback: generic action bar wrapper
-    const anyBtn = document.querySelector('.cw_CwActionButton');
-    if (anyBtn && anyBtn.parentElement) return anyBtn.parentElement;
-    return null;
+function findActionContainer() {
+  // 1) Prefer an existing CW action button’s parent (most stable)
+  const anyBtn = document.querySelector('.cw_CwActionButton');
+  if (anyBtn && anyBtn.parentElement) return anyBtn.parentElement;
+
+  // 2) Known action containers across skins/layouts
+  const pods = [
+    '.pod_ticketHeaderActions',
+    '.cw-CwActionBar',
+    '.cw-CwActionButtons',
+    '.mm_toolbar'
+  ];
+  for (const sel of pods) {
+    const el = document.querySelector(sel);
+    if (el) return el;
   }
+  return null;
+}
+
 
   function waitForActionContainer({ timeoutMs = 20000 } = {}) {
     return new Promise(resolve => {
@@ -136,16 +150,21 @@
     const full = getSummaryFromBannerFull();
     return full ? `#${id} - ${full}` : (getLabelFromTitle() || `#${id}`);
   }
-  function guessTicketDetailPath() {
-    const p = (location.pathname||'').toLowerCase();
-    if (p.includes('/service/tickets/detail')) return '/Service/Tickets/Detail.aspx';
-    if (p.includes('/tickets/detail')) return '/Tickets/Detail.aspx';
-    return '/Service/Tickets/Detail.aspx';
+
+  // ---------- CW Rails base + ticket URL ----------
+  function cwVersionBase() {
+    // Keep the /v4_6_release (or similar) prefix if present; otherwise default to v4_6_release.
+    const m = (location.pathname || '').match(/\/v\d+_\d+[^/]*?/);
+    const ver = m ? m[0] : '/v4_6_release';
+    return `${location.origin}${ver}`;
   }
   function buildTicketUrl(id) {
-    const base = location.origin;
-    return id ? `${base}${guessTicketDetailPath()}?service_recid=${encodeURIComponent(id)}` : location.href;
+    if (!id) return location.href;
+    // Rails detail page used by other Attentus scripts
+    //   /vX_X_release/services/system_io/Service/fv_sr100_request.rails?service_recid=<id>
+    return `${cwVersionBase()}/services/system_io/Service/fv_sr100_request.rails?service_recid=${encodeURIComponent(id)}`;
   }
+
   function getContactName() {
     const val = sel => document.querySelector(sel)?.value?.trim() || '';
     return (
@@ -172,7 +191,6 @@
 
   // ---------- robust rich copy (HTML + plain) ----------
   async function copyBoth(html, text) {
-    // 1) Async Clipboard with multiple types
     try {
       if (navigator.clipboard && window.ClipboardItem) {
         const item = new ClipboardItem({
@@ -184,7 +202,6 @@
       }
     } catch {}
 
-    // 2) Programmatic 'copy' with clipboardData override (most reliable)
     try {
       const onCopy = (e) => {
         try {
@@ -195,7 +212,6 @@
       };
       document.addEventListener('copy', onCopy, true);
 
-      // Select a hidden contenteditable so the command is allowed
       const host = document.createElement('div');
       host.contentEditable = 'true';
       host.style.position = 'fixed';
@@ -220,11 +236,9 @@
       if (ok) return true;
     } catch {}
 
-    // 3) GM APIs (best-effort)
     try { if (typeof GM === 'object' && GM?.setClipboard) { try { GM.setClipboard(html, { type:'text/html' }); } catch {} try { GM.setClipboard(text, { type:'text/plain' }); } catch {} return true; } } catch {}
     try { if (typeof GM_setClipboard === 'function') { GM_setClipboard(html, 'html'); return true; } } catch {}
 
-    // 4) Plain text fallbacks
     try { if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(text); return true; } } catch {}
     try {
       const ta = document.createElement('textarea');
@@ -251,7 +265,7 @@
   async function copyUrlOnly(btn, label) {
     const id   = getTicketIdFromBanner();
     const href = buildTicketUrl(id);
-    const html = `<a href="${href}">${escapeHtml(href)}</a>`; // hyperlink with URL text
+    const html = `<a href="${href}">${escapeHtml(href)}</a>`;
     const text = href;
     const ok = await copyBoth(html, text);
     flashCopied(btn, label, ok ? 'Copied URL' : 'Copy failed');
@@ -293,20 +307,14 @@
     const label = document.createElement('div');  label.className = 'GMDB3DUBBPG'; label.textContent = 'Copy Ticket';
     inner.appendChild(label); btn.appendChild(inner); outer.appendChild(btn);
 
-    // pointerup-only mapping (trusted activation):
-    // Right-click = formatted + company/contact
-    // Shift+Left  = URL-only
-    // Left-click  = formatted label
     outer.addEventListener('pointerup', (e) => {
       if (e.button === 2) { e.preventDefault(); e.stopPropagation(); return copyFormattedWithCompanyContact(btn, label); }
       if (e.shiftKey)     { e.preventDefault(); e.stopPropagation(); return copyUrlOnly(btn, label); }
       e.preventDefault(); e.stopPropagation(); return copyFormattedBase(btn, label);
     }, true);
 
-    // prevent OS context menu (we already handle right-click)
     outer.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); }, true);
 
-    // Keyboard: Enter = formatted, Space = detailed
     outer.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); copyFormattedBase(btn, label); }
       if (e.key === ' ')     { e.preventDefault(); copyFormattedWithCompanyContact(btn, label); }
@@ -322,7 +330,6 @@
     if (document.getElementById('mytimesheetdaygrid-listview-scroller')) return false;
     if (document.querySelector('.cw-gxt-wnd')) return false;
 
-    // Prefer colocating with our buttons
     const before =
       document.getElementById('cw-copy-timezest-btn') ||
       document.getElementById('cw-clear-contact-btn');
@@ -332,7 +339,6 @@
       return true;
     }
 
-    // Else anchor to the action container
     const container = findActionContainer();
     if (container) {
       container.appendChild(makeButton());
@@ -341,58 +347,83 @@
     return false;
   }
 
+  function retryUntil(testFn, runFn, { attempts = 80, delay = 150 } = {}) {
+  let tries = 0;
+  const tick = () => {
+    try {
+      if (testFn()) { runFn(); return; }
+    } catch {}
+    if (++tries < attempts) setTimeout(tick, delay);
+  };
+  tick();
+}
+
+  function ensureOnce() {
+  if (!isTicketOrTimeEntryPage()) return;
+  if (document.getElementById('mytimesheetdaygrid-listview-scroller')) return;
+  if (document.querySelector('.cw-gxt-wnd')) return; // keep your modal guard
+
+  if (document.getElementById(BTN_ID)) return;
+
+  // fast path
+  if (placeButtonNow()) return;
+
+  // persistent polling until an action container exists
+  retryUntil(
+    () => !!findActionContainer(),
+    () => placeButtonNow(),
+    { attempts: 80, delay: 150 } // ~12s total like Clear Contact
+  );
+}
+
+// call this instead of plain `ensure()` for the initial passes
+setTimeout(ensureOnce, 0);
+setTimeout(ensureOnce, 250);
+setTimeout(ensureOnce, 750);
+setTimeout(ensureOnce, 1500);
+setTimeout(ensureOnce, 3000);
+setTimeout(ensureOnce, 6000);
+
+
   // ---------- SPA ensure with waiter ----------
   let ensureRunId = 0;
 
   async function ensure() {
     const runId = ++ensureRunId;
 
-    // Gating
     if (!isTicketOrTimeEntryPage()) return;
     if (document.getElementById('mytimesheetdaygrid-listview-scroller')) return;
     if (document.querySelector('.cw-gxt-wnd')) return;
 
-    // If already mounted, done
     if (document.getElementById(BTN_ID)) return;
 
-    // Try immediate mount
     if (placeButtonNow()) return;
 
-    // Wait specifically for action container to appear
     const anchor = await waitForActionContainer({ timeoutMs: 20000 });
-    if (runId !== ensureRunId) return; // route changed while waiting
-    if (!anchor) return;               // gave up quietly
+    if (runId !== ensureRunId) return;
+    if (!anchor) return;
 
-    // Anchor is present now, mount
     placeButtonNow();
   }
 
   const spaRoot = getSpaRoot();
-  const mo = new MutationObserver(() => ensure());
+  const mo = new MutationObserver(() => ensureOnce());
   if (spaRoot) mo.observe(spaRoot, { subtree: true, childList: true });
 
   ['pushState','replaceState'].forEach(k => {
     const orig = history[k];
-    history[k] = function () { const r = orig.apply(this, arguments); queueMicrotask(ensure); return r; };
+    history[k] = function () { const r = orig.apply(this, arguments); queueMicrotask(ensureOnce); return r; };
   });
-  window.addEventListener('popstate', ensure);
-  window.addEventListener('hashchange', ensure);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) ensure(); });
+  window.addEventListener('popstate', ensureOnce);
+  window.addEventListener('hashchange', ensureOnce);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) ensureOnce(); });
 
-  // Gentle staggered attempts for slow pages
-  setTimeout(ensure, 0);
-  setTimeout(ensure, 250);
-  setTimeout(ensure, 750);
-  setTimeout(ensure, 1500);
-  setTimeout(ensure, 3000);
-  setTimeout(ensure, 6000);
-  ensure();
 
   /* ---------------------------------------------
      Selectors QA — Copy Ticket (Ticket / Time Entry)
      ---------------------------------------------
      ## Gating
-     - Page test(s): URL params (?service_recid|recid|serviceTicketId) OR DOM pods (.pod_ticketHeaderActions / .pod_ticketSummary / .pod_timeEntryDetails)
+     - Page test(s): URL params (?service_recid|recid|serviceTicketId|srRecID) OR DOM pods (.pod_ticketHeaderActions / .pod_ticketSummary / .pod_timeEntryDetails)
      - Must-not-fire on: Time Sheet (#mytimesheetdaygrid-listview-scroller), Modals (.cw-gxt-wnd)
 
      ## Anchor Region
@@ -401,7 +432,8 @@
      - Observer root: #cwContent | .cw-WorkspaceView | body
 
      ## Key Values
-     - Ticket ID/label: banner/title; normalized URL /Service/Tickets/Detail.aspx?service_recid=ID
+     - Ticket ID/label: banner/title; URL now uses Rails:
+       /vX_X_release/services/system_io/Service/fv_sr100_request.rails?service_recid=ID
      - Company/Contact: inputs (input.cw_company/input.cw_contact) or header mm_value by aria-label
 
      ## Placement
