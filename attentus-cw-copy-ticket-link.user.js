@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         attentus-cw-copy-ticket-link
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.4.0
-// @description  Copy ticket link. Left-click = quick link. Right-click = detailed (newline: Company — Contact). No Insight pod dependency.
+// @version      1.5.3
+// @description  Click = formatted label link. Shift+Click = URL-only (as hyperlink in HTML). Right-click/Space = formatted + newline “Company — Contact”. SPA-safe, mounts with other action buttons.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
 // @match        https://*.myconnectwise.com/*
@@ -19,11 +19,16 @@
 
   const BTN_ID = 'cw-copy-ticket-link-btn';
 
-  // ------- utils -------
-  const $  = (s, r = document) => r.querySelector(s);
-  const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
-  const txt = el => (el && el.textContent || '').trim();
+  // spacing like other buttons
+  (function ensureCopyTicketStyles(){
+    if (document.getElementById('att-copy-ticket-style')) return;
+    const s = document.createElement('style');
+    s.id = 'att-copy-ticket-style';
+    s.textContent = `#${CSS.escape(BTN_ID)}{margin-left:6px}`;
+    document.head.appendChild(s);
+  })();
 
+  // feedback pulse
   function ensureFlashStyles() {
     if (document.getElementById('cw-copy-flash-styles')) return;
     const css = document.createElement('style');
@@ -34,27 +39,35 @@
     `;
     document.head.appendChild(css);
   }
-  function showToast(msg) {
-    const n = document.createElement('div');
-    n.textContent = msg;
-    Object.assign(n.style, {
-      position: 'fixed', right: '16px', bottom: '16px', zIndex: 2147483646,
-      background: '#111827', color: '#fff', padding: '8px 10px',
-      borderRadius: '8px', border: '1px solid rgba(255,255,255,.2)'
-    });
-    document.body.appendChild(n);
-    setTimeout(() => n.remove(), 1200);
-  }
-  function flashCopied(btnRoot, labelEl) {
+  function flashCopied(btnRoot, labelEl, msg) {
     if (!labelEl) return;
-    const original = labelEl.textContent;
-    labelEl.textContent = 'Copied';
+    const old = labelEl.textContent;
+    labelEl.textContent = msg || 'Copied';
     btnRoot.classList.add('cw-flash-pulse');
-    btnRoot.setAttribute('aria-live', 'polite');
-    setTimeout(() => { labelEl.textContent = original; btnRoot.classList.remove('cw-flash-pulse'); }, 900);
+    setTimeout(() => { labelEl.textContent = old; btnRoot.classList.remove('cw-flash-pulse'); }, 900);
   }
 
-  // ------- ticket basics -------
+  // gating
+  function isTicketOrTimeEntryPage() {
+    const href = (location.href || '').toLowerCase();
+    const path = (location.pathname || '').toLowerCase();
+    const qs   = location.search || '';
+    if (/[?&](service_recid|recid|serviceticketid)=\d+/i.test(qs)) return true;
+    if (/connectwise\.aspx/.test(path)) {
+      if (/\?\?[^#]*(ticket|service.?ticket)/i.test(href)) return true;
+      if (/\?\?[^#]*timeentry/i.test(href)) return true;
+    }
+    if (document.querySelector('.pod_ticketHeaderActions, .pod_ticketSummary, .pod_timeEntryDetails')) return true;
+    if (document.getElementById('mytimesheetdaygrid-listview-scroller')) return false;
+    return false;
+  }
+
+  // utils
+  const $  = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+  const txt = el => (el && el.textContent || '').trim();
+
+  // ticket meta
   function getBannerLine() {
     return $$('.cw_CwLabel,.gwt-Label').map(txt)
       .find(t => /service\s*ticket\s*#\s*\d+/i.test(t || '')) || '';
@@ -76,212 +89,203 @@
     if (m) return `#${m[1]} - ${m[2].trim()}`;
     return '';
   }
-  function getNeedByTag() {
-    const rows = $$('.gwt-Label, .mm_label, .detailLabel, .cw_CwLabel');
-    for (const el of rows) {
-      const t = txt(el).toLowerCase();
-      if (!t) continue;
-      if (t.includes('need by') || t.includes('required date') || t.includes('due date')) {
-        const container = el.closest('tr,div,td') || el.parentElement;
-        const val = container && txt(container.querySelector('.GMDB3DUBCPD, .GMDB3DUBBPD, .GMDB3DUBCEI, .cw_CwTextField, .gwt-HTML, .gwt-Label, span, div:last-child'));
-        if (!val) continue;
-        const m = val.match(/(\d{1,2})\/(\d{1,2})(?:\/\d{2,4})?/);
-        if (m) return `<Need by ${+m[1]}/${+m[2]}>`;
-      }
-    }
-    return '';
-  }
   function buildBaseLabel() {
     const id   = getTicketIdFromBanner() || '????';
-    const need = getNeedByTag();
-    const fullFromBanner = getSummaryFromBannerFull();
-    const base = fullFromBanner ? `#${id} - ${fullFromBanner}` : (getLabelFromTitle() || `#${id}`);
-    return need ? `${base} ${need}` : base;
+    const full = getSummaryFromBannerFull();
+    return full ? `#${id} - ${full}` : (getLabelFromTitle() || `#${id}`);
   }
-
-  // ------- Company / Contact -------
+  function guessTicketDetailPath() {
+    const p = (location.pathname||'').toLowerCase();
+    if (p.includes('/service/tickets/detail')) return '/Service/Tickets/Detail.aspx';
+    if (p.includes('/tickets/detail')) return '/Tickets/Detail.aspx';
+    return '/Service/Tickets/Detail.aspx';
+  }
+  function buildTicketUrl(id) {
+    const base = location.origin;
+    return id ? `${base}${guessTicketDetailPath()}?service_recid=${encodeURIComponent(id)}` : location.href;
+  }
   function getContactName() {
-    const valOf = (sel) => $(sel)?.value?.trim() || '';
+    const val = sel => document.querySelector(sel)?.value?.trim() || '';
     return (
-      valOf('input.cw_contact') ||
-      valOf('[data-cwid="contact"] input[readonly]') ||
-      valOf('[data-cwid="contact"] input') ||
+      val('input.cw_contact') ||
+      val('[data-cwid="contact"] input[readonly]') ||
+      val('[data-cwid="contact"] input') ||
+      (document.querySelector('.pod_ticketHeader [aria-label="Contact"] .mm_value')?.textContent||'').trim() ||
       ''
     );
   }
   function getCompanyName() {
-    const valOf = (sel) => $(sel)?.value?.trim() || '';
-    let v =
-      valOf('input.cw_company') ||
-      valOf('[data-cwid="company"] input[readonly]') ||
-      valOf('[data-cwid="company"] input');
-    if (v) return v;
-
-    // label/link fallback
-    const label = $$('td,div,span').find(n => /(^|\s)company[:\s]*$/i.test(txt(n)));
-    if (label) {
-      const container = label.closest('tr,div,td') || label.parentElement;
-      const linkish = container && (container.querySelector('a, .gwt-Label, .gwt-HTML, span:last-child'));
-      v = txt(linkish);
-    }
-    return v || '';
+    const val = sel => document.querySelector(sel)?.value?.trim() || '';
+    return (
+      val('input.cw_company') ||
+      val('[data-cwid="company"] input[readonly]') ||
+      val('[data-cwid="company"] input') ||
+      (document.querySelector('.pod_ticketHeader [aria-label="Company"] .mm_value')?.textContent||'').trim() ||
+      ''
+    );
   }
-
-  // ------- clipboard -------
   function escapeHtml(s) {
-    return String(s)
-      .replace(/&/g,'&amp;').replace(/</g,'&lt;')
-      .replace(/>/g,'&gt;').replace(/"/g,'&quot;')
-      .replace(/'/g,'&#39;');
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c]));
   }
-  async function copyRich(html, text) {
+
+  // robust rich copy (HTML + plain) with contenteditable fallback
+  async function copyBoth(html, text) {
+    // 1) Async Clipboard with multiple types
     try {
-      if (navigator.clipboard?.write && window.ClipboardItem) {
+      if (navigator.clipboard && window.ClipboardItem) {
         const item = new ClipboardItem({
-          'text/html': new Blob([html], { type: 'text/html' }),
-          'text/plain': new Blob([text], { type: 'text/plain' }),
+          'text/html': new Blob([html], { type:'text/html' }),
+          'text/plain': new Blob([text], { type:'text/plain' })
         });
         await navigator.clipboard.write([item]);
-        return { ok: true, via: 'ClipboardItem' };
+        return true;
       }
     } catch {}
+
+    // 2) Contenteditable fallback (forces rich copy in most apps)
     try {
-      if (typeof GM !== 'undefined' && GM && typeof GM.setClipboard === 'function') {
-        try { GM.setClipboard(html, 'html'); return { ok: true, via: "GM.setClipboard('html')" }; } catch {}
-        try { GM.setClipboard(html, { type: 'html' }); return { ok: true, via: 'GM.setClipboard({type:html})' }; } catch {}
-      }
+      const host = document.createElement('div');
+      host.contentEditable = 'true';
+      host.style.position = 'fixed';
+      host.style.opacity = '0';
+      host.style.pointerEvents = 'none';
+      host.style.zIndex = '-1';
+      host.innerHTML = html;
+      document.body.appendChild(host);
+
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(host);
+      sel.removeAllRanges();
+      sel.addRange(range);
+
+      const ok = document.execCommand && document.execCommand('copy');
+      sel.removeAllRanges();
+      document.body.removeChild(host);
+      if (ok) return true;
     } catch {}
-    try {
-      if (typeof GM_setClipboard === 'function') {
-        try { GM_setClipboard(html, 'html'); return { ok: true, via: "GM_setClipboard('html')" }; } catch {}
-      }
-    } catch {}
-    try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(text);
-        return { ok: true, via: 'navigator.clipboard(text)' };
-      }
-    } catch {}
+
+    // 3) GM APIs (html handling is inconsistent across managers)
+    try { if (typeof GM === 'object' && GM?.setClipboard) { try { GM.setClipboard(html, { type:'text/html' }); } catch {} try { GM.setClipboard(text, { type:'text/plain' }); } catch {} return true; } } catch {}
+    try { if (typeof GM_setClipboard === 'function') { GM_setClipboard(html, 'html'); return true; } } catch {}
+
+    // 4) Plain text last resort
+    try { if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(text); return true; } } catch {}
     try {
       const ta = document.createElement('textarea');
-      ta.style.position = 'fixed';
-      ta.style.top = '-2000px';
-      ta.value = text;
-      document.body.appendChild(ta);
-      ta.focus(); ta.select();
+      ta.value = text; ta.style.position='fixed'; ta.style.opacity='0';
+      document.body.appendChild(ta); ta.select();
       const ok = document.execCommand && document.execCommand('copy');
       document.body.removeChild(ta);
-      if (ok) return { ok: true, via: 'execCommand' };
+      if (ok) return true;
     } catch {}
-    return { ok: false, via: 'manual' };
+
+    return false;
   }
 
-  // ------- copy modes -------
-  function buildTailParts() {
-    const company = getCompanyName();
-    const contact = getContactName();
-    const parts = [];
-    if (company) parts.push(company);
-    if (contact) parts.push(contact);
-    return parts;
-  }
-
-  async function copySimple(btn, labelEl) {
-    const href = location.href;
+  // copy modes
+  async function copyFormattedBase(btn, label) {
+    const id   = getTicketIdFromBanner();
+    const href = buildTicketUrl(id);
     const base = buildBaseLabel();
-
     const html = `<a href="${href}">${escapeHtml(base)}</a>`;
     const text = base;
-
-    const res = await copyRich(html, text);
-    if (res.ok) flashCopied(btn, labelEl); else showToast('Copy failed, manual paste');
+    const ok = await copyBoth(html, text);
+    flashCopied(btn, label, ok ? 'Copied' : 'Copy failed');
   }
-
-  async function copyDetailed(btn, labelEl) {
-    const href = location.href;
+  async function copyUrlOnly(btn, label) {
+    const id   = getTicketIdFromBanner();
+    const href = buildTicketUrl(id);
+    const html = `<a href="${href}">${escapeHtml(href)}</a>`; // hyperlink (URL as text)
+    const text = href;
+    const ok = await copyBoth(html, text);
+    flashCopied(btn, label, ok ? 'Copied URL' : 'Copy failed');
+  }
+  async function copyFormattedWithCompanyContact(btn, label) {
+    const id   = getTicketIdFromBanner();
+    const href = buildTicketUrl(id);
     const base = buildBaseLabel();
 
-    const parts = buildTailParts(); // Company — Contact
+    const parts = [];
+    const company = getCompanyName();
+    const contact = getContactName();
+    if (company) parts.push(company);
+    if (contact) parts.push(contact);
+
     const tailText = parts.length ? `\n${parts.join(' — ')}` : '';
     const tailHTML = parts.length ? `<br>${escapeHtml(parts.join(' — '))}` : '';
 
     const html = `<a href="${href}">${escapeHtml(base)}</a>${tailHTML}`;
     const text = `${base}${tailText}`;
 
-    const res = await copyRich(html, text);
-    if (res.ok) flashCopied(btn, labelEl); else showToast('Copy failed, manual paste');
+    const ok = await copyBoth(html, text);
+    flashCopied(btn, label, ok ? 'Copied' : 'Copy failed');
   }
 
-  // ------- UI + placement -------
+  // button & events — pointerup-only mapping for reliable user activation
   function makeButton() {
     ensureFlashStyles();
 
     const outer = document.createElement('div');
     outer.className = 'GMDB3DUBHFJ GMDB3DUBAQG GMDB3DUBOFJ cw_CwActionButton';
     outer.id = BTN_ID;
+    outer.setAttribute('data-origin','attentus');
+    outer.tabIndex = 0;
+    outer.setAttribute('aria-label','Copy Ticket');
 
-    const btn = document.createElement('div');
-    btn.className = 'GMDB3DUBIOG mm_button';
-    btn.tabIndex = 0;
+    const btn   = document.createElement('div');  btn.className = 'GMDB3DUBIOG mm_button';
+    const inner = document.createElement('div');  inner.className = 'GMDB3DUBJOG GMDB3DUBNQG';
+    const label = document.createElement('div');  label.className = 'GMDB3DUBBPG'; label.textContent = 'Copy Ticket';
+    inner.appendChild(label); btn.appendChild(inner); outer.appendChild(btn);
 
-    const inner = document.createElement('div');
-    inner.className = 'GMDB3DUBJOG GMDB3DUBNQG';
+    outer.addEventListener('pointerup', (e) => {
+      // button: 0=left, 2=right
+      if (e.button === 2) { e.preventDefault(); e.stopPropagation(); return copyFormattedWithCompanyContact(btn, label); }
+      if (e.shiftKey)     { e.preventDefault(); e.stopPropagation(); return copyUrlOnly(btn, label); }
+      e.preventDefault(); e.stopPropagation(); return copyFormattedBase(btn, label);
+    }, true);
 
-    const label = document.createElement('div');
-    label.className = 'GMDB3DUBBPG';
-    label.textContent = 'Copy Ticket';
+    // Suppress OS context menu (we already handle right-click on pointerup)
+    outer.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); }, true);
 
-    inner.appendChild(label);
-    btn.appendChild(inner);
-    outer.appendChild(btn);
-
-    outer.title = 'Left-click: quick link · Right-click: detailed (newline: Company — Contact)';
-    outer.addEventListener('click', (e) => { e.preventDefault(); copySimple(btn, label); });
-    outer.addEventListener('contextmenu', (e) => { e.preventDefault(); copyDetailed(btn, label); });
+    // Keyboard: Enter = formatted, Space = detailed
     outer.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') { e.preventDefault(); copySimple(btn, label); }
-      if (e.key === ' ')     { e.preventDefault(); copyDetailed(btn, label); }
-    });
-    // Optional: Shift+Click to force detailed with mouse
-    outer.addEventListener('mousedown', (e) => {
-      if (e.button === 0 && e.shiftKey) { e.preventDefault(); copyDetailed(btn, label); }
+      if (e.key === 'Enter') { e.preventDefault(); copyFormattedBase(btn, label); }
+      if (e.key === ' ')     { e.preventDefault(); copyFormattedWithCompanyContact(btn, label); }
     });
 
     return outer;
   }
 
+  // placement
   function placeButton() {
     if (document.getElementById(BTN_ID)) return true;
+    if (!isTicketOrTimeEntryPage()) return false;
+    if (document.getElementById('mytimesheetdaygrid-listview-scroller')) return false;
+    if (document.querySelector('.cw-gxt-wnd')) return false;
 
-    // Primary: after Clear Contact (if present from our other script)
-    const clearBtn = document.getElementById('cw-clear-contact-btn');
-    if (clearBtn) { clearBtn.insertAdjacentElement('afterend', makeButton()); return true; }
+    const before =
+      document.getElementById('cw-copy-timezest-btn') ||
+      document.getElementById('cw-clear-contact-btn');
 
-    // Secondary: after a “Follow” action by accessible name (class-agnostic)
-    const findToolbarButtonByName = (name) => {
-      name = String(name).trim().toLowerCase();
-      const candidates = $$('.cw_CwActionButton, [role="button"], .mm_button, .gwt-Button');
-      for (const c of candidates) {
-        const text = txt(c).toLowerCase();
-        if (text === name || text.split(/\s+/)[0] === name) return c.closest('.cw_CwActionButton') || c;
-        const al = (c.getAttribute('aria-label') || '').toLowerCase();
-        if (al === name) return c.closest('.cw_CwActionButton') || c;
-      }
-      return null;
-    };
-    const followBtn = findToolbarButtonByName('follow');
-    if (followBtn) { (followBtn.closest('.cw_CwActionButton') || followBtn).insertAdjacentElement('afterend', makeButton()); return true; }
-
-    // Tertiary: append to any action toolbar container
-    const anyAction = $('.cw_CwActionButton');
-    if (anyAction && anyAction.parentElement) { anyAction.parentElement.appendChild(makeButton()); return true; }
-
+    if (before && before.parentElement) {
+      before.parentElement.insertBefore(makeButton(), before.nextSibling);
+      return true;
+    }
+    const anyAction = document.querySelector('.cw_CwActionButton');
+    if (anyAction && anyAction.parentElement) {
+      anyAction.parentElement.appendChild(makeButton());
+      return true;
+    }
     return false;
   }
 
-  // SPA-safe ensure
-  let ensureTick = 0;
-  function ensure() { if (++ensureTick > 200) return; try { placeButton(); } catch {} }
+  // SPA ensure
+  let tries = 0;
+  function ensure() {
+    if (tries++ > 200) return;
+    try { placeButton(); } catch {}
+  }
 
   const mo = new MutationObserver(() => ensure());
   mo.observe(document.documentElement, { subtree: true, childList: true });
