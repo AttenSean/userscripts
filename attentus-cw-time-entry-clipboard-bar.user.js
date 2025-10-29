@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         attentus-cw-time-entry-clipboard-bar
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.9.1
+// @version      1.9.3
 // @description  Clipboard buttons by the Notes timestamp (standalone Time Entry) and under the ticket thread pod header. Does not relocate action-bar buttons. Disabled on Time Sheets.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
@@ -53,12 +53,22 @@
   const s = document.createElement('style');
   s.id = 'att-clipbar-style';
   s.textContent = `
+    /* keep timestamp + toolbar on one row in Time Entry */
+    #att-clipbar-row {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      vertical-align: middle;
+    }
+
+
+    /* existing styles... */
     #cw-notes-inline-copy-group {
       display: inline-flex;
-      flex-wrap: wrap;
+      flex-wrap: wrap;            /* (still wraps under ticket thread header) */
       gap: 6px;
       align-items: center;
-      margin: 8px 0;
+      margin: 8px 0;              /* overridden to 0 by the scoped rule above */
     }
     #cw-notes-inline-copy-group .mm_button {
       display: inline-block !important;
@@ -289,7 +299,7 @@ btnSettings.setAttribute('aria-label','Open clipboard settings');
   const btnSig      = mkBtn('Copy signature', 'Copy signature', copySignature);
   const btnReview   = mkBtn('Copy review + signature', 'Copy review message + signature', copyReviewPlusSignature);
 
-  Object.assign(intoWrap.style, { display:'inline-flex', gap:'6px', alignItems:'center', flexWrap:'wrap' });
+  Object.assign(intoWrap.style, { display:'inline-flex', gap:'6px', alignItems:'center' });
   intoWrap.append(sel, btnSettings, btnSig, btnReview);
 
   sel.addEventListener('change', async () => {
@@ -300,28 +310,51 @@ btnSettings.setAttribute('aria-label','Open clipboard settings');
 
 
   // ---------- mount near Notes timestamp (standalone Time Entry) ----------
-  function mountGroup(nextToStamp) {
-    const existing = document.getElementById(GROUP_ID);
-    if (existing) {
-      if (existing.previousElementSibling === nextToStamp) return true;
-      if (existing.dataset && existing.dataset.origin === 'att-clipboard-bar') existing.remove();
-    }
-
-    const wrap = document.createElement('span');
-    wrap.id = GROUP_ID;
-    wrap.dataset.origin = 'att-clipboard-bar';
-    Object.assign(wrap.style, {
-      display: 'inline-flex', gap: '6px', marginLeft: '8px',
-      verticalAlign: 'middle', alignItems: 'center', whiteSpace: 'nowrap'
-    });
-
-    const td = nextToStamp.closest('td'); if (td) td.style.whiteSpace = 'nowrap';
-    nextToStamp.style.display = 'inline-block';
-    nextToStamp.insertAdjacentElement('afterend', wrap);
-
-    buildGroupChildren(wrap);
-    return true;
+function mountGroup(nextToStamp) {
+  const existing = document.getElementById(GROUP_ID);
+  if (existing) {
+    if (
+      existing.previousElementSibling === nextToStamp ||
+      existing.parentElement?.previousElementSibling === nextToStamp
+    ) return true;
+    if (existing.dataset?.origin === 'att-clipboard-bar') existing.remove();
   }
+
+  // container that holds [timestamp][toolbar]
+  const row = document.createElement('span');
+  row.id = 'att-clipbar-row';
+  row.dataset.origin = 'att-clipboard-bar';
+  Object.assign(row.style, {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '8px',
+    whiteSpace: 'nowrap',        // keep whole row on one line
+    verticalAlign: 'middle'
+  });
+
+  const wrap = document.createElement('span');
+  wrap.id = GROUP_ID;
+  wrap.dataset.origin = 'att-clipboard-bar';
+  Object.assign(wrap.style, {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '6px',
+    flexWrap: 'nowrap',          // **critical**: prevent buttons from wrapping in Time Entry
+    margin: '0'                  // remove vertical margin that encourages stacking
+  });
+
+  const td = nextToStamp.closest('td');
+  if (td) td.style.whiteSpace = 'nowrap';
+
+  nextToStamp.style.display = 'inline-block';
+  nextToStamp.insertAdjacentElement('beforebegin', row);
+  row.appendChild(nextToStamp);
+  row.appendChild(wrap);
+
+  buildGroupChildren(wrap);
+  return true;
+}
+
 
   // Mount clipboard bar under thread header/above first note on ticket pages (no relocation of action-bar buttons).
 async function mountGroupUnderThread(targetEl) {
