@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         attentus-cw-clear-contact-button
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.2.1
+// @version      1.2.2
 // @description  Adds a “Clear Contact” action on Ticket/Time Entry pages only; clears Contact, Email, and Phone fields. SPA-safe; mounts in header actions.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
@@ -40,17 +40,35 @@ const AttentusCW = (() => {
     return false;
   }
 
-(function ensureClearContactStyles(){
-  if (document.getElementById('attentus-clear-contact-style')) return;
-  const s = document.createElement('style');
-  s.id = 'attentus-clear-contact-style';
-  s.textContent = `
-    #cw-clear-contact-btn { margin-right: 6px; } /* space before ScreenConnect */
-  `;
-  document.head.appendChild(s);
-})();
+  // ---- spacing normalization (replace old per-ID margin) ----
+  (function ensureClearContactStyles(){
+    if (document.getElementById('attentus-clear-contact-style')) return;
+    const s = document.createElement('style');
+    s.id = 'attentus-clear-contact-style';
+    s.textContent = `
+      /* zero ad-hoc margins on our three actions */
+      #cw-clear-contact-btn,
+      #cw-copy-ticket-link-btn,
+      #cw-copy-timezest-btn { margin: 0 !important; }
 
+      /* consistent sibling spacing regardless of pod/bar */
+      .pod_ticketHeaderActions .cw_CwActionButton + .cw_CwActionButton,
+      .cw-CwActionButtons     .cw_CwActionButton + .cw_CwActionButton,
+      .cw-CwActionBar         .cw_CwActionButton + .cw_CwActionButton,
+      .mm_toolbar             .cw_CwActionButton + .cw_CwActionButton {
+        margin-left: 6px !important;
+      }
 
+      /* Stronger spacing for the HorizontalPanel action bar */
+.cw_CwHorizontalPanel > .cw_CwActionButton { margin-left: 6px !important; }
+.cw_CwHorizontalPanel > .cw_CwActionButton:first-of-type { margin-left: 0 !important; }
+
+/* Physical spacer used when CW nukes margins in cw_CwHorizontalPanel */
+.att-action-spacer { display:inline-block; width:6px; height:1px; }
+
+    `;
+    document.head.appendChild(s);
+  })();
 
   function spaRoot() {
     return document.querySelector("#cwContent") ||
@@ -91,7 +109,6 @@ const AttentusCW = (() => {
 
   // ---- placement helpers (broadened) ----
   function headerActionsPod() {
-    // cover multiple skins/layouts
     return (
       document.querySelector(".pod_ticketHeaderActions") ||
       document.querySelector(".cw-CwActionBar") ||
@@ -101,164 +118,184 @@ const AttentusCW = (() => {
     );
   }
 
-function findAnchor() {
-  // Prefer to colocate with our own buttons if present
-  const ourBefore =
-    document.getElementById('cw-copy-ticket-link-btn') ||
-    document.getElementById('cw-copy-timezest-btn');
+  function findHorizontalPanel() {
+  return document.querySelector('.cw_CwHorizontalPanel');
+}
 
-  if (ourBefore && ourBefore.parentElement) {
-    return { container: ourBefore.parentElement, before: ourBefore }; // insert before for left-to-right ordering
+function findAgeTable(panel) {
+  if (!panel) return null;
+  const ageDiv = panel.querySelector('.cw_CwHTML, .gwt-HTML.mm_label');
+  if (ageDiv && /(^|\b)age:\s*/i.test((ageDiv.textContent||'').trim())) {
+    return ageDiv.closest('table');
   }
+  return null;
+}
 
-  // Otherwise, use any existing CW action button as the “before” point
-  const anyAction = document.querySelector('.cw_CwActionButton');
-  if (anyAction && anyAction.parentElement) {
-    return { container: anyAction.parentElement, before: anyAction };
+function lastNativeButton(panel) {
+  if (!panel) return null;
+  const natives = Array.from(panel.querySelectorAll('.cw_CwActionButton:not([data-origin="attentus"])'));
+  return natives.length ? natives[natives.length - 1] : null;
+}
+
+function pickAfterAnchor(container) {
+  const panel = findHorizontalPanel() || container;
+  if (!panel) return null;
+
+  const age = findAgeTable(panel);
+  const nativeLast = lastNativeButton(panel);
+
+  if (age && nativeLast) {
+    // choose whichever is further to the right in DOM order
+    return (age.compareDocumentPosition(nativeLast) & Node.DOCUMENT_POSITION_FOLLOWING) ? nativeLast : age;
   }
+  return nativeLast || age || null;
+}
 
-  // Last resort: fall back to broader toolbars if present
-  const pod =
-    document.querySelector('.pod_ticketHeaderActions') ||
-    document.querySelector('.cw-CwActionBar') ||
-    document.querySelector('.cw-CwActionButtons') ||
-    document.querySelector('.mm_toolbar') ||
-    null;
-
-  return pod ? { container: pod, before: null } : null;
+// spacer utilities
+const isBtn = el => el && el.classList && el.classList.contains('cw_CwActionButton');
+function makeSpacer() { const s = document.createElement('span'); s.className = 'att-action-spacer'; return s; }
+function insertAfterWithSpacer(afterEl, node) {
+  const parent = afterEl?.parentElement; if (!parent) return;
+  let spacer = afterEl.nextSibling;
+  if (!(spacer && spacer.nodeType === 1 && spacer.classList.contains('att-action-spacer'))) {
+    spacer = makeSpacer();
+    parent.insertBefore(spacer, afterEl.nextSibling);
+  }
+  parent.insertBefore(node, spacer.nextSibling);
 }
 
 
-
-function makeActionButton(onRun) {
-  const outer = document.createElement("div");
-  outer.className = "GMDB3DUBHFJ GMDB3DUBAQG GMDB3DUBOFJ cw_CwActionButton";
-  outer.id = "cw-clear-contact-btn";
-  outer.setAttribute("data-origin", "attentus");
-  outer.tabIndex = 0;
-
-  const btn = document.createElement("div");
-  btn.className = "GMDB3DUBIOG mm_button";
-  btn.setAttribute("role", "button");
-  btn.setAttribute("aria-label", "Clear Contact");
-  btn.title = "Clear contact, email, and phone fields";
-
-  const inner = document.createElement("div");
-  inner.className = "GMDB3DUBJOG GMDB3DUBNQG";
-
-  const label = document.createElement("div");
-  label.className = "GMDB3DUBBPG";
-  label.textContent = "Clear Contact";
-
-  inner.appendChild(label);
-  btn.appendChild(inner);
-  outer.appendChild(btn);
-
-  const run = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    try { onRun(); } catch (err) { console.error("[Clear Contact] click error", err); }
-  };
-
-  // Bind on OUTER in capture phase to beat toolbar delegates
-  outer.addEventListener("pointerup", run, true);
-  outer.addEventListener("click", run, true);
-  outer.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); run(e); }
-  });
-
-  return outer;
-}
-
-
-  function insertAfterLast(container, node) {
-    container.appendChild(node);
+  function findAnchor() {
+    // Prefer the parent of any existing CW action button to land in the correct container
+    const anyAction = document.querySelector('.cw_CwActionButton');
+    if (anyAction && anyAction.parentElement) {
+      return { container: anyAction.parentElement, before: null };
+    }
+    const pod = headerActionsPod();
+    return pod ? { container: pod, before: null } : null;
   }
 
-function clearContactFields() {
-  // Fire the events CW listens for
-  const fireAll = (el) => {
-    try {
-      el.dispatchEvent(new Event('input',  { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-      el.dispatchEvent(new Event('blur',   { bubbles: true }));
-    } catch {}
-  };
-  const clear = (el) => {
-    if (!el || !('value' in el)) return false;
-    const before = el.value;
-    el.value = '';
-    fireAll(el);
-    return !!before;
-  };
+  function makeActionButton(onRun) {
+    const outer = document.createElement("div");
+    outer.className = "GMDB3DUBHFJ GMDB3DUBAQG GMDB3DUBOFJ cw_CwActionButton";
+    outer.id = "cw-clear-contact-btn";
+    outer.setAttribute("data-origin", "attentus");
+    outer.tabIndex = 0;
 
-  let did = false;
+    const btn = document.createElement("div");
+    btn.className = "GMDB3DUBIOG mm_button";
+    btn.setAttribute("role", "button");
+    btn.setAttribute("aria-label", "Clear Contact");
+    btn.title = "Clear contact, email, and phone fields";
 
-  // ---------- CONTACT ----------
-  // Original working selector (legacy CW)
-  const contactLegacy = document.querySelector('input.cw_contact');
-  if (clear(contactLegacy)) did = true;
+    const inner = document.createElement("div");
+    inner.className = "GMDB3DUBJOG GMDB3DUBNQG";
 
-  // Newer/fallback selectors
-  ['input[aria-label="Contact"]',
-   'input[id*="Contact"][role="combobox"]',
-   'input[name="ContactRecID"]'
-  ].forEach(sel => document.querySelectorAll(sel).forEach(el => { if (clear(el)) did = true; }));
+    const label = document.createElement("div");
+    label.className = "GMDB3DUBBPG";
+    label.textContent = "Clear Contact";
 
-  // ---------- EMAIL ----------
-  const emailLegacy = document.querySelector('input.cw_emailAddress');
-  if (clear(emailLegacy)) did = true;
+    inner.appendChild(label);
+    btn.appendChild(inner);
+    outer.appendChild(btn);
 
-  ['input[aria-label="Email"]','input[name="EmailAddress"]']
-    .forEach(sel => document.querySelectorAll(sel).forEach(el => { if (clear(el)) did = true; }));
+    const run = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      try { onRun(); } catch (err) { console.error("[Clear Contact] click error", err); }
+    };
 
-  // ---------- PHONE (number + extension) ----------
-  // Original working container (legacy CW)
-  const phoneBlock = document.querySelector('.cw_contactPhoneCommunications');
-  if (phoneBlock) {
-    phoneBlock.querySelectorAll('input[type="text"]').forEach(inp => { if (clear(inp)) did = true; });
+    outer.addEventListener("pointerup", run, true);
+    outer.addEventListener("click", run, true);
+    outer.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); run(e); }
+    });
+
+    return outer;
   }
-  // Fallbacks if layout changes later
-  ['input[aria-label="Phone"]','input[name="PhoneNumber"]','input[aria-label*="Ext"]','input[name*="Ext"]']
-    .forEach(sel => document.querySelectorAll(sel).forEach(el => { if (clear(el)) did = true; }));
 
-  if (!did) {
-    console.warn('[Clear Contact] No matching fields found to clear on this layout');
+  // ---- ordered mounting: Clear Contact should be left-most of the three ----
+ function mountIntoOrdered(container, node) {
+  if (!container || !node) return;
+
+  const afterAnchor = pickAfterAnchor(container);
+  if (afterAnchor) {
+    // Clear Contact should be first among Attentus, but still start after Age/native
+    insertAfterWithSpacer(afterAnchor, node);
+  } else {
+    // no anchor found → put at the very start
+    container.insertBefore(node, container.firstChild);
   }
 }
 
 
+  function clearContactFields() {
+    const fireAll = (el) => {
+      try {
+        el.dispatchEvent(new Event('input',  { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new Event('blur',   { bubbles: true }));
+      } catch {}
+    };
+    const clear = (el) => {
+      if (!el || !('value' in el)) return false;
+      const before = el.value;
+      el.value = '';
+      fireAll(el);
+      return !!before;
+    };
+
+    let did = false;
+
+    // CONTACT
+    const contactLegacy = document.querySelector('input.cw_contact');
+    if (clear(contactLegacy)) did = true;
+
+    ['input[aria-label="Contact"]',
+     'input[id*="Contact"][role="combobox"]',
+     'input[name="ContactRecID"]'
+    ].forEach(sel => document.querySelectorAll(sel).forEach(el => { if (clear(el)) did = true; }));
+
+    // EMAIL
+    const emailLegacy = document.querySelector('input.cw_emailAddress');
+    if (clear(emailLegacy)) did = true;
+
+    ['input[aria-label="Email"]','input[name="EmailAddress"]']
+      .forEach(sel => document.querySelectorAll(sel).forEach(el => { if (clear(el)) did = true; }));
+
+    // PHONE (number + extension)
+    const phoneBlock = document.querySelector('.cw_contactPhoneCommunications');
+    if (phoneBlock) {
+      phoneBlock.querySelectorAll('input[type="text"]').forEach(inp => { if (clear(inp)) did = true; });
+    }
+    ['input[aria-label="Phone"]','input[name="PhoneNumber"]','input[aria-label*="Ext"]','input[name*="Ext"]']
+      .forEach(sel => document.querySelectorAll(sel).forEach(el => { if (clear(el)) did = true; }));
+
+    if (!did) {
+      console.warn('[Clear Contact] No matching fields found to clear on this layout');
+    }
+  }
 
   // ---- mount ----
-function addButton() {
-  if (document.getElementById(BTN_ID)) return;
-  const spot = findAnchor();
-  if (!spot || !spot.container) return AttentusCW.log('Clear Contact: no anchor');
+  function addButton() {
+    if (document.getElementById(BTN_ID)) return;
+    const spot = findAnchor();
+    if (!spot || !spot.container) return AttentusCW.log('Clear Contact: no anchor');
 
-  const button = makeActionButton(clearContactFields);
-
-  if (spot.before && spot.before.parentElement === spot.container) {
-    spot.container.insertBefore(button, spot.before);
-  } else {
-    spot.container.appendChild(button);
+    const button = makeActionButton(clearContactFields);
+    mountIntoOrdered(spot.container, button);
+    AttentusCW.log('Clear Contact mounted (ordered)', { container: spot.container });
   }
-  AttentusCW.log('Clear Contact mounted', { container: spot.container, before: !!spot.before });
-}
 
+  function tryMount() {
+    if (!AttentusCW.isTicketOrTimeEntryPage()) return;
 
-
-function tryMount() {
-  if (!AttentusCW.isTicketOrTimeEntryPage()) return;
-
-  AttentusCW.ensureMounted(
-    () => !!document.querySelector('.cw_CwActionButton') || !!document.querySelector('.pod_ticketHeaderActions,.cw-CwActionBar,.cw-CwActionButtons,.mm_toolbar'),
-    () => addButton(),
-    { attempts: 80, delay: 150 }
-  );
-}
-
-
-
+    AttentusCW.ensureMounted(
+      () => !!document.querySelector('.cw_CwActionButton') || !!document.querySelector('.pod_ticketHeaderActions,.cw-CwActionBar,.cw-CwActionButtons,.mm_toolbar'),
+      () => addButton(),
+      { attempts: 80, delay: 150 }
+    );
+  }
 
   tryMount();
   AttentusCW.observeSpa(tryMount);
@@ -267,6 +304,6 @@ function tryMount() {
      Gating: URL id params or connectwise.aspx??ticket/timeentry OR pods .pod_ticketHeaderActions/.pod_ticketSummary/.pod_timeEntryDetails
      Must-not-fire: #mytimesheetdaygrid-listview-scroller, .cw-gxt-wnd
      Anchor: .pod_ticketHeaderActions | .cw-CwActionBar | .cw-CwActionButtons | .mm_toolbar (or parent of Follow)
-     Placement: append to the action container
+     Placement: left-most among Attentus actions (then Copy Ticket, then TimeZest); spacing via sibling CSS
   */
 })();
