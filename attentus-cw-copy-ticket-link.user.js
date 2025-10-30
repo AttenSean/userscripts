@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         attentus-cw-copy-ticket-link
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.7.0
-// @description  Click = formatted label link. Shift+Click = URL-only (as hyperlink in HTML). Right-click/Space = formatted + newline “Company — Contact”. SPA-safe, mounts with other action buttons; never on Time Sheets or modals. Uses Rails ticket URL.
+// @version      1.7.2
+// @description  Click = formatted label link. Shift+Click = URL-only (as hyperlink in HTML). Right-click/Space = formatted + newline “Company — Contact”. SPA-safe, mounts with other action buttons; never on Time Entry / Time Sheets / modals. Uses Rails ticket URL.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
 // @match        https://*.myconnectwise.com/*
@@ -20,17 +20,87 @@
   'use strict';
 
   const BTN_ID = 'cw-copy-ticket-link-btn';
+  const INLINE_GROUP_ID = 'cw-notes-inline-copy-group'; // guard: don’t mount inside this
 
-  // ---------- spacing like other buttons ----------
+  /* ---------- styles (normalized spacing) ---------- */
   (function ensureCopyTicketStyles(){
     if (document.getElementById('att-copy-ticket-style')) return;
     const s = document.createElement('style');
     s.id = 'att-copy-ticket-style';
-    s.textContent = `#${CSS.escape(BTN_ID)}{margin-left:6px}`;
+    s.textContent = `
+      /* Remove ad-hoc margins on our 3 action buttons so a single sibling rule rules them all */
+      #cw-copy-ticket-link-btn,
+      #cw-clear-contact-btn,
+      #cw-copy-timezest-btn { margin: 0 !important; }
+
+      /* Consistent spacing between CW action buttons no matter which pod/bar renders them */
+      .pod_ticketHeaderActions .cw_CwActionButton + .cw_CwActionButton,
+      .cw-CwActionButtons     .cw_CwActionButton + .cw_CwActionButton,
+      .cw-CwActionBar         .cw_CwActionButton + .cw_CwActionButton,
+      .mm_toolbar             .cw_CwActionButton + .cw_CwActionButton {
+        margin-left: 6px !important;
+      }
+
+      /* Stronger spacing for the HorizontalPanel action bar */
+.cw_CwHorizontalPanel > .cw_CwActionButton { margin-left: 6px !important; }
+.cw_CwHorizontalPanel > .cw_CwActionButton:first-of-type { margin-left: 0 !important; }
+
+/* Physical spacer used when CW nukes margins in cw_CwHorizontalPanel */
+.att-action-spacer { display:inline-block; width:6px; height:1px; }
+
+
+    `;
     document.head.appendChild(s);
   })();
 
-  // ---------- feedback pulse ----------
+
+  function findHorizontalPanel() {
+  return document.querySelector('.cw_CwHorizontalPanel');
+}
+
+function findAgeTable(panel) {
+  if (!panel) return null;
+  const ageDiv = panel.querySelector('.cw_CwHTML, .gwt-HTML.mm_label');
+  if (ageDiv && /(^|\b)age:\s*/i.test((ageDiv.textContent||'').trim())) {
+    return ageDiv.closest('table');
+  }
+  return null;
+}
+
+function lastNativeButton(panel) {
+  if (!panel) return null;
+  const natives = Array.from(panel.querySelectorAll('.cw_CwActionButton:not([data-origin="attentus"])'));
+  return natives.length ? natives[natives.length - 1] : null;
+}
+
+function pickAfterAnchor(container) {
+  const panel = findHorizontalPanel() || container;
+  if (!panel) return null;
+
+  const age = findAgeTable(panel);
+  const nativeLast = lastNativeButton(panel);
+
+  if (age && nativeLast) {
+    // choose whichever is further to the right in DOM order
+    return (age.compareDocumentPosition(nativeLast) & Node.DOCUMENT_POSITION_FOLLOWING) ? nativeLast : age;
+  }
+  return nativeLast || age || null;
+}
+
+// spacer utilities
+const isBtn = el => el && el.classList && el.classList.contains('cw_CwActionButton');
+function makeSpacer() { const s = document.createElement('span'); s.className = 'att-action-spacer'; return s; }
+function insertAfterWithSpacer(afterEl, node) {
+  const parent = afterEl?.parentElement; if (!parent) return;
+  let spacer = afterEl.nextSibling;
+  if (!(spacer && spacer.nodeType === 1 && spacer.classList.contains('att-action-spacer'))) {
+    spacer = makeSpacer();
+    parent.insertBefore(spacer, afterEl.nextSibling);
+  }
+  parent.insertBefore(node, spacer.nextSibling);
+}
+
+
   function ensureFlashStyles() {
     if (document.getElementById('cw-copy-flash-styles')) return;
     const css = document.createElement('style');
@@ -49,28 +119,34 @@
     setTimeout(() => { labelEl.textContent = old; btnRoot.classList.remove('cw-flash-pulse'); }, 900);
   }
 
-  // ---------- gating ----------
-function isTicketOrTimeEntryPage() {
-  const href = (location.href || "").toLowerCase();
-  const path = (location.pathname || "").toLowerCase();
-  const search = location.search || "";
-
-  if (/[?&](service_recid|recid|serviceticketid|srrecid)=\d+/i.test(search)) return true;
-  if (/connectwise\.aspx/.test(path)) {
-    if (/\?\?[^#]*(ticket|service.?ticket)/i.test(href)) return true;
-    if (/\?\?[^#]*timeentry/i.test(href)) return true;
+  /* ---------- gating (ticket pages only) ---------- */
+  function isTimeSheet() {
+    return !!document.getElementById('mytimesheetdaygrid-listview-scroller') ||
+           !!document.querySelector('.mytimesheetlist, .TimeSheet');
   }
-  if (document.querySelector(".pod_ticketHeaderActions, .pod_ticketSummary")) return true;
-  if ([...document.querySelectorAll(".cw_CwLabel,.gwt-Label")]
-      .some(el => /service\s*ticket\s*#/i.test(el.textContent || ""))) return true;
-  if (document.querySelector(".pod_timeEntryDetails, input.cw_ChargeToTextBox, input[id$='ChargeToTextBox']")) return true;
+  function isTimeEntryPage() {
+    if (document.querySelector('.pod_timeEntryDetails')) return true;
+    if (document.querySelector('.cw_ToolbarButton_TimeStamp')) return true; // Notes timestamp buttons
+    if (document.querySelector('input.cw_ChargeToTextBox, input[id$="ChargeToTextBox"]')) return true;
+    return false;
+  }
+  function isTicketPage() {
+    if (isTimeSheet() || isTimeEntryPage()) return false;
 
-  // explicit off on Time Sheet
-  if (document.getElementById("mytimesheetdaygrid-listview-scroller")) return false;
-  return false;
-}
+    const href  = (location.href || '').toLowerCase();
+    const path  = (location.pathname || '').toLowerCase();
+    const qs    = location.search || '';
 
-  // ---------- DOM utils ----------
+    if (/[?&](service_recid|recid|serviceticketid|srrecid)=\d+/i.test(qs)) return true;
+    if (/connectwise\.aspx/.test(path) && /\?\?[^#]*(ticket|service.?ticket)/i.test(href)) return true;
+    if (document.querySelector('.pod_ticketHeaderActions, .pod_ticketSummary')) return true;
+    if ([...document.querySelectorAll('.cw_CwLabel,.gwt-Label,.mm_label')]
+          .some(el => /service\s*ticket\s*#/i.test((el.textContent || '')))) return true;
+
+    return false;
+  }
+
+  /* ---------- DOM utils ---------- */
   const $  = (s, r = document) => r.querySelector(s);
   const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
   const txt = el => (el && el.textContent || '').trim();
@@ -81,26 +157,22 @@ function isTicketOrTimeEntryPage() {
            document.body;
   }
 
-  // Find a stable container that holds action buttons
-function findActionContainer() {
-  // 1) Prefer an existing CW action button’s parent (most stable)
-  const anyBtn = document.querySelector('.cw_CwActionButton');
-  if (anyBtn && anyBtn.parentElement) return anyBtn.parentElement;
+  function findActionContainer() {
+    const anyBtn = document.querySelector('.cw_CwActionButton');
+    if (anyBtn && anyBtn.parentElement) return anyBtn.parentElement;
 
-  // 2) Known action containers across skins/layouts
-  const pods = [
-    '.pod_ticketHeaderActions',
-    '.cw-CwActionBar',
-    '.cw-CwActionButtons',
-    '.mm_toolbar'
-  ];
-  for (const sel of pods) {
-    const el = document.querySelector(sel);
-    if (el) return el;
+    const pods = [
+      '.pod_ticketHeaderActions',
+      '.cw-CwActionBar',
+      '.cw-CwActionButtons',
+      '.mm_toolbar'
+    ];
+    for (const sel of pods) {
+      const el = document.querySelector(sel);
+      if (el) return el;
+    }
+    return null;
   }
-  return null;
-}
-
 
   function waitForActionContainer({ timeoutMs = 20000 } = {}) {
     return new Promise(resolve => {
@@ -123,7 +195,7 @@ function findActionContainer() {
     });
   }
 
-  // ---------- ticket meta ----------
+  /* ---------- ticket meta ---------- */
   function getBannerLine() {
     return $$('.cw_CwLabel,.gwt-Label').map(txt)
       .find(t => /service\s*ticket\s*#\s*\d+/i.test(t || '')) || '';
@@ -151,17 +223,14 @@ function findActionContainer() {
     return full ? `#${id} - ${full}` : (getLabelFromTitle() || `#${id}`);
   }
 
-  // ---------- CW Rails base + ticket URL ----------
+  /* ---------- Rails base + URL ---------- */
   function cwVersionBase() {
-    // Keep the /v4_6_release (or similar) prefix if present; otherwise default to v4_6_release.
     const m = (location.pathname || '').match(/\/v\d+_\d+[^/]*?/);
     const ver = m ? m[0] : '/v4_6_release';
     return `${location.origin}${ver}`;
   }
   function buildTicketUrl(id) {
     if (!id) return location.href;
-    // Rails detail page used by other Attentus scripts
-    //   /vX_X_release/services/system_io/Service/fv_sr100_request.rails?service_recid=<id>
     return `${cwVersionBase()}/services/system_io/Service/fv_sr100_request.rails?service_recid=${encodeURIComponent(id)}`;
   }
 
@@ -189,7 +258,7 @@ function findActionContainer() {
     return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c]));
   }
 
-  // ---------- robust rich copy (HTML + plain) ----------
+  /* ---------- robust rich copy ---------- */
   async function copyBoth(html, text) {
     try {
       if (navigator.clipboard && window.ClipboardItem) {
@@ -252,7 +321,7 @@ function findActionContainer() {
     return false;
   }
 
-  // ---------- copy modes ----------
+  /* ---------- copy modes ---------- */
   async function copyFormattedBase(btn, label) {
     const id   = getTicketIdFromBanner();
     const href = buildTicketUrl(id);
@@ -291,7 +360,7 @@ function findActionContainer() {
     flashCopied(btn, label, ok ? 'Copied' : 'Copy failed');
   }
 
-  // ---------- button & events ----------
+  /* ---------- button & events ---------- */
   function makeButton() {
     ensureFlashStyles();
 
@@ -301,6 +370,8 @@ function findActionContainer() {
     outer.setAttribute('data-origin','attentus');
     outer.tabIndex = 0;
     outer.setAttribute('aria-label','Copy Ticket');
+      // NEW: force spacing even inside cw_CwHorizontalPanel
+  outer.style.marginLeft = '6px';
 
     const btn   = document.createElement('div');  btn.className = 'GMDB3DUBIOG mm_button';
     const inner = document.createElement('div');  inner.className = 'GMDB3DUBJOG GMDB3DUBNQG';
@@ -314,7 +385,6 @@ function findActionContainer() {
     }, true);
 
     outer.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); }, true);
-
     outer.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); copyFormattedBase(btn, label); }
       if (e.key === ' ')     { e.preventDefault(); copyFormattedWithCompanyContact(btn, label); }
@@ -323,89 +393,80 @@ function findActionContainer() {
     return outer;
   }
 
-  // ---------- placement (anchor-aware) ----------
+  /* ---------- ordered mounting helper (position lock) ---------- */
+function mountIntoOrdered(container, node) {
+  if (!container || !node) return;
+
+  const clearBtn = document.getElementById('cw-clear-contact-btn');
+  const timezest = document.getElementById('cw-copy-timezest-btn');
+
+  // 1) Ensure we start the Attentus block after Age/native
+  const afterAnchor = pickAfterAnchor(container);
+  if (afterAnchor) insertAfterWithSpacer(afterAnchor, node);
+  else container.appendChild(node);
+
+  // 2) Now enforce Attentus internal order around this node
+  // after Clear Contact
+  if (clearBtn && clearBtn.parentElement === container) {
+    insertAfterWithSpacer(clearBtn, node);
+  }
+  // before TimeZest
+  if (timezest && timezest.parentElement === container) {
+    // place our node before TimeZest by inserting a spacer before TimeZest and then before that spacer
+    let spacer = timezest.previousSibling;
+    if (!(spacer && spacer.nodeType === 1 && spacer.classList.contains('att-action-spacer'))) {
+      spacer = makeSpacer();
+      container.insertBefore(spacer, timezest);
+    }
+    container.insertBefore(node, spacer);
+  }
+}
+
+
+  /* ---------- placement (ticket toolbar only) ---------- */
   function placeButtonNow() {
     if (document.getElementById(BTN_ID)) return true;
-    if (!isTicketOrTimeEntryPage()) return false;
-    if (document.getElementById('mytimesheetdaygrid-listview-scroller')) return false;
-    if (document.querySelector('.cw-gxt-wnd')) return false;
-
-    const before =
-      document.getElementById('cw-copy-timezest-btn') ||
-      document.getElementById('cw-clear-contact-btn');
-
-    if (before && before.parentElement) {
-      before.parentElement.insertBefore(makeButton(), before.nextSibling);
-      return true;
-    }
+    if (!isTicketPage()) return false;
+    if (document.querySelector('.cw-gxt-wnd')) return false; // no modals
 
     const container = findActionContainer();
-    if (container) {
-      container.appendChild(makeButton());
-      return true;
-    }
-    return false;
+    if (!container) return false;
+
+    // Guard: don’t append to the clipboard bar span (Time Entry UI)
+    if (container.id === INLINE_GROUP_ID) return false;
+
+    // Create once, then mount with deterministic ordering
+    const node = makeButton();
+    mountIntoOrdered(container, node);
+    return true;
   }
 
   function retryUntil(testFn, runFn, { attempts = 80, delay = 150 } = {}) {
-  let tries = 0;
-  const tick = () => {
-    try {
-      if (testFn()) { runFn(); return; }
-    } catch {}
-    if (++tries < attempts) setTimeout(tick, delay);
-  };
-  tick();
-}
+    let tries = 0;
+    const tick = () => {
+      try {
+        if (testFn()) { runFn(); return; }
+      } catch {}
+      if (++tries < attempts) setTimeout(tick, delay);
+    };
+    tick();
+  }
 
   function ensureOnce() {
-  if (!isTicketOrTimeEntryPage()) return;
-  if (document.getElementById('mytimesheetdaygrid-listview-scroller')) return;
-  if (document.querySelector('.cw-gxt-wnd')) return; // keep your modal guard
-
-  if (document.getElementById(BTN_ID)) return;
-
-  // fast path
-  if (placeButtonNow()) return;
-
-  // persistent polling until an action container exists
-  retryUntil(
-    () => !!findActionContainer(),
-    () => placeButtonNow(),
-    { attempts: 80, delay: 150 } // ~12s total like Clear Contact
-  );
-}
-
-// call this instead of plain `ensure()` for the initial passes
-setTimeout(ensureOnce, 0);
-setTimeout(ensureOnce, 250);
-setTimeout(ensureOnce, 750);
-setTimeout(ensureOnce, 1500);
-setTimeout(ensureOnce, 3000);
-setTimeout(ensureOnce, 6000);
-
-
-  // ---------- SPA ensure with waiter ----------
-  let ensureRunId = 0;
-
-  async function ensure() {
-    const runId = ++ensureRunId;
-
-    if (!isTicketOrTimeEntryPage()) return;
-    if (document.getElementById('mytimesheetdaygrid-listview-scroller')) return;
+    if (!isTicketPage()) return;
     if (document.querySelector('.cw-gxt-wnd')) return;
-
     if (document.getElementById(BTN_ID)) return;
 
     if (placeButtonNow()) return;
 
-    const anchor = await waitForActionContainer({ timeoutMs: 20000 });
-    if (runId !== ensureRunId) return;
-    if (!anchor) return;
-
-    placeButtonNow();
+    retryUntil(
+      () => !!findActionContainer(),
+      () => placeButtonNow(),
+      { attempts: 80, delay: 150 }
+    );
   }
 
+  /* ---------- SPA hooks ---------- */
   const spaRoot = getSpaRoot();
   const mo = new MutationObserver(() => ensureOnce());
   if (spaRoot) mo.observe(spaRoot, { subtree: true, childList: true });
@@ -418,25 +479,11 @@ setTimeout(ensureOnce, 6000);
   window.addEventListener('hashchange', ensureOnce);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) ensureOnce(); });
 
-
-  /* ---------------------------------------------
-     Selectors QA — Copy Ticket (Ticket / Time Entry)
-     ---------------------------------------------
-     ## Gating
-     - Page test(s): URL params (?service_recid|recid|serviceTicketId|srRecID) OR DOM pods (.pod_ticketHeaderActions / .pod_ticketSummary / .pod_timeEntryDetails)
-     - Must-not-fire on: Time Sheet (#mytimesheetdaygrid-listview-scroller), Modals (.cw-gxt-wnd)
-
-     ## Anchor Region
-     - Preferred container: .pod_ticketHeaderActions (append to parent of .cw_CwActionButton)
-     - Fallback: parent of any .cw_CwActionButton
-     - Observer root: #cwContent | .cw-WorkspaceView | body
-
-     ## Key Values
-     - Ticket ID/label: banner/title; URL now uses Rails:
-       /vX_X_release/services/system_io/Service/fv_sr100_request.rails?service_recid=ID
-     - Company/Contact: inputs (input.cw_company/input.cw_contact) or header mm_value by aria-label
-
-     ## Placement
-     - Prefer colocating after our own buttons (#cw-copy-timezest-btn / #cw-clear-contact-btn), else append to action container
-  ---------------------------------------------- */
+  // initial passes
+  setTimeout(ensureOnce, 0);
+  setTimeout(ensureOnce, 250);
+  setTimeout(ensureOnce, 750);
+  setTimeout(ensureOnce, 1500);
+  setTimeout(ensureOnce, 3000);
+  setTimeout(ensureOnce, 6000);
 })();
