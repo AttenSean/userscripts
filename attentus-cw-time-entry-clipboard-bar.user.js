@@ -88,6 +88,33 @@
   document.head.appendChild(s);
 })();
 
+(function ensureClipboardSpacerStyles(){
+  if (document.getElementById('att-clipbar-spacer-style')) return;
+  const s = document.createElement('style');
+  s.id = 'att-clipbar-spacer-style';
+  s.textContent = `.att-action-spacer{display:inline-block;width:8px;height:1px}`;
+  document.head.appendChild(s);
+})();
+
+// put a physical spacer *after* the given node (as its next sibling)
+function ensureAfterSiblingSpacer(node, px = 8) {
+  if (!node || !node.parentElement) return;
+  const parent = node.parentElement;
+  let sib = node.nextSibling;
+  const isSpacer = el => el && el.nodeType === 1 && el.classList && el.classList.contains('att-action-spacer');
+
+  if (!isSpacer(sib)) {
+    const sp = document.createElement('span');
+    sp.className = 'att-action-spacer';
+    sp.style.display = 'inline-block';
+    sp.style.width = px + 'px';
+    sp.style.height = '1px';
+    parent.insertBefore(sp, node.nextSibling);
+    sib = sp;
+  }
+  return sib;
+}
+
 
 
   // ---------- utils ----------
@@ -105,6 +132,8 @@
     document.body.appendChild(n);
     setTimeout(() => n.remove(), 1400);
   }
+
+
 
   // ---------- storage helpers ----------
   async function gmGet(key, defVal) {
@@ -320,6 +349,8 @@ function mountGroup(nextToStamp) {
     if (existing.dataset?.origin === 'att-clipboard-bar') existing.remove();
   }
 
+  const group = document.getElementById('cw-notes-inline-copy-group'); // or the variable you already have
+
   // container that holds [timestamp][toolbar]
   const row = document.createElement('span');
   row.id = 'att-clipbar-row';
@@ -352,6 +383,8 @@ function mountGroup(nextToStamp) {
   row.appendChild(wrap);
 
   buildGroupChildren(wrap);
+  ensureAfterSiblingSpacer(row, 8);
+
   return true;
 }
 
@@ -384,6 +417,22 @@ async function mountGroupUnderThread(targetEl) {
   await buildGroupChildren(strip);
   return true;
 }
+
+(function observeClipbarSpacer(){
+  const row = document.getElementById('att-clipbar-row');
+  if (!row || !row.parentElement) return;
+
+  // initial spacer assertion
+  ensureAfterSiblingSpacer(row, 8);
+
+  const container = row.parentElement; // the TD that contains row + siblings
+  const mo = new MutationObserver(() => {
+    const r = document.getElementById('att-clipbar-row');
+    if (r) ensureAfterSiblingSpacer(r, 8);
+  });
+  mo.observe(container, { childList: true });
+})();
+
 
 
   // ---------- settings panel ----------
