@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         attentus-cw-copy-timezest-link
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      2.4.0
+// @version      2.4.1
 // @description  Left-click: Help Desk Team (30m). Right-click: Personal (30m). Shift-click: Settings. Copies true HTML (“Schedule a time”) with plaintext fallback. Shows on Ticket pages (header actions) and stand-alone Time Entry windows (next to clipboard bar or Notes timestamp). SPA-safe.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
@@ -22,9 +22,7 @@
 const AttentusCW = (() => {
   const DEBUG = !!localStorage.getItem("attentus-debug");
 
-  function debugLog(...a) {
-    if (DEBUG) console.log("[AttentusCW]", ...a);
-  }
+  function debugLog(...a) { if (DEBUG) console.log("[AttentusCW]", ...a); }
 
   function isTicketOrTimeEntryPage() {
     const href = (location.href || "").toLowerCase();
@@ -71,11 +69,8 @@ const AttentusCW = (() => {
     const { attempts = 24, delay = 250 } = opts;
     let tries = 0;
     const loop = () => {
-      try {
-        if (testFn()) return void mountFn();
-      } catch (e) {
-        debugLog("ensureMounted error:", e);
-      }
+      try { if (testFn()) return void mountFn(); }
+      catch (e) { debugLog("ensureMounted error:", e); }
       if (++tries < attempts) setTimeout(loop, delay);
     };
     loop();
@@ -111,56 +106,130 @@ const AttentusCW = (() => {
   const $$ = (s, r=document) => Array.from(r.querySelectorAll(s));
   const txt = el => (el && el.textContent || '').trim();
 
-function addStyles() {
-  if (document.getElementById(CSS_ID)) return;
-  const css = document.createElement('style');
-  css.id = CSS_ID;
-  css.textContent = `
-    @keyframes tzPulse { 0%{transform:scale(1)}50%{transform:scale(1.04)}100%{transform:scale(1)} }
-    .tz-flash { animation: tzPulse .35s ease-in-out; box-shadow: 0 0 0 2px rgba(59,130,246,.25) inset; border-radius: 6px; }
+  function addStyles() {
+    if (document.getElementById(CSS_ID)) return;
+    const css = document.createElement('style');
+    css.id = CSS_ID;
+    css.textContent = `
+      @keyframes tzPulse { 0%{transform:scale(1)}50%{transform:scale(1.04)}100%{transform:scale(1)} }
+      .tz-flash { animation: tzPulse .35s ease-in-out; box-shadow: 0 0 0 2px rgba(59,130,246,.25) inset; border-radius: 6px; }
 
-    /* Spacing when mounted as a CW action button (ticket header) */
-    #${CSS.escape(BTN_ID)} { margin-left: 8px; } /* tweak to taste (6–10px) */
+      /* --- Normalized spacing on ticket header --- */
+      #cw-clear-contact-btn,
+      #cw-copy-ticket-link-btn,
+      #${CSS.escape(BTN_ID)} { margin: 0 !important; }
 
-    /* Inline button look (Time Entry / clipboard bar) */
-    #${CSS.escape(BTN_ID)}.att-inline.mm_button {
-      display: inline-block !important;
-      pointer-events: auto !important;
-      opacity: 1 !important;
-      cursor: pointer !important;
-      padding: 4px 8px;
-      border-radius: 6px;
-      border: 1px solid rgba(0,0,0,.2);
-      background: #2563eb;
-      color: #fff;
-      line-height: 1.2;
-      white-space: nowrap;
-    }
+      .pod_ticketHeaderActions .cw_CwActionButton + .cw_CwActionButton,
+      .cw-CwActionButtons     .cw_CwActionButton + .cw_CwActionButton,
+      .cw-CwActionBar         .cw_CwActionButton + .cw_CwActionButton,
+      .mm_toolbar             .cw_CwActionButton + .cw_CwActionButton {
+        margin-left: 6px !important;
+      }
 
-    /* flyout */
-    #${FLY_ID} {
-      position: fixed; top: 14%; left: 50%; transform: translateX(-50%);
-      z-index: 2147483646; min-width: 320px; max-width: 420px;
-      background: #0b1220; color: #fff; border: 1px solid rgba(255,255,255,.18);
-      border-radius: 12px; padding: 12px; box-shadow: 0 10px 30px rgba(0,0,0,.35);
-      font: 13px system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
-    }
-    #${FLY_ID} h3 { margin: 0 0 8px 0; font-size: 14px; display:flex; justify-content:space-between; align-items:center; }
-    #${FLY_ID} a { color: #93c5fd; text-decoration: none; }
-    #${FLY_ID} .row { display:flex; gap:8px; margin: 6px 0; }
-    #${FLY_ID} input {
-      width: 100%; padding: 6px 8px; border-radius: 8px; color: #111827;
-      border: 1px solid rgba(255,255,255,.3); outline: none;
-    }
-    #${FLY_ID} .actions { display:flex; gap: 8px; justify-content:flex-end; margin-top:10px; }
-    #${FLY_ID} button {
-      padding: 6px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,.22);
-      background:#2563eb; color:#fff; cursor:pointer;
-    }
-    #${FLY_ID} .secondary { background:#111827; }
-    #${FLY_ID} .explainer { color:#cbd5e1; font-size:12px; margin-top:6px; line-height:1.35; }
-  `;
-  document.head.appendChild(css);
+      /* Stronger spacing for the HorizontalPanel action bar */
+.cw_CwHorizontalPanel > .cw_CwActionButton { margin-left: 6px !important; }
+.cw_CwHorizontalPanel > .cw_CwActionButton:first-of-type { margin-left: 0 !important; }
+
+/* Physical spacer used when CW nukes margins in cw_CwHorizontalPanel */
+.att-action-spacer { display:inline-block; width:6px; height:1px; }
+
+
+
+      /* Inline button look (Time Entry / clipboard bar) */
+      #${CSS.escape(BTN_ID)}.att-inline.mm_button {
+        display: inline-block !important;
+        pointer-events: auto !important;
+        opacity: 1 !important;
+        cursor: pointer !important;
+        padding: 4px 8px;
+        border-radius: 6px;
+        border: 1px solid rgba(0,0,0,.2);
+        background: #2563eb;
+        color: #fff;
+        line-height: 1.2;
+        white-space: nowrap;
+      }
+
+      /* flyout */
+      #${FLY_ID} {
+        position: fixed; top: 14%; left: 50%; transform: translateX(-50%);
+        z-index: 2147483646; min-width: 320px; max-width: 420px;
+        background: #0b1220; color: #fff; border: 1px solid rgba(255,255,255,.18);
+        border-radius: 12px; padding: 12px; box-shadow: 0 10px 30px rgba(0,0,0,.35);
+        font: 13px system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
+      }
+      #${FLY_ID} h3 { margin: 0 0 8px 0; font-size: 14px; display:flex; justify-content:space-between; align-items:center; }
+      #${FLY_ID} a { color: #93c5fd; text-decoration: none; }
+      #${FLY_ID} .row { display:flex; gap:8px; margin: 6px 0; }
+      #${FLY_ID} input {
+        width: 100%; padding: 6px 8px; border-radius: 8px; color: #111827;
+        border: 1px solid rgba(255,255,255,.3); outline: none;
+      }
+      #${FLY_ID} .actions { display:flex; gap: 8px; justify-content:flex-end; margin-top:10px; }
+      #${FLY_ID} button {
+        padding: 6px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,.22);
+        background:#2563eb; color:#fff; cursor:pointer;
+      }
+      #${FLY_ID} .secondary { background:#111827; }
+      #${FLY_ID} .explainer { color:#cbd5e1; font-size:12px; margin-top:6px; line-height:1.35; }
+    `;
+    document.head.appendChild(css);
+  }
+
+  function findHorizontalPanel() {
+  return document.querySelector('.cw_CwHorizontalPanel');
+}
+
+  function makeSpacer(px = 8) {
+  const s = document.createElement('span');
+  s.className = 'att-action-spacer';
+  s.style.display = 'inline-block';
+  s.style.width = px + 'px';
+  s.style.height = '1px';
+  return s;
+}
+
+
+function findAgeTable(panel) {
+  if (!panel) return null;
+  const ageDiv = panel.querySelector('.cw_CwHTML, .gwt-HTML.mm_label');
+  if (ageDiv && /(^|\b)age:\s*/i.test((ageDiv.textContent||'').trim())) {
+    return ageDiv.closest('table');
+  }
+  return null;
+}
+
+function lastNativeButton(panel) {
+  if (!panel) return null;
+  const natives = Array.from(panel.querySelectorAll('.cw_CwActionButton:not([data-origin="attentus"])'));
+  return natives.length ? natives[natives.length - 1] : null;
+}
+
+function pickAfterAnchor(container) {
+  const panel = findHorizontalPanel() || container;
+  if (!panel) return null;
+
+  const age = findAgeTable(panel);
+  const nativeLast = lastNativeButton(panel);
+
+  if (age && nativeLast) {
+    // choose whichever is further to the right in DOM order
+    return (age.compareDocumentPosition(nativeLast) & Node.DOCUMENT_POSITION_FOLLOWING) ? nativeLast : age;
+  }
+  return nativeLast || age || null;
+}
+
+// spacer utilities
+const isBtn = el => el && el.classList && el.classList.contains('cw_CwActionButton');
+function makeSpacer() { const s = document.createElement('span'); s.className = 'att-action-spacer'; return s; }
+function insertAfterWithSpacer(afterEl, node) {
+  const parent = afterEl?.parentElement; if (!parent) return;
+  let spacer = afterEl.nextSibling;
+  if (!(spacer && spacer.nodeType === 1 && spacer.classList.contains('att-action-spacer'))) {
+    spacer = makeSpacer();
+    parent.insertBefore(spacer, afterEl.nextSibling);
+  }
+  parent.insertBefore(node, spacer.nextSibling);
 }
 
 
@@ -196,10 +265,7 @@ function addStyles() {
     } catch {}
     if (navigator.clipboard && window.ClipboardItem) {
       try {
-        const data = {
-          "text/html": new Blob([html], { type: "text/html" }),
-          "text/plain": new Blob([text], { type: "text/plain" })
-        };
+        const data = { "text/html": new Blob([html], { type: "text/html" }), "text/plain": new Blob([text], { type: "text/plain" }) };
         await navigator.clipboard.write([new ClipboardItem(data)]);
         used = true;
       } catch {}
@@ -359,6 +425,8 @@ function addStyles() {
     outer.className = 'GMDB3DUBHFJ GMDB3DUBAQG GMDB3DUBOFJ cw_CwActionButton';
     outer.id = BTN_ID;
     outer.setAttribute('data-origin', 'attentus');
+      // NEW: force spacing even inside cw_CwHorizontalPanel
+  outer.style.marginLeft = '6px';
 
     const btn = document.createElement('div');
     btn.className = 'GMDB3DUBIOG mm_button';
@@ -382,18 +450,18 @@ function addStyles() {
     return outer;
   }
 
-function makeInlineButton() {
-  const b = document.createElement('button');
-  b.type = 'button';
-  b.id = BTN_ID;
-  b.className = 'mm_button';
-  b.classList.add('att-inline'); // <-- add this
-  b.setAttribute('data-origin', 'attentus');
-  b.setAttribute('aria-label', 'Copy TimeZest Link');
-  b.title = 'Click: Help Desk Team (30m). Right-click: Personal (30m). Shift-click: Settings.';
-  b.textContent = 'Copy TimeZest';
-  return b;
-}
+  function makeInlineButton() {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.id = BTN_ID;
+    b.className = 'mm_button';
+    b.classList.add('att-inline');
+    b.setAttribute('data-origin', 'attentus');
+    b.setAttribute('aria-label', 'Copy TimeZest Link');
+    b.title = 'Click: Help Desk Team (30m). Right-click: Personal (30m). Shift-click: Settings.';
+    b.textContent = 'Copy TimeZest';
+    return b;
+  }
 
   // ---------- Wire handlers ----------
   function wireHandlers(clickTarget, pulseTarget, labelEl) {
@@ -427,18 +495,12 @@ function makeInlineButton() {
       if (ok) flashCopied(pulseTarget, labelEl, 'Copied'); else showToast('Copy failed');
     });
 
-    // Keyboard: Enter/Space = click handler
     clickTarget.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        clickTarget.click();
-      }
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); clickTarget.click(); }
     });
   }
 
-  function htmlLink(href, text) {
-    return `<a href="${escapeHtml(href)}">${escapeHtml(text)}</a>`;
-  }
+  function htmlLink(href, text) { return `<a href="${escapeHtml(href)}">${escapeHtml(text)}</a>`; }
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, (c) => (
       { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
@@ -446,7 +508,6 @@ function makeInlineButton() {
   }
 
   // ---------- Anchors & Placement ----------
-  // Ticket header action container
   function findTicketActionContainer() {
     const pod = document.querySelector('.pod_ticketHeaderActions');
     if (pod) {
@@ -459,7 +520,6 @@ function makeInlineButton() {
     return null;
   }
 
-  // Stand-alone Time Entry: Notes timestamp button (inline)
   function findNotesTimestampButton() {
     const stamps = document.querySelectorAll('.cw_ToolbarButton_TimeStamp');
     for (const st of stamps) {
@@ -472,14 +532,37 @@ function makeInlineButton() {
 
   function validAnchor(el) {
     if (!el) return false;
-    if (el.closest && el.closest('.cw-gxt-wnd')) return false; // not inside modals
+    if (el.closest && el.closest('.cw-gxt-wnd')) return false;
     return true;
   }
 
-  // Robust waiter for anchors within SPA
+// Ordered mount helper: Clear Contact → Copy Ticket → Copy TimeZest (this)
+// Uses a spacer node to guarantee visual gaps even when margins are zeroed by CW CSS.
+function mountIntoOrdered(container, node) {
+  if (!container || !node) return;
+
+  const clearBtn = document.getElementById('cw-clear-contact-btn');
+  const copyBtn  = document.getElementById('cw-copy-ticket-link-btn');
+
+  const afterAnchor = pickAfterAnchor(container);
+  if (afterAnchor) insertAfterWithSpacer(afterAnchor, node);
+  else container.appendChild(node);
+
+  // after Copy Ticket if present
+  if (copyBtn && copyBtn.parentElement === container) {
+    insertAfterWithSpacer(copyBtn, node);
+    return;
+  }
+  // else after Clear Contact if present
+  if (clearBtn && clearBtn.parentElement === container) {
+    insertAfterWithSpacer(clearBtn, node);
+  }
+}
+
+
+  // Robust waiter for anchors within SPA (unchanged)
   function waitForAnchors({ timeoutMs = 20000 } = {}) {
     return new Promise(resolve => {
-      // If any anchor is already available, resolve fast
       if (isTicketContext()) {
         const container = findTicketActionContainer();
         if (container) return resolve({ kind: 'ticket', node: container });
@@ -495,24 +578,14 @@ function makeInlineButton() {
 
       const t = setTimeout(() => { obs.disconnect(); resolve(null); }, timeoutMs);
       const obs = new MutationObserver(() => {
-        // Ticket context first
         if (isTicketContext()) {
           const container = findTicketActionContainer();
-          if (container) {
-            clearTimeout(t); obs.disconnect();
-            return resolve({ kind: 'ticket', node: container });
-          }
+          if (container) { clearTimeout(t); obs.disconnect(); return resolve({ kind: 'ticket', node: container }); }
         } else if (isStandaloneTimeEntryContext()) {
           const group = document.getElementById(CLIPBOARD_GROUP_ID);
-          if (group) {
-            clearTimeout(t); obs.disconnect();
-            return resolve({ kind: 'timeentry-group', node: group });
-          }
+          if (group) { clearTimeout(t); obs.disconnect(); return resolve({ kind: 'timeentry-group', node: group }); }
           const stamp = findNotesTimestampButton();
-          if (stamp) {
-            clearTimeout(t); obs.disconnect();
-            return resolve({ kind: 'timeentry-stamp', node: stamp });
-          }
+          if (stamp) { clearTimeout(t); obs.disconnect(); return resolve({ kind: 'timeentry-stamp', node: stamp }); }
         }
       });
       obs.observe(root, { childList: true, subtree: true });
@@ -524,35 +597,36 @@ function makeInlineButton() {
     if (!AttentusCW.isTicketOrTimeEntryPage()) return false;
     if (isTimesheetContext()) return false;
 
-    // On Ticket pages → mount with header action buttons only
+    // On Ticket pages → mount in header actions with deterministic order
     if (isTicketContext()) {
-      const before =
-        document.getElementById('cw-copy-ticket-link-btn') ||
-        document.getElementById('cw-clear-contact-btn');
-
-      if (before && before.parentElement) {
-        // Co-locate with our other buttons
-        before.parentElement.insertBefore(makeActionButton(), before.nextSibling);
-        return true;
-      }
-
       const container = findTicketActionContainer();
       if (validAnchor(container)) {
-        container.appendChild(makeActionButton());
+        const node = makeActionButton();
+        mountIntoOrdered(container, node);
         return true;
       }
       return false;
     }
 
-    // On stand-alone Time Entry → prefer our Clipboard Bar, else timestamp inline
+    // On stand-alone Time Entry → unchanged (inline)
     if (isStandaloneTimeEntryContext()) {
-      const group = document.getElementById(CLIPBOARD_GROUP_ID);
-      if (validAnchor(group)) {
-        const b = makeInlineButton();
-        wireHandlers(b, b, b);
-        group.appendChild(b);
-        return true;
-      }
+const group = document.getElementById(CLIPBOARD_GROUP_ID);
+if (validAnchor(group)) {
+  const b = makeInlineButton();
+  wireHandlers(b, b, b);
+
+  const parent = group.parentElement;
+  if (parent) {
+    // Insert a physical spacer between the group and our button
+    const spacer = makeSpacer(8);
+    parent.insertBefore(spacer, group.nextSibling);
+    parent.insertBefore(b, spacer.nextSibling);
+    return true;
+  }
+}
+
+
+
 
       const stamp = findNotesTimestampButton();
       if (stamp && validAnchor(stamp)) {
@@ -579,14 +653,11 @@ function makeInlineButton() {
     if (isTimesheetContext()) return;
     if (document.getElementById(BTN_ID)) return;
 
-    // Try immediate
     if (placeButtonNow()) return;
 
-    // Wait specifically for appropriate anchors
     const target = await waitForAnchors({ timeoutMs: 20000 });
     if (my !== runId || !target) return;
 
-    // Mount now that anchor(s) exist
     placeButtonNow();
   }
 
@@ -625,11 +696,8 @@ function makeInlineButton() {
      - Ticket pages: header actions container (parent of .cw_CwActionButton) — never mount in thread pods
      - Stand-alone Time Entry: prefer #cw-notes-inline-copy-group; else after .cw_ToolbarButton_TimeStamp for “Notes”
 
-     ## Values
-     - Ticket ID: banner “Service Ticket #…”, URL params, or charge-to field (wait with retries)
-
      ## Placement
-     - Ticket: colocate after our buttons (#cw-copy-ticket-link-btn / #cw-clear-contact-btn) else append to action container
+     - Ticket (locked): Clear Contact → Copy Ticket → Copy TimeZest
      - Stand-alone Time Entry: append to clipboard bar group; otherwise insert after Notes timestamp with small left margin
   ---------------------------------------------- */
 })();
