@@ -1,17 +1,18 @@
 // ==UserScript==
 // @name         attentus-cw-time-entry-clipboard-bar
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.9.3
-// @description  Clipboard buttons by the Notes timestamp (standalone Time Entry) and under the ticket thread pod header. Does not relocate action-bar buttons. Disabled on Time Sheets.
+// @version      1.10.0
+// @description  Clipboard buttons by the Notes timestamp (standalone Time Entry) and under the ticket thread pod header. Adds review link by location (Bellevue/Renton/Seattle/Tacoma) with optional random location. Disabled on Time Sheets.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
+// @match        https://*.myconnectwise.com/*
 // @run-at       document-idle
 // @grant        GM_setClipboard
 // @grant        GM.setClipboard
 // @grant        GM_getValue
-// @grant        GM_setValue
-// @grant        GM.getValue
 // @grant        GM.setValue
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @noframes
 // @downloadURL  https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-time-entry-clipboard-bar.user.js
 // @updateURL    https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-time-entry-clipboard-bar.user.js
@@ -29,10 +30,11 @@
     suffix: '',
     closing: 'Mentioning my name helps me get recognized for the work I do.',
     spacedThankYou: false,
-    defaultLocation: 'bellevue', // 'bellevue' | 'seattle' | 'tacoma'
-    randomizeReviewLine: false
+    defaultLocation: 'bellevue', // 'bellevue' | 'seattle' | 'tacoma' | 'renton'
+    randomizeLocation: true      // NEW: randomize the review location link
   };
 
+  // storage keys (unchanged names for compatibility)
   const KEYS = {
     name:    'att_clip_name',
     headline:'att_clip_headline',
@@ -42,83 +44,64 @@
     closing: 'att_clip_closing',
     spaced:  'att_clip_spaced',
     defloc:  'att_clip_defloc',
-    random:  'att_clip_random'
+    random:  'att_clip_random' // repurposed to mean "randomize location"
   };
+
+  // canonical review URLs
+  const REVIEW_URLS = {
+    tacoma:   'https://www.attentus.tech/tacoma_reviews',
+    seattle:  'https://www.attentus.tech/seattle_reviews',
+    bellevue: 'https://www.attentus.tech/bellevue_reviews',
+    renton:   'https://www.attentus.tech/renton_reviews'
+  };
+  const LOCATIONS = Object.keys(REVIEW_URLS);
 
   const GROUP_ID = 'cw-notes-inline-copy-group';
 
-  // ---------- minimal styles to avoid grey/disabled look ----------
-(function ensureStyles(){
-  if (document.getElementById('att-clipbar-style')) return;
-  const s = document.createElement('style');
-  s.id = 'att-clipbar-style';
-  s.textContent = `
-    /* keep timestamp + toolbar on one row in Time Entry */
-    #att-clipbar-row {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      vertical-align: middle;
+  // ---------- styles ----------
+  (function ensureStyles(){
+    if (document.getElementById('att-clipbar-style')) return;
+    const s = document.createElement('style');
+    s.id = 'att-clipbar-style';
+    s.textContent = `
+      #att-clipbar-row { display:inline-flex; align-items:center; gap:8px; vertical-align:middle; }
+      #cw-notes-inline-copy-group { display:inline-flex; flex-wrap:wrap; gap:6px; align-items:center; margin:8px 0; }
+      #cw-notes-inline-copy-group .mm_button {
+        display:inline-block !important; pointer-events:auto !important; opacity:1 !important; cursor:pointer !important;
+        padding:4px 8px; border-radius:6px; border:1px solid rgba(0,0,0,.2); background:#2563eb; color:#fff; line-height:1.2; white-space:nowrap;
+      }
+      #cw-notes-inline-copy-group select { padding:4px 6px; border-radius:6px; }
+    `;
+    document.head.appendChild(s);
+  })();
+
+  (function ensureClipboardSpacerStyles(){
+    if (document.getElementById('att-clipbar-spacer-style')) return;
+    const s = document.createElement('style');
+    s.id = 'att-clipbar-spacer-style';
+    s.textContent = `.att-action-spacer{display:inline-block;width:8px;height:1px}`;
+    document.head.appendChild(s);
+  })();
+
+  function ensureAfterSiblingSpacer(node, px = 8) {
+    if (!node || !node.parentElement) return;
+    const parent = node.parentElement;
+    let sib = node.nextSibling;
+    const isSpacer = el => el && el.nodeType === 1 && el.classList && el.classList.contains('att-action-spacer');
+    if (!isSpacer(sib)) {
+      const sp = document.createElement('span');
+      sp.className = 'att-action-spacer';
+      sp.style.display = 'inline-block';
+      sp.style.width = px + 'px';
+      sp.style.height = '1px';
+      parent.insertBefore(sp, node.nextSibling);
+      sib = sp;
     }
-
-
-    /* existing styles... */
-    #cw-notes-inline-copy-group {
-      display: inline-flex;
-      flex-wrap: wrap;            /* (still wraps under ticket thread header) */
-      gap: 6px;
-      align-items: center;
-      margin: 8px 0;              /* overridden to 0 by the scoped rule above */
-    }
-    #cw-notes-inline-copy-group .mm_button {
-      display: inline-block !important;
-      pointer-events: auto !important;
-      opacity: 1 !important;
-      cursor: pointer !important;
-      padding: 4px 8px;
-      border-radius: 6px;
-      border: 1px solid rgba(0,0,0,.2);
-      background: #2563eb;
-      color: #fff;
-      line-height: 1.2;
-      white-space: nowrap;
-    }
-    #cw-notes-inline-copy-group select { padding: 4px 6px; border-radius: 6px; }
-  `;
-  document.head.appendChild(s);
-})();
-
-(function ensureClipboardSpacerStyles(){
-  if (document.getElementById('att-clipbar-spacer-style')) return;
-  const s = document.createElement('style');
-  s.id = 'att-clipbar-spacer-style';
-  s.textContent = `.att-action-spacer{display:inline-block;width:8px;height:1px}`;
-  document.head.appendChild(s);
-})();
-
-// put a physical spacer *after* the given node (as its next sibling)
-function ensureAfterSiblingSpacer(node, px = 8) {
-  if (!node || !node.parentElement) return;
-  const parent = node.parentElement;
-  let sib = node.nextSibling;
-  const isSpacer = el => el && el.nodeType === 1 && el.classList && el.classList.contains('att-action-spacer');
-
-  if (!isSpacer(sib)) {
-    const sp = document.createElement('span');
-    sp.className = 'att-action-spacer';
-    sp.style.display = 'inline-block';
-    sp.style.width = px + 'px';
-    sp.style.height = '1px';
-    parent.insertBefore(sp, node.nextSibling);
-    sib = sp;
+    return sib;
   }
-  return sib;
-}
-
-
 
   // ---------- utils ----------
-  const esc = (s) => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const esc = (s) => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c]));
   const asText = (html) => html.replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, '');
 
   function toast(msg) {
@@ -132,8 +115,6 @@ function ensureAfterSiblingSpacer(node, px = 8) {
     document.body.appendChild(n);
     setTimeout(() => n.remove(), 1400);
   }
-
-
 
   // ---------- storage helpers ----------
   async function gmGet(key, defVal) {
@@ -195,20 +176,27 @@ function ensureAfterSiblingSpacer(node, px = 8) {
     return false;
   }
 
-function findThreadPodHeaderByLabel(textNeedle) {
-  const labels = document.querySelectorAll('.mm_podHeader [id$="-label"], .pod_unknown_header [id$="-label"]');
-  const want = (textNeedle || '').toLowerCase();
-  for (const el of labels) {
-    const t = (el.textContent || '').trim().toLowerCase();
-    if (!t) continue;
-    // exact pod we want: "Thread: Auto time entries"
-    if (t.includes(want)) return el;
+  function findThreadPodHeaderByLabel(textNeedle) {
+    const labels = document.querySelectorAll('.mm_podHeader [id$="-label"], .pod_unknown_header [id$="-label"]');
+    const want = (textNeedle || '').toLowerCase();
+    for (const el of labels) {
+      const t = (el.textContent || '').trim().toLowerCase();
+      if (!t) continue;
+      if (t.includes(want)) return el;
+    }
+    return null;
   }
-  return null;
-}
 
+  function threadTimepadMountTarget() {
+    const autoHeaderLabel = findThreadPodHeaderByLabel('thread: auto time entries');
+    if (autoHeaderLabel) return autoHeaderLabel.closest('.mm_podHeader, .pod_unknown_header') || autoHeaderLabel;
+    const hosted16Header = document.querySelector('.pod_hosted_16_header');
+    if (hosted16Header) return hosted16Header;
+    const hosted16Pod = document.querySelector('.pod_hosted_16');
+    if (hosted16Pod) return hosted16Pod;
+    return null;
+  }
 
-  // ---------- locate Notes timestamp (standalone Time Entry) ----------
   function findNotesTimestampButton() {
     const stamps = document.querySelectorAll('.cw_ToolbarButton_TimeStamp');
     for (const st of stamps) {
@@ -218,25 +206,6 @@ function findThreadPodHeaderByLabel(textNeedle) {
     }
     return null;
   }
-
-  // ---------- ticket thread header target (robust) ----------
-function threadTimepadMountTarget() {
-  // 1) Prefer the "Thread: Auto time entries" header label (hosted_16)
-  const autoHeaderLabel = findThreadPodHeaderByLabel('thread: auto time entries');
-  if (autoHeaderLabel) return autoHeaderLabel.closest('.mm_podHeader, .pod_unknown_header') || autoHeaderLabel;
-
-  // 2) If the label isn’t present yet, try the known hosted_16 header class
-  const hosted16Header = document.querySelector('.pod_hosted_16_header');
-  if (hosted16Header) return hosted16Header;
-
-  // 3) If the pod wrapper is there, use it (insert before its first child)
-  const hosted16Pod = document.querySelector('.pod_hosted_16');
-  if (hosted16Pod) return hosted16Pod;
-
-  // Never target discussion or real-time chat pods
-  return null;
-}
-
 
   // ---------- content builders ----------
   function signatureHTML(name, { spacedThankYou = false } = {}) {
@@ -264,176 +233,171 @@ function threadTimepadMountTarget() {
     return lines.join('\n');
   }
 
-  async function getReviewMsg() {
+  // NEW: build review message using selected/random location
+  async function getReviewMsg(selectedLoc) {
     const headline = await gmGet(KEYS.headline, DEFAULTS.headline);
     const prefix   = await gmGet(KEYS.prefix,   DEFAULTS.prefix);
     const linkText = await gmGet(KEYS.link,     DEFAULTS.linkText);
     const suffix   = await gmGet(KEYS.suffix,   DEFAULTS.suffix);
     const closing  = await gmGet(KEYS.closing,  DEFAULTS.closing);
-    const random   = await gmGet(KEYS.random,   DEFAULTS.randomizeReviewLine);
+    const random   = await gmGet(KEYS.random,   DEFAULTS.randomizeLocation);
+    const defLoc   = await gmGet(KEYS.defloc,   DEFAULTS.defaultLocation);
 
-    const line = random
-      ? `${headline} ${prefix}<a href="https://g.page/r/CZ4lN2mJq0wEEB0/review" target="_blank" rel="noopener">${esc(linkText)}</a>${suffix ? ' ' + esc(suffix) : ''}`
-      : `${prefix}<a href="https://g.page/r/CZ4lN2mJq0wEEB0/review" target="_blank" rel="noopener">${esc(linkText)}</a>${suffix ? ' ' + esc(suffix) : ''}`;
+    const loc = (random ? pickRandomLocation() : (selectedLoc || defLoc || 'bellevue'));
+    const url = REVIEW_URLS[loc] || REVIEW_URLS.bellevue;
 
-    return line + `<div>${esc(closing)}</div>`;
+    const gap1 = /\s$/.test(prefix) ? '' : ' ';
+    const gap2 = suffix && !/^\s/.test(suffix) ? ' ' : '';
+
+    const html = [
+      `<div style="margin:0;line-height:1.35">`,
+      `<div style="margin:0"><strong>${esc(headline)}</strong></div>`,
+      `<div style="margin:0">${esc(prefix)}${gap1}<a href="${url}" target="_blank" rel="noopener">${esc(linkText)}</a>${gap2}${esc(suffix || '')}</div>`,
+      `<div style="margin:0">${esc(closing)}</div>`,
+      `</div>`
+    ].join('');
+
+    const text = [
+      headline,
+      `${prefix}${gap1}${linkText}${gap2}${suffix || ''}`,
+      closing
+    ].join('\n');
+
+    return { html, text };
+  }
+
+  function pickRandomLocation() {
+    const i = Math.floor(Math.random() * LOCATIONS.length);
+    return LOCATIONS[i];
   }
 
   // ---------- group child builder ----------
-// Single UI set for all contexts:
-//   Bellevue [⚙] | Copy signature | Copy review + signature
-async function buildGroupChildren(intoWrap) {
-  const sel = document.createElement('select');
-  sel.innerHTML = `
-    <option value="bellevue">Bellevue</option>
-    <option value="seattle">Seattle</option>
-    <option value="tacoma">Tacoma</option>
-  `;
-  sel.value = await gmGet(KEYS.defloc, DEFAULTS.defaultLocation);
+  async function buildGroupChildren(intoWrap) {
+    const sel = document.createElement('select');
+    sel.innerHTML = `
+      <option value="bellevue">Bellevue</option>
+      <option value="renton">Renton</option>
+      <option value="seattle">Seattle</option>
+      <option value="tacoma">Tacoma</option>
+    `;
+    sel.value = await gmGet(KEYS.defloc, DEFAULTS.defaultLocation);
 
-  const mkBtn = (label, title, onClick) => {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'mm_button';
-    b.textContent = label;
-    b.title = title;
-    b.style.opacity = '1';
-    b.style.pointerEvents = 'auto';
-    b.style.cursor = 'pointer';
-    b.addEventListener('click', async (e) => { e.preventDefault(); await onClick(e); });
-    b.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); b.click(); }});
-    return b;
-  };
+    const mkBtn = (label, title, onClick) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'mm_button';
+      b.textContent = label;
+      b.title = title;
+      b.style.opacity = '1';
+      b.style.pointerEvents = 'auto';
+      b.style.cursor = 'pointer';
+      b.addEventListener('click', async (e) => { e.preventDefault(); await onClick(e); });
+      b.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); b.click(); }});
+      return b;
+    };
 
-  const name   = await gmGet(KEYS.name,   DEFAULTS.name);
-  const spaced = await gmGet(KEYS.spaced, DEFAULTS.spacedThankYou);
+    const name   = await gmGet(KEYS.name,   DEFAULTS.name);
+    const spaced = await gmGet(KEYS.spaced, DEFAULTS.spacedThankYou);
 
-  const copySignature = async () => {
-    const html = signatureHTML(name, { spacedThankYou: spaced });
-    await copyRich(html, signatureText(name, { spacedThankYou: spaced }));
-    toast('Signature copied');
-  };
+    const copySignature = async () => {
+      const html = signatureHTML(name, { spacedThankYou: spaced });
+      await copyRich(html, signatureText(name, { spacedThankYou: spaced }));
+      toast('Signature copied');
+    };
 
-  const copyReviewPlusSignature = async () => {
-    const reviewHTML = await getReviewMsg();
-    const sigHTML    = signatureHTML(name, { spacedThankYou: spaced });
-    const html = `${reviewHTML}<div><br></div>${sigHTML}`;
-    const text = `${asText(reviewHTML)}\n\n${signatureText(name, { spacedThankYou: spaced })}`;
-    await copyRich(html, text);
-    toast('Review + signature copied');
-  };
+    const copyReviewPlusSignature = async () => {
+      const { html: reviewHTML, text: reviewText } = await getReviewMsg(sel.value);
+      const sigHTML = signatureHTML(name, { spacedThankYou: spaced });
+      const html = `${reviewHTML}<div><br></div>${sigHTML}`;
+      const text = `${reviewText}\n\n${signatureText(name, { spacedThankYou: spaced })}`;
+      await copyRich(html, text);
+      toast('Review + signature copied');
+    };
 
-  const btnSettings = mkBtn('⚙', 'Open clipboard settings', () => showSettings());
-btnSettings.setAttribute('aria-label','Open clipboard settings');
-  const btnSig      = mkBtn('Copy signature', 'Copy signature', copySignature);
-  const btnReview   = mkBtn('Copy review + signature', 'Copy review message + signature', copyReviewPlusSignature);
+    const btnSettings = mkBtn('⚙', 'Open clipboard settings', () => showSettings());
+    btnSettings.setAttribute('aria-label','Open clipboard settings');
+    const btnSig    = mkBtn('Copy signature', 'Copy signature', copySignature);
+    const btnReview = mkBtn('Copy review + signature', 'Copy review message + signature', copyReviewPlusSignature);
 
-  Object.assign(intoWrap.style, { display:'inline-flex', gap:'6px', alignItems:'center' });
-  intoWrap.append(sel, btnSettings, btnSig, btnReview);
+    Object.assign(intoWrap.style, { display:'inline-flex', gap:'6px', alignItems:'center' });
+    intoWrap.append(sel, btnSettings, btnSig, btnReview);
 
-  sel.addEventListener('change', async () => {
-    await gmSet(KEYS.defloc, sel.value);
-    toast(`Default location: ${sel.value}`);
-  });
-}
-
-
-  // ---------- mount near Notes timestamp (standalone Time Entry) ----------
-function mountGroup(nextToStamp) {
-  const existing = document.getElementById(GROUP_ID);
-  if (existing) {
-    if (
-      existing.previousElementSibling === nextToStamp ||
-      existing.parentElement?.previousElementSibling === nextToStamp
-    ) return true;
-    if (existing.dataset?.origin === 'att-clipboard-bar') existing.remove();
+    sel.addEventListener('change', async () => {
+      await gmSet(KEYS.defloc, sel.value);
+      toast(`Default location: ${sel.value}`);
+    });
   }
 
-  const group = document.getElementById('cw-notes-inline-copy-group'); // or the variable you already have
+  // ---------- mount in Time Entry / Ticket ----------
+  function mountGroup(nextToStamp) {
+    const existing = document.getElementById(GROUP_ID);
+    if (existing) {
+      if (
+        existing.previousElementSibling === nextToStamp ||
+        existing.parentElement?.previousElementSibling === nextToStamp
+      ) return true;
+      if (existing.dataset?.origin === 'att-clipboard-bar') existing.remove();
+    }
 
-  // container that holds [timestamp][toolbar]
-  const row = document.createElement('span');
-  row.id = 'att-clipbar-row';
-  row.dataset.origin = 'att-clipboard-bar';
-  Object.assign(row.style, {
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: '8px',
-    whiteSpace: 'nowrap',        // keep whole row on one line
-    verticalAlign: 'middle'
-  });
+    const row = document.createElement('span');
+    row.id = 'att-clipbar-row';
+    row.dataset.origin = 'att-clipboard-bar';
+    Object.assign(row.style, { display:'inline-flex', alignItems:'center', gap:'8px', whiteSpace:'nowrap', verticalAlign:'middle' });
 
-  const wrap = document.createElement('span');
-  wrap.id = GROUP_ID;
-  wrap.dataset.origin = 'att-clipboard-bar';
-  Object.assign(wrap.style, {
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: '6px',
-    flexWrap: 'nowrap',          // **critical**: prevent buttons from wrapping in Time Entry
-    margin: '0'                  // remove vertical margin that encourages stacking
-  });
+    const wrap = document.createElement('span');
+    wrap.id = GROUP_ID;
+    wrap.dataset.origin = 'att-clipboard-bar';
+    Object.assign(wrap.style, { display:'inline-flex', alignItems:'center', gap:'6px', flexWrap:'nowrap', margin:'0' });
 
-  const td = nextToStamp.closest('td');
-  if (td) td.style.whiteSpace = 'nowrap';
+    const td = nextToStamp.closest('td');
+    if (td) td.style.whiteSpace = 'nowrap';
 
-  nextToStamp.style.display = 'inline-block';
-  nextToStamp.insertAdjacentElement('beforebegin', row);
-  row.appendChild(nextToStamp);
-  row.appendChild(wrap);
+    nextToStamp.style.display = 'inline-block';
+    nextToStamp.insertAdjacentElement('beforebegin', row);
+    row.appendChild(nextToStamp);
+    row.appendChild(wrap);
 
-  buildGroupChildren(wrap);
-  ensureAfterSiblingSpacer(row, 8);
+    buildGroupChildren(wrap);
+    ensureAfterSiblingSpacer(row, 8);
 
-  return true;
-}
-
-
-  // Mount clipboard bar under thread header/above first note on ticket pages (no relocation of action-bar buttons).
-async function mountGroupUnderThread(targetEl) {
-  // Guard: do not mount in Discussion or Real time notes pods
-  const pod = targetEl.closest?.('.pod_service_ticket_discussion, .pod_hosted_15');
-  if (pod) return false;
-
-  const existing = document.getElementById(GROUP_ID);
-  if (existing && (existing.previousElementSibling === targetEl || existing.nextElementSibling === targetEl)) return true;
-  if (existing && existing.dataset && existing.dataset.origin === 'att-clipboard-bar') existing.remove();
-
-  const strip = document.createElement('div');
-  strip.id = GROUP_ID;
-  strip.dataset.origin = 'att-clipboard-bar';
-  // layout ensured by the style block above
-
-  // If target is a header, insert after it; if it's the pod wrapper, prepend.
-  if (targetEl.matches?.('.mm_podHeader, .pod_unknown_header')) {
-    targetEl.insertAdjacentElement('afterend', strip);
-  } else if (targetEl.matches?.('.pod_hosted_16')) {
-    targetEl.insertAdjacentElement('afterbegin', strip);
-  } else {
-    // Fallback: safest is after target
-    targetEl.insertAdjacentElement('afterend', strip);
+    return true;
   }
 
-  await buildGroupChildren(strip);
-  return true;
-}
+  async function mountGroupUnderThread(targetEl) {
+    const pod = targetEl.closest?.('.pod_service_ticket_discussion, .pod_hosted_15');
+    if (pod) return false;
 
-(function observeClipbarSpacer(){
-  const row = document.getElementById('att-clipbar-row');
-  if (!row || !row.parentElement) return;
+    const existing = document.getElementById(GROUP_ID);
+    if (existing && (existing.previousElementSibling === targetEl || existing.nextElementSibling === targetEl)) return true;
+    if (existing && existing.dataset && existing.dataset.origin === 'att-clipboard-bar') existing.remove();
 
-  // initial spacer assertion
-  ensureAfterSiblingSpacer(row, 8);
+    const strip = document.createElement('div');
+    strip.id = GROUP_ID;
+    strip.dataset.origin = 'att-clipboard-bar';
 
-  const container = row.parentElement; // the TD that contains row + siblings
-  const mo = new MutationObserver(() => {
-    const r = document.getElementById('att-clipbar-row');
-    if (r) ensureAfterSiblingSpacer(r, 8);
-  });
-  mo.observe(container, { childList: true });
-})();
+    if (targetEl.matches?.('.mm_podHeader, .pod_unknown_header')) {
+      targetEl.insertAdjacentElement('afterend', strip);
+    } else if (targetEl.matches?.('.pod_hosted_16')) {
+      targetEl.insertAdjacentElement('afterbegin', strip);
+    } else {
+      targetEl.insertAdjacentElement('afterend', strip);
+    }
 
+    await buildGroupChildren(strip);
+    return true;
+  }
 
+  (function observeClipbarSpacer(){
+    const row = document.getElementById('att-clipbar-row');
+    if (!row || !row.parentElement) return;
+    ensureAfterSiblingSpacer(row, 8);
+    const container = row.parentElement;
+    const mo = new MutationObserver(() => {
+      const r = document.getElementById('att-clipbar-row');
+      if (r) ensureAfterSiblingSpacer(r, 8);
+    });
+    mo.observe(container, { childList: true });
+  })();
 
   // ---------- settings panel ----------
   function closeModal(el) { el?.remove(); }
@@ -446,7 +410,7 @@ async function mountGroupUnderThread(targetEl) {
     const closing  = await gmGet(KEYS.closing,  DEFAULTS.closing);
     const spaced   = await gmGet(KEYS.spaced,   DEFAULTS.spacedThankYou);
     const defLoc   = await gmGet(KEYS.defloc,   DEFAULTS.defaultLocation);
-    const random   = await gmGet(KEYS.random,   DEFAULTS.randomizeReviewLine);
+    const random   = await gmGet(KEYS.random,   DEFAULTS.randomizeLocation);
 
     const overlay = document.createElement('div');
     Object.assign(overlay.style, {
@@ -475,10 +439,11 @@ async function mountGroupUnderThread(targetEl) {
         <label>Default Location</label>
         <select id="att-clip-defloc">
           <option value="bellevue">Bellevue</option>
+          <option value="renton">Renton</option>
           <option value="seattle">Seattle</option>
           <option value="tacoma">Tacoma</option>
         </select>
-        <label>Randomize review headline</label><input id="att-clip-random" type="checkbox" ${random ? 'checked':''}>
+        <label>Randomize review location</label><input id="att-clip-random" type="checkbox" ${random ? 'checked':''}>
       </div>
       <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:10px">
         <button id="att-clip-cancel" class="mm_button" style="opacity:1;pointer-events:auto;cursor:pointer">Close</button>
@@ -515,29 +480,19 @@ async function mountGroupUnderThread(targetEl) {
     if (ex && ex.dataset && ex.dataset.origin === 'att-clipboard-bar' && ex.parentNode) ex.parentNode.removeChild(ex);
   }
 
-async function ensure() {
-  // Off on Time Sheets
-  if (isTimesheetContext()) { removeGroupIfAny(); return; }
-
-  // Standalone Time Entry → timestamp anchor (unchanged)
-  const stamp = findNotesTimestampButton();
-  if (stamp) { mountGroup(stamp); return; }
-
-  // Ticket page → mount ONLY for "Thread: Auto time entries"
-  if (isTicketContext()) {
-    const target = threadTimepadMountTarget(); // precise hosted_16 target
-    if (target) { await mountGroupUnderThread(target); return; }
-    // If not ready yet, just wait for MO to fire again
-    return;
+  async function ensure() {
+    if (isTimesheetContext()) { removeGroupIfAny(); return; }
+    const stamp = findNotesTimestampButton();
+    if (stamp) { mountGroup(stamp); return; }
+    if (isTicketContext()) {
+      const target = threadTimepadMountTarget();
+      if (target) { await mountGroupUnderThread(target); return; }
+      return;
+    }
+    removeGroupIfAny();
   }
-
-  // Other contexts
-  removeGroupIfAny();
-}
-
 
   const mo = new MutationObserver(() => ensure());
   mo.observe(document.documentElement, { subtree: true, childList: true });
-
   ensure();
 })();
