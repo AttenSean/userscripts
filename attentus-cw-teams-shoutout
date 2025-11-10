@@ -11,6 +11,8 @@
 // @grant        GM.setClipboard
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @downloadURL  https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-teams-shoutout.user.js
+// @updateURL    https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-teams-shoutout.user.js
 // @noframes
 // ==/UserScript==
 
