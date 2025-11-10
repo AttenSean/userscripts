@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         attentus-cw-teams-shoutout
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      2.5.0
+// @version      2.5.1
 // @description  Teams shoutout from the Service Board. Toolbar-mounted button. Exact per-View mapping with canonical fallback. Smart prefill on new views when Ticket column matches. Shift+Click=Setup, Right-click=P0–P2, Alt=Debug.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
@@ -334,31 +334,37 @@ function copyWithMapping(map, onlyHigh){
     var items = [];
     (function step(i){
       if(i >= rws.length){
-        // Build HTML bullets
-        var htmlParts = ['<strong>Tickets needing attention</strong>','<br><br>'];
-        for(var k=0; k<items.length; k++){
-          var it = items[k];
-          var metaParts = [];
-          if(it.company) metaParts.push(esc(it.company));
-          if(it.contact) metaParts.push(esc(it.contact));
-          var meta = metaParts.length ? ('  <i>' + metaParts.join(' — ') + '</i>') : '';
-          htmlParts.push(
-            '• ' + it.dot + ' <a href="' + it.url + '">#' + it.ticket + '</a> <strong>' + esc(it.summary) + '</strong><br>' +
-            meta
-          );
-          if(k !== items.length - 1) htmlParts.push('<br><br>');
-        }
-        var html = htmlParts.join('');
+        // Build HTML, headline + entries with indented meta line
+       // Replace only the HTML-build section inside copyWithMapping
+var htmlParts = ['<strong>Tickets needing attention (' + items.length + ')</strong>','<br><br>'];
+for (var k = 0; k < items.length; k++) {
+  var it = items[k];
+  var metaPieces = [];
+  if (it.company) metaPieces.push(esc(it.company));
+  if (it.contact) metaPieces.push(esc(it.contact));
 
-        // Plain text fallback, mirrors spacing, no trailing blank line
-        var plainLines = ['Tickets needing attention',''];
+  // Use a visible indent marker so Teams won't collapse it
+  var meta = metaPieces.length ? ('ㅤ <i>' + metaPieces.join(' — ') + '</i>') : '';
+
+  htmlParts.push(
+    it.dot + ' <a href="' + it.url + '">#' + it.ticket + '</a> <u>' + esc(it.summary) + '</u><br>' +
+    meta
+  );
+  if (k !== items.length - 1) htmlParts.push('<br><br>');
+}
+var html = htmlParts.join('');
+
+
+        // Plain text fallback mirrors spacing, with a simple indent on meta
+        var plainLines = ['Tickets needing attention (' + items.length + ')',''];
         for(var p=0; p<items.length; p++){
           var it2 = items[p];
-          plainLines.push('• ' + it2.dot + ' #' + it2.ticket + ' ' + it2.summary + ' (' + it2.url + ')');
+          plainLines.push(it2.dot + ' #' + it2.ticket + ' ' + it2.summary + ' (' + it2.url + ')');
           var metaTxt = [];
           if(it2.company) metaTxt.push(it2.company);
           if(it2.contact) metaTxt.push(it2.contact);
-          if(metaTxt.length) plainLines.push('  ' + metaTxt.join(' — '));
+          if(metaTxt.length) plainLines.push('ㅤ ' + metaTxt.join(' — '));
+
           if(p !== items.length - 1) plainLines.push('');
         }
         var plain = plainLines.join('\n');
