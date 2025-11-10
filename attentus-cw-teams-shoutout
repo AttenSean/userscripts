@@ -1,0 +1,544 @@
+// ==UserScript==
+// @name         attentus-cw-teams-shoutout
+// @namespace    https://github.com/AttenSean/userscripts
+// @version      2.5.0
+// @description  Teams shoutout from the Service Board. Toolbar-mounted button. Exact per-View mapping with canonical fallback. Smart prefill on new views when Ticket column matches. Shift+Click=Setup, Right-click=P0–P2, Alt=Debug.
+// @match        https://*.myconnectwise.net/*
+// @match        https://*.connectwise.net/*
+// @match        https://*.myconnectwise.com/*
+// @run-at       document-idle
+// @grant        GM_setClipboard
+// @grant        GM.setClipboard
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @noframes
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  var BTN_ID = 'att-cw-teams-shoutout-btn';
+  var TOAST_ID = 'att-cw-teams-shoutout-toast';
+  var PANEL_ID = 'att-cw-teams-shoutout-setup';
+  var STORAGE = 'att_cw_shoutout_settings_exact_views_json';
+  var BOARD_ROW = 'table.srboard-grid tr.cw-ml-row';
+
+  var BASE = location.origin;
+  var PATH = '/v4_6_release/services/system_io/Service/fv_sr100_request.rails?service_recid=';
+
+  // ---------- utils
+  function txt(el){ return (el && el.textContent || '').replace(/\s+/g,' ').trim(); }
+  function isTicketId(s){ return /^\d{5,}$/.test((s||'').trim()); }
+  function esc(s){ s = String(s == null ? '' : s); return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+  function stripSLA(s){ s = String(s||''); s = s.replace(/\b(?:Respond by|Plan by|Waiting|Scheduled|SLA)[^|—-]*$/i,''); s = s.replace(/[|—-]\s*$/,''); return s.trim(); }
+
+  function toast(msg, ms){ if(ms == null) ms = 1100;
+    var n = document.getElementById(TOAST_ID);
+    if(!n){ n = document.createElement('div'); n.id = TOAST_ID;
+      var st = n.style; st.position='fixed'; st.right='16px'; st.bottom='70px'; st.zIndex=2147483646;
+      st.background='#0b0f17'; st.color='#e5e7eb'; st.padding='8px 10px'; st.borderRadius='10px';
+      st.border='1px solid #1f2937'; st.font='12px system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif';
+      st.opacity='0'; st.transition='opacity .15s ease'; document.body.appendChild(n); }
+    n.textContent = msg; n.style.opacity = '1'; if(n._h) clearTimeout(n._h);
+    n._h = setTimeout(function(){ n.style.opacity = '0'; }, ms);
+  }
+
+  // ---------- storage, unified Promise API for TM/VM
+  function hasGM(){ return (typeof GM_getValue === 'function') || (typeof GM !== 'undefined' && typeof GM.getValue === 'function'); }
+  function gmGet(key, def){
+    if(typeof def === 'undefined') def = null;
+    try{
+      if(typeof GM_getValue === 'function'){ var v = GM_getValue(key, def); return Promise.resolve(v); }
+      if(typeof GM !== 'undefined' && typeof GM.getValue === 'function'){ return GM.getValue(key, def); }
+    }catch(e){}
+    return Promise.resolve(def);
+  }
+  function gmSet(key, val){
+    try{
+      if(typeof GM_setValue === 'function'){ GM_setValue(key, val); return Promise.resolve(); }
+      if(typeof GM !== 'undefined' && typeof GM.setValue === 'function'){ return GM.setValue(key, val); }
+    }catch(e){}
+    try{ localStorage.setItem(key, val); }catch(e){}
+    return Promise.resolve();
+  }
+  function getSettings(){
+    return gmGet(STORAGE, '{}').then(function(raw){
+      try{ return typeof raw === 'string' ? JSON.parse(raw || '{}') : (raw || {}); }
+      catch(e){ return {}; }
+    });
+  }
+  function setSettings(obj){
+    var str = JSON.stringify(obj || {});
+    return gmSet(STORAGE, str);
+  }
+
+  // ---------- view keys
+  function ticketUrl(id){ return BASE + PATH + encodeURIComponent(id); }
+  function getViewInput(){
+    return document.querySelector('.cw-toolbar-view-dropdown input.cw_CwComboBox') ||
+           document.querySelector('.cw-toolbar-view-dropdown [id$="-input"].cw_CwComboBox');
+  }
+  function stripInvisibles(s){ return String(s||'').replace(/[\u200B-\u200D\u2060\uFEFF]/g,'').replace(/\u00A0/g,' ').replace(/\s+/g,' ').trim(); }
+  function readViewExact(){ var inp = getViewInput(); var val = inp && typeof inp.value === 'string' ? inp.value.trim() : ''; return val || '(No View)'; }
+  function readViewCanonical(){ return stripInvisibles(readViewExact()); }
+  function keyExact(){ return location.host.toLowerCase() + '::' + readViewExact(); }
+  function keyCanonical(){ return location.host.toLowerCase() + '::' + readViewCanonical(); }
+
+  // ---------- gating
+  function isBoard(){
+    return !!document.querySelector('table.srboard-grid') && !!document.querySelector(BOARD_ROW) && !!getViewInput();
+  }
+
+  // ---------- grid helpers
+  function rows(){ return Array.prototype.slice.call(document.querySelectorAll(BOARD_ROW)); }
+  function tdByIndex(row, idx){ return idx >= 0 ? row.querySelector('td[cellindex="' + idx + '"]') : null; }
+  function valFromCell(row, idx){ var td = tdByIndex(row, idx); if(!td) return ''; var a = td.querySelector('a'); return a ? txt(a) : txt(td.querySelector('div') || td); }
+
+  function headerCells(){
+    var set = new Map();
+    var containers = Array.prototype.slice.call(document.querySelectorAll('.cw-ml-header *[cellindex], .x-grid3-hd-row *[cellindex], .x-grid3-header *[cellindex]'));
+    for(var i=0;i<containers.length;i++){
+      var c = containers[i], idx = c.getAttribute('cellindex'); if(!idx) continue;
+      var label = (txt(c) || txt(c.querySelector('.gwt-InlineHTML')) || txt(c.querySelector('.x-grid3-hd-inner'))).toLowerCase();
+      if(label) set.set(+idx, label);
+    }
+    return set;
+  }
+  function sampleRowCells(){
+    var r = rows()[0]; if(!r) return new Map();
+    var map = new Map(); var tds = r.querySelectorAll('td[cellindex]');
+    for(var i=0;i<tds.length;i++){
+      var td = tds[i], idx = +td.getAttribute('cellindex');
+      var a = td.querySelector('a'), v = a ? txt(a) : txt(td.querySelector('div') || td);
+      map.set(idx, v);
+    }
+    return map;
+  }
+
+  // Heuristic, detect current Ticket column index
+  function detectTicketIndex(){
+    // 1) header match
+    var headers = headerCells();
+    var found = null;
+    headers.forEach(function(label, idx){
+      if(/ticket/.test(label)) { found = found == null ? idx : found; }
+    });
+    if(found != null) return found;
+
+    // 2) numeric link majority across first few rows
+    var rws = rows(); var counts = {}; var limit = Math.min(rws.length, 8);
+    for(var i=0;i<limit;i++){
+      var r = rws[i];
+      var tds = r.querySelectorAll('td[cellindex]');
+      for(var j=0;j<tds.length;j++){
+        var td = tds[j];
+        var a = td.querySelector('a');
+        if(a){
+          var id = txt(a);
+          if(/^\d{5,}$/.test(id)){
+            var idx = +td.getAttribute('cellindex');
+            counts[idx] = (counts[idx]||0) + 1;
+          }
+        }
+      }
+    }
+    var bestIdx = null, bestCnt = 0;
+    for(var k in counts){ if(counts.hasOwnProperty(k)){ if(counts[k] > bestCnt){ bestCnt = counts[k]; bestIdx = +k; } } }
+    if(bestCnt >= 2) return bestIdx; // at least two rows agreed
+    return null;
+  }
+
+  // ---------- priority detection
+  function parseRgb(s){ var m = /rgba?\s*\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)/.exec(s||''); return m ? {r:+m[1], g:+m[2], b:+m[3]} : {r:0,g:0,b:0}; }
+  function isBlack(r,g,b){ return r<40&&g<40&&b<40; } function isRed(r,g,b){ return r>150&&g<110&&b<110; }
+  function isOrange(r,g,b){ return r>200&&g>110&&g<200&&b<90; } function isYellow(r,g,b){ return r>200&&g>200&&b<140; } function isBlue(r,g,b){ return b>140&&r<120&&g<190; }
+  function dot(pr){ return pr==='P0'?'⚫️':pr==='P1'?'🔴':pr==='P2'?'🟠':pr==='P4'?'🔵':'🟡'; }
+
+  function extractDataUrlFromNode(n){
+    if(!n) return '';
+    function pick(s){ return (s||'').replace(/^.*url\(["']?/, '').replace(/["']?\).*$/, ''); }
+    var inline = (n.style && (n.style.background || n.style.backgroundImage)) || '';
+    var url = /url\(/.test(inline) ? pick(inline) : '';
+    if(!url){ var cs = getComputedStyle(n); if(/url\(/.test(cs.backgroundImage||'')) url = pick(cs.backgroundImage); }
+    return /^data:image/.test(url) ? url : '';
+  }
+  function sampleDataUrl(url){
+    return new Promise(function(res){
+      if(!url) return res(null);
+      var img=new Image();
+      img.onload=function(){ try{ var c=document.createElement('canvas'); c.width=img.naturalWidth||16; c.height=img.naturalHeight||16;
+        var g=c.getContext('2d'); g.drawImage(img,0,0); var d=g.getImageData(Math.floor(c.width/2),Math.floor(c.height/2),1,1).data; res({r:d[0],g:d[1],b:d[2]}); }catch(e){ res(null); } };
+      img.onerror=function(){ res(null); }; img.src=url;
+    });
+  }
+  function readPriorityFromCell(td){
+    return new Promise(function(resolve){
+      if(!td) return resolve('P3');
+      var node = td.querySelector('img') || td.firstElementChild || td;
+      var url = extractDataUrlFromNode(node);
+      if(url){
+        sampleDataUrl(url).then(function(rgb){
+          if(rgb){ var r=rgb.r,g=rgb.g,b=rgb.b;
+            if(isBlack(r,g,b)) return resolve('P0'); if(isRed(r,g,b)) return resolve('P1'); if(isOrange(r,g,b)) return resolve('P2');
+            if(isYellow(r,g,b)) return resolve('P3'); if(isBlue(r,g,b)) return resolve('P4'); }
+          fallback();
+        });
+      } else { fallback(); }
+      function fallback(){
+        var hint=(td.title||'').toUpperCase()||txt(td).toUpperCase();
+        var m=/\bP([0-4])\b/.exec(hint); if(m) return resolve('P'+m[1]);
+        var rgb=parseRgb(getComputedStyle(node).color); var r=rgb.r,g=rgb.g,b=rgb.b;
+        if(isBlack(r,g,b)) return resolve('P0'); if(isRed(r,g,b)) return resolve('P1'); if(isOrange(r,g,b)) return resolve('P2');
+        if(isYellow(r,g,b)) return resolve('P3'); if(isBlue(r,g,b)) return resolve('P4'); resolve('P3');
+      }
+    });
+  }
+
+  // ---------- setup panel
+  function ensurePanel(columns, samples, savedForView) {
+    var host = document.getElementById(PANEL_ID);
+    if(!host){ host=document.createElement('div'); host.id=PANEL_ID; host.style.all='initial'; host.style.position='fixed'; host.style.top='72px'; host.style.right='16px'; host.style.zIndex=2147483645; document.body.appendChild(host);
+      var root=host.attachShadow({mode:'open'}); var wrap=document.createElement('div');
+      wrap.innerHTML =
+        '<style>\
+          :host { all: initial; }\
+          @media (prefers-color-scheme: dark) { .card { background:#0b0f17; color:#e5e7eb; border-color:#1f2937; } select, textarea { background:#0f172a; color:#e5e7eb; border-color:#334155; } .hdr { background:#111827; color:#e5e7eb; } .btn { background:#1f2937; color:#e5e7eb; border-color:#334155; } .btn.primary { background:#2563eb; color:white; border-color:#1d4ed8; } }\
+          @media (prefers-color-scheme: light) { .card { background:#fff; color:#111; border-color:rgba(0,0,0,.08); } select, textarea { background:white; color:#111; border-color:#cbd5e1; } .hdr { background:#0f172a; color:#fff; } .btn { background:#f1f5f9; color:#111; border-color:#cbd5e1; } .btn.primary { background:#1f73b7; color:white; border-color:#1b659f; } }\
+          .card { font:13px system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; width:420px; border:1px solid; border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,.22); overflow:hidden; }\
+          .hdr { padding:10px 12px; font-weight:700; display:flex; justify-content:space-between; align-items:center; }\
+          .body{ padding:10px 12px; }\
+          .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:8px 0; }\
+          select,button,textarea { font:inherit; }\
+          select,textarea { width:100%; border:1px solid; border-radius:10px; padding:8px 10px; }\
+          textarea { height:84px; resize:vertical; }\
+          .actions { display:flex; gap:8px; justify-content:flex-end; margin-top:12px; }\
+          .btn { border:1px solid; border-radius:10px; padding:6px 12px; cursor:pointer; }\
+          .viewtag { font-size:12px; opacity:.8; border:1px solid; padding:2px 8px; border-radius:999px; }\
+        </style>\
+        <div class="card" role="dialog" aria-label="Teams shoutout setup">\
+          <div class="hdr"><div>Teams shoutout setup</div><div class="viewtag" id="viewtag"></div></div>\
+          <div class="body">\
+            <div class="row">\
+              <div><label>Ticket # column</label><select id="col-ticket"></select></div>\
+              <div><label>Priority column</label><select id="col-prio"></select></div>\
+            </div>\
+            <div class="row">\
+              <div><label>Summary column</label><select id="col-sum"></select></div>\
+              <div><label>Company column</label><select id="col-comp"></select></div>\
+            </div>\
+            <div class="row">\
+              <div><label>Contact column</label><select id="col-cont"></select></div>\
+              <div></div>\
+            </div>\
+            <div style="margin-top:10px;">\
+              <label>Preview</label>\
+              <textarea id="preview" readonly></textarea>\
+            </div>\
+            <div class="actions">\
+              <button class="btn" id="close">Close</button>\
+              <button class="btn primary" id="save">Save</button>\
+            </div>\
+          </div>\
+        </div>';
+      root.appendChild(wrap); host._root = root; }
+    var root = host._root; var $ = function(sel){ return root.querySelector(sel); };
+    $('#viewtag').textContent = readViewExact();
+
+    var cols = columns, samp = samples;
+    function buildOptions(sel, selectedIdx){
+      var s = $(sel); s.innerHTML = '';
+      var entries = [];
+      cols.forEach(function(label, idx){ entries.push({idx:idx, label:label}); });
+      samp.forEach(function(val, idx){ if(!cols.has(idx)) entries.push({idx:idx, label:'(no header)'}); });
+      entries.sort(function(a,b){ return a.idx - b.idx; });
+      for(var i=0;i<entries.length;i++){
+        var it=entries[i], sample = samp.get(it.idx) || '';
+        var o=document.createElement('option');
+        o.value=String(it.idx);
+        o.textContent = '#' + it.idx + ' — ' + (it.label||'(no header)') + '  •  ' + (sample ? sample.slice(0,60) : '');
+        if(String(it.idx) === String(selectedIdx)) o.selected = true;
+        s.appendChild(o);
+      }
+    }
+
+    buildOptions('#col-ticket', savedForView && savedForView.ticket);
+    buildOptions('#col-prio',   savedForView && savedForView.priority);
+    buildOptions('#col-sum',    savedForView && savedForView.summary);
+    buildOptions('#col-comp',   savedForView && savedForView.company);
+    buildOptions('#col-cont',   savedForView && savedForView.contact);
+
+    function readSel(){ return {
+      ticket:+root.getElementById('col-ticket').value,
+      priority:+root.getElementById('col-prio').value,
+      summary:+root.getElementById('col-sum').value,
+      company:+root.getElementById('col-comp').value,
+      contact:+root.getElementById('col-cont').value
+    }; }
+
+    function refreshPreview(){
+      try{
+        var sel = readSel(), r = rows()[0], pv = root.getElementById('preview');
+        if(!r){ pv.value = 'No rows to preview.'; return; }
+        function get(i){ var td=r.querySelector('td[cellindex="' + i + '"]'); if(!td) return ''; var a=td.querySelector('a'); return a ? txt(a) : txt(td.querySelector('div')||td); }
+        var ticket = get(sel.ticket), summary = stripSLA(get(sel.summary)), company = stripSLA(get(sel.company)), contact = stripSLA(get(sel.contact));
+        readPriorityFromCell(r.querySelector('td[cellindex="' + sel.priority + '"]')).then(function(pr){
+          var url = ticket ? ticketUrl(ticket) : '';
+          pv.value = dot(pr) + ' #' + ticket + ' — ' + summary + ' — ' + company + (contact ? ' — ' + contact : '') + (url ? ' ('+url+')' : '');
+        });
+      }catch(e){ console.error('[teams-shoutout] preview error', e); }
+    }
+
+    root.getElementById('save').onclick = function(){
+      var sel = readSel();
+      getSettings().then(function(all){
+        var ex = keyExact(), ca = keyCanonical();
+        all[ex] = sel; all[ca] = sel;
+        return setSettings(all);
+      }).then(function(){ toast('Saved mapping for this View'); var el=document.getElementById(PANEL_ID); if(el) el.remove(); })
+        .catch(function(e){ console.error('[teams-shoutout] save error', e); toast('Save failed'); });
+    };
+    root.getElementById('close').onclick = function(){ var el=document.getElementById(PANEL_ID); if(el) el.remove(); };
+
+    refreshPreview();
+    ['#col-ticket','#col-prio','#col-sum','#col-comp','#col-cont'].forEach(function(id){ root.querySelector(id).addEventListener('change', refreshPreview); });
+  }
+
+  // ---------- clipboard
+  function writeBoth(html, text){
+    return new Promise(function(res){
+      try{
+        if(navigator.clipboard && window.ClipboardItem){
+          var item=new ClipboardItem({'text/html':new Blob([html],{type:'text/html'}),'text/plain':new Blob([text],{type:'text/plain'})});
+          navigator.clipboard.write([item]).then(function(){ res(true); }).catch(function(){ legacy(); });
+          return;
+        }
+      }catch(e){}
+      try{
+        if(typeof GM_setClipboard === 'function'){ GM_setClipboard(html,{type:'text/html'}); return res(true); }
+        if(typeof GM !== 'undefined' && typeof GM.setClipboard === 'function'){ GM.setClipboard(html,{type:'text/html'}); return res(true); }
+      }catch(e){}
+      legacy();
+      function legacy(){ try{ navigator.clipboard.writeText(text).then(function(){ res(true); }).catch(domCopy); }catch(e){ domCopy(); } }
+      function domCopy(){ try{ var ta=document.createElement('textarea'); ta.value=text; ta.style.position='fixed'; ta.style.left='-9999px'; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); res(true); }catch(e2){ res(false); } }
+    });
+  }
+
+// Replace your existing copyWithMapping with this version
+function copyWithMapping(map, onlyHigh){
+  if(onlyHigh == null) onlyHigh = false;
+  try{
+    var rws = rows(); if(!rws.length){ toast('No rows'); return; }
+
+    var items = [];
+    (function step(i){
+      if(i >= rws.length){
+        // Build HTML bullets
+        var htmlParts = ['<strong>Tickets needing attention</strong>','<br><br>'];
+        for(var k=0; k<items.length; k++){
+          var it = items[k];
+          var metaParts = [];
+          if(it.company) metaParts.push(esc(it.company));
+          if(it.contact) metaParts.push(esc(it.contact));
+          var meta = metaParts.length ? ('  <i>' + metaParts.join(' — ') + '</i>') : '';
+          htmlParts.push(
+            '• ' + it.dot + ' <a href="' + it.url + '">#' + it.ticket + '</a> <strong>' + esc(it.summary) + '</strong><br>' +
+            meta
+          );
+          if(k !== items.length - 1) htmlParts.push('<br><br>');
+        }
+        var html = htmlParts.join('');
+
+        // Plain text fallback, mirrors spacing, no trailing blank line
+        var plainLines = ['Tickets needing attention',''];
+        for(var p=0; p<items.length; p++){
+          var it2 = items[p];
+          plainLines.push('• ' + it2.dot + ' #' + it2.ticket + ' ' + it2.summary + ' (' + it2.url + ')');
+          var metaTxt = [];
+          if(it2.company) metaTxt.push(it2.company);
+          if(it2.contact) metaTxt.push(it2.contact);
+          if(metaTxt.length) plainLines.push('  ' + metaTxt.join(' — '));
+          if(p !== items.length - 1) plainLines.push('');
+        }
+        var plain = plainLines.join('\n');
+
+        writeBoth(html, plain).then(function(ok){
+          toast(ok ? ('Copied ' + items.length + ' entr' + (items.length===1?'y':'ies')) : 'Copy failed');
+        });
+        return;
+      }
+
+      var r = rws[i];
+      var ticket = valFromCell(r, map.ticket);
+      if(!ticket || !isTicketId(ticket)) { step(i+1); return; }
+
+      var summary = stripSLA(valFromCell(r, map.summary));
+      var company = stripSLA(valFromCell(r, map.company));
+      var contact = stripSLA(valFromCell(r, map.contact));
+
+      readPriorityFromCell(tdByIndex(r, map.priority)).then(function(pr){
+        if(onlyHigh && !/^P[0-2]$/.test(pr)) { step(i+1); return; }
+        items.push({
+          dot: dot(pr),
+          ticket: ticket,
+          url: ticketUrl(ticket),
+          summary: summary,
+          company: company,
+          contact: contact
+        });
+        step(i+1);
+      });
+    })(0);
+  }catch(e){
+    console.error('[teams-shoutout] copy error', e);
+    toast('Copy error, see console');
+  }
+}
+
+
+
+  // ---------- setup open with smart prefill
+  function firstSavedMapping(all){
+    // return first mapping object from settings, or null
+    var keys = Object.keys(all || {});
+    for(var i=0;i<keys.length;i++){
+      var m = all[keys[i]];
+      if(m && typeof m === 'object' && typeof m.ticket === 'number') return m;
+    }
+    return null;
+  }
+
+  function openSetup(){
+    try{
+      var cols = headerCells(); var samp = sampleRowCells();
+      getSettings().then(function(all){
+        var existing = all[keyExact()] || all[keyCanonical()];
+        if(!existing){
+          // smart prefill, only if Ticket column index matches
+          var guessTicket = detectTicketIndex();
+          var candidate = firstSavedMapping(all);
+          if(candidate && guessTicket != null && +candidate.ticket === +guessTicket){
+            existing = candidate;
+          }
+        }
+        ensurePanel(cols, samp, existing);
+      });
+    }catch(e){ console.error('[teams-shoutout] openSetup error', e); toast('Setup error, see console'); }
+  }
+
+  // ---------- toolbar mount in absolute canvas
+  function findToolbarCanvas() {
+    var canvas = document.querySelector('.x-panel-toolbar .GMDB3DUBHYI .GMDB3DUBALJ') ||
+                 document.querySelector('.GMDB3DUBHYI .GMDB3DUBALJ') ||
+                 document.querySelector('.x-panel-toolbar') ||
+                 null;
+    return canvas;
+  }
+  function positionToolbarButton(btn) {
+    var canvas = findToolbarCanvas();
+    if (!canvas) return;
+    var searchEl = canvas.querySelector('.cw-toolbar-search');
+    var actionsEl = canvas.querySelector('.cw-toolbar-actions');
+    var clearEl  = canvas.querySelector('.cw-toolbar-clear');
+
+    function boxLeft(node) {
+      if (!node) return null;
+      var left = parseInt(node.style.left || '0', 10);
+      var width = (node.getBoundingClientRect ? node.getBoundingClientRect().width : 0) || 64;
+      return Math.max(0, left + width + 8);
+    }
+
+    var left = boxLeft(searchEl);
+    if (left == null) left = boxLeft(actionsEl);
+    if (left == null) left = boxLeft(clearEl);
+    if (left == null) left = 8;
+
+    btn.style.position = 'absolute';
+    btn.style.top = '3px';
+    btn.style.left = left + 'px';
+    btn.style.zIndex = '2';
+    btn.style.marginLeft = '0';
+    btn.style.height = '20px';
+    btn.style.lineHeight = '18px';
+  }
+
+  function ensureButton(){
+    if(!isBoard()) return;
+
+    var existing = document.getElementById(BTN_ID);
+    if(existing && !document.body.contains(existing)) existing = null;
+    if(existing){ positionToolbarButton(existing); return; }
+
+    var canvas = findToolbarCanvas();
+    if (!canvas) return;
+
+    var b = document.createElement('button');
+    b.id = BTN_ID; b.type='button'; b.textContent = 'Teams Shoutout';
+    b.className = 'attentus-btn';
+    b.style.border = '1px solid #334155';
+    b.style.borderRadius = '8px';
+    b.style.padding = '0 10px';
+    b.style.background = '#1f2937';
+    b.style.color = '#e5e7eb';
+    b.style.font = '600 12px/18px system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif';
+    b.style.cursor = 'pointer';
+
+    canvas.appendChild(b);
+    positionToolbarButton(b);
+
+    b.addEventListener('click', function(e){
+      if(e.altKey){ debugDump(); return; }
+      if(e.shiftKey){ openSetup(); return; }
+      getSettings().then(function(all){
+        var map = all[keyExact()] || all[keyCanonical()];
+        if(!map){ openSetup(); toast('No mapping for this View, opened setup'); return; }
+        copyWithMapping(map, false);
+      }).catch(function(err){ console.error('[teams-shoutout] click path error', err); toast('Click error, see console'); });
+    });
+    b.addEventListener('contextmenu', function(e){
+      e.preventDefault();
+      getSettings().then(function(all){
+        var map = all[keyExact()] || all[keyCanonical()];
+        if(!map){ openSetup(); toast('No mapping for this View, opened setup'); return; }
+        copyWithMapping(map, true);
+      }).catch(function(err){ console.error('[teams-shoutout] context path error', err); toast('Click error, see console'); });
+    });
+
+    // Reposition on resize or toolbar reflow
+    window.addEventListener('resize', function(){ var btn = document.getElementById(BTN_ID); if(btn) positionToolbarButton(btn); });
+    var mo = new MutationObserver(function(){
+      var btn = document.getElementById(BTN_ID);
+      if(btn && isBoard()) positionToolbarButton(btn);
+      if(btn && !isBoard()) { btn.remove(); }
+    });
+    mo.observe(canvas, { attributes:true, childList:true, subtree:true });
+  }
+
+  function debugDump(){
+    var ex = keyExact(), ca = keyCanonical(), vExact = readViewExact(), vCanon = readViewCanonical();
+    getSettings().then(function(all){
+      console.debug('[teams-shoutout] view exact:', JSON.stringify(vExact));
+      console.debug('[teams-shoutout] view canonical:', JSON.stringify(vCanon));
+      console.debug('[teams-shoutout] key exact:', ex);
+      console.debug('[teams-shoutout] key canonical:', ca);
+      console.debug('[teams-shoutout] keys saved:', Object.keys(all));
+      console.debug('[teams-shoutout] mapping hit exact?', !!all[ex], 'hit canonical?', !!all[ca]);
+      toast('Debug info, see console');
+    });
+  }
+
+  function init(){ if(!isBoard()) return; ensureButton(); }
+  (function boot(){
+    var delays = [0, 250, 750, 1500, 2500];
+    (function step(i){
+      if(i >= delays.length){
+        var mo = new MutationObserver(function(){
+          if(!document.getElementById(BTN_ID)){ if(isBoard()) ensureButton(); }
+          else if(!isBoard()){ var x=document.getElementById(BTN_ID); if(x) x.remove(); }
+        });
+        mo.observe(document.body, { childList:true, subtree:true });
+        return;
+      }
+      setTimeout(function(){ init(); step(i+1); }, delays[i]);
+    })(0);
+  })();
+})();
