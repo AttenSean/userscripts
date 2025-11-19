@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         attentus-cw-copy-ticket-link
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.7.3
+// @version      1.7.4
 // @description  Click = formatted label link. Shift+Click = URL-only (as hyperlink in HTML). Right-click/Space = formatted + newline "Company, Contact". SPA-safe, mounts with other action buttons; never on Time Entry / Time Sheets / modals. Uses Rails ticket URL.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
@@ -154,6 +154,7 @@
   }
 
   function isTicketPage() {
+    if (!isCanonicalServiceTicketPage()) return false;
     if (isTimeSheet() || isTimeEntryPage()) return false;
 
     const href  = (location.href || '').toLowerCase();
@@ -173,6 +174,22 @@
 
     return false;
   }
+
+  function hasServiceTicketNavLabel() {
+  const nodes = document.querySelectorAll(
+    '.navigationEntry.cw_CwLabel, .navigationEntry.mm_label, .navigationEntry.gwt-Label'
+  );
+  return Array.from(nodes).some(el => /service\s+ticket/i.test((el.textContent || '').trim()));
+}
+
+function hasAgeLabel() {
+  const nodes = document.querySelectorAll('.cw_CwHTML.mm_label, .gwt-HTML.mm_label.cw_CwHTML');
+  return Array.from(nodes).some(el => /age\s*:/i.test((el.textContent || '').trim()));
+}
+
+function isCanonicalServiceTicketPage() {
+  return hasServiceTicketNavLabel() && hasAgeLabel();
+}
 
   /* ---------- DOM utils ---------- */
 
