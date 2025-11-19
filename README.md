@@ -1,3 +1,5 @@
+The info below is out of date, I've been lazy.
+
 # Attentus Userscripts (ConnectWise)
 
 A collection of quality-of-life userscripts for ConnectWise Manager (browser UI).  
