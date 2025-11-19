@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         attentus-cw-clear-contact-button
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.2.3
-// @description  Adds a "Clear Contact" action on Ticket/Time Entry pages only, clears Contact, Email, and Phone fields. SPA-safe, mounts in header actions.
+// @version      1.3.1
+// @description  Adds a button next to Follow that clears Contact, Phone, and Email on the Service Ticket page only
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
 // @match        https://*.myconnectwise.com/*
@@ -16,264 +16,173 @@
 // @updateURL    https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-clear-contact-button.user.js
 // ==/UserScript==
 
-/* ==Shared Core (inline) == */
-const AttentusCW = (() => {
-  const DEBUG = !!localStorage.getItem("attentus-debug");
-  const log = (...a) => DEBUG && console.log("[AttentusCW]", ...a);
-
-  // ---------- gating helpers ----------
-
-  function isTimeSheet() {
-    // Classic timesheet grids
-    if (
-      document.getElementById("mytimesheetdaygrid-listview-scroller") ||
-      document.querySelector(".mytimesheetlist, .TimeSheet")
-    ) {
-      return true;
-    }
-
-    // Daily Time Entries navigation banner
-    const navLabels = Array.from(
-      document.querySelectorAll(
-        ".navigationEntry.cw_CwLabel, .navigationEntry, .cw-main-banner .gwt-Label, .cw-main-banner .cw_CwLabel"
-      )
-    );
-    if (
-      navLabels.some((el) =>
-        /daily\s+time\s+entries/i.test((el.textContent || "").trim())
-      )
-    ) {
-      return true;
-    }
-
-    return false;
-  }
-
-  function isTimeEntryPage() {
-    if (document.querySelector(".pod_timeEntryDetails")) return true;
-    if (document.querySelector(".cw_ToolbarButton_TimeStamp")) return true;
-    if (
-      document.querySelector("input.cw_ChargeToTextBox") ||
-      document.querySelector("input[id$='ChargeToTextBox']")
-    ) {
-      return true;
-    }
-    return false;
-  }
-
-  function isTicketPage() {
-    if (isTimeSheet() || isTimeEntryPage()) return false;
-
-    const href = (location.href || "").toLowerCase();
-    const path = (location.pathname || "").toLowerCase();
-    const search = location.search || "";
-
-    // URL hints for ticket
-    if (/[?&](service_recid|recid|serviceticketid|srrecid)=\d+/i.test(search)) {
-      return true;
-    }
-    if (/connectwise\.aspx/.test(path)) {
-      if (/\?\?[^#]*(ticket|service.?ticket)/i.test(href)) return true;
-    }
-
-    // Ticket pods present
-    if (document.querySelector(".pod_ticketHeaderActions, .pod_ticketSummary")) {
-      return true;
-    }
-
-    // Banner text, Service Ticket #
-    if (
-      [...document.querySelectorAll(".cw_CwLabel,.gwt-Label")]
-        .some((el) => /service\s*ticket\s*#/i.test(el.textContent || ""))
-    ) {
-      return true;
-    }
-
-    return false;
-  }
-
-  function isTicketOrTimeEntryPage() {
-    if (isTimeSheet()) return false; // hard block on any timesheet context, including Daily Time Entries
-    if (isTimeEntryPage()) return true;
-    if (isTicketPage()) return true;
-    return false;
-  }
-
-  // ---- spacing normalization (replace old per-ID margin) ----
-  (function ensureClearContactStyles() {
-    if (document.getElementById('attentus-clear-contact-style')) return;
-    const s = document.createElement('style');
-    s.id = 'attentus-clear-contact-style';
-    s.textContent = `
-      /* zero ad hoc margins on our three actions */
-      #cw-clear-contact-btn,
-      #cw-copy-ticket-link-btn,
-      #cw-copy-timezest-btn { margin: 0 !important; }
-
-      /* consistent sibling spacing regardless of pod or bar */
-      .pod_ticketHeaderActions .cw_CwActionButton + .cw_CwActionButton,
-      .cw-CwActionButtons     .cw_CwActionButton + .cw_CwActionButton,
-      .cw-CwActionBar         .cw_CwActionButton + .cw_CwActionButton,
-      .mm_toolbar             .cw_CwActionButton + .cw_CwActionButton {
-        margin-left: 6px !important;
-      }
-
-      /* stronger spacing for the HorizontalPanel action bar */
-      .cw_CwHorizontalPanel > .cw_CwActionButton { margin-left: 6px !important; }
-      .cw_CwHorizontalPanel > .cw_CwActionButton:first-of-type { margin-left: 0 !important; }
-
-      /* physical spacer used when CW nukes margins in cw_CwHorizontalPanel */
-      .att-action-spacer { display:inline-block; width:6px; height:1px; }
-    `;
-    document.head.appendChild(s);
-  })();
-
-  function spaRoot() {
-    return (
-      document.querySelector("#cwContent") ||
-      document.querySelector(".cw-WorkspaceView") ||
-      document.body
-    );
-  }
-
-  function observeSpa(callback) {
-    const root = spaRoot();
-    if (!root) return;
-    const mo = new MutationObserver(() => callback());
-    mo.observe(root, { childList: true, subtree: true });
-    window.addEventListener("popstate", callback, { passive: true });
-    window.addEventListener("hashchange", callback, { passive: true });
-    return mo;
-  }
-
-  function ensureMounted(testFn, mountFn, opts = {}) {
-    const { attempts = 40, delay = 200 } = opts;
-    let tries = 0;
-    const loop = () => {
-      try {
-        if (testFn()) {
-          mountFn();
-          return;
-        }
-      } catch (e) {
-        log("ensureMounted error", e);
-      }
-      if (++tries < attempts) setTimeout(loop, delay);
-    };
-    loop();
-  }
-
-  return { log, isTicketOrTimeEntryPage, observeSpa, ensureMounted, spaRoot };
-})();
-
-/* == Script: Clear Contact == */
 (function () {
-  "use strict";
+  'use strict';
 
-  const BTN_ID = "cw-clear-contact-btn";
+  const BTN_ID = 'cw-clear-contact-btn';
+  const DEBUG = !!localStorage.getItem('attentus-debug');
+  const log = (...args) => { if (DEBUG) console.log('[ClearContact]', ...args); };
 
-  // ---- placement helpers (broadened) ----
-  function headerActionsPod() {
-    return (
-      document.querySelector(".pod_ticketHeaderActions") ||
-      document.querySelector(".cw-CwActionBar") ||
-      document.querySelector(".cw-CwActionButtons") ||
-      document.querySelector(".mm_toolbar") ||
-      null
+  // ---------- feedback flash ----------
+
+  function ensureFlashStyles() {
+    if (document.getElementById('cw-clear-flash-styles')) return;
+    const css = document.createElement('style');
+    css.id = 'cw-clear-flash-styles';
+    css.textContent = `
+      @keyframes cwClearPulse {
+        0%   { transform: scale(1); }
+        50%  { transform: scale(1.04); box-shadow: 0 0 0 2px rgba(59,130,246,0.45) inset; }
+        100% { transform: scale(1); box-shadow: none; }
+      }
+      .cw-flash-pulse {
+        animation: cwClearPulse 0.35s ease-in-out;
+        border-radius: 6px;
+      }
+    `;
+    document.head.appendChild(css);
+  }
+
+  function flashCleared(btnRoot, labelEl) {
+    if (!labelEl) return;
+    const original = labelEl.textContent;
+    labelEl.textContent = 'Cleared';
+    btnRoot.classList.add('cw-flash-pulse');
+    btnRoot.setAttribute('aria-live', 'polite');
+    setTimeout(() => {
+      labelEl.textContent = original;
+      btnRoot.classList.remove('cw-flash-pulse');
+      btnRoot.removeAttribute('aria-live');
+    }, 800);
+  }
+
+  // ---------- positive gating: only the correct Service Ticket page ----------
+
+  function hasServiceTicketNavLabel() {
+    const nodes = document.querySelectorAll(
+      '.navigationEntry.cw_CwLabel, .navigationEntry.mm_label, .navigationEntry.gwt-Label'
     );
+    return Array.from(nodes).some(el => {
+      const t = (el.textContent || '').trim();
+      // be a bit loose, match "Service Ticket" anywhere in the nav entry
+      return /service\s+ticket/i.test(t);
+    });
   }
 
-  function findHorizontalPanel() {
-    return document.querySelector(".cw_CwHorizontalPanel");
+  function hasAgeLabel() {
+    const nodes = document.querySelectorAll('.cw_CwHTML.mm_label, .gwt-HTML.mm_label.cw_CwHTML');
+    return Array.from(nodes).some(el => /age\s*:/i.test((el.textContent || '').trim()));
   }
 
-  function findAgeTable(panel) {
-    if (!panel) return null;
-    const ageDiv = panel.querySelector(".cw_CwHTML, .gwt-HTML.mm_label");
-    if (ageDiv && /(^|\b)age:\s*/i.test((ageDiv.textContent || "").trim())) {
-      return ageDiv.closest("table");
+  // optional, debug only, do not gate on this
+  function hasContactLabelLoose() {
+    // your original example had "cw_contact contact label", but that may vary
+    const byClass = document.querySelector('.cw_contact.contact.label');
+    if (byClass) return true;
+
+    // fallbacks: any element whose text is "Contact" near the contact field
+    const labels = document.querySelectorAll('.mm_label, .cw_CwLabel, .gwt-Label');
+    return Array.from(labels).some(el => {
+      const t = (el.textContent || '').trim().toLowerCase();
+      return t === 'contact' || t === 'contact:';
+    });
+  }
+
+  function isCanonicalServiceTicketPage() {
+    const nav = hasServiceTicketNavLabel();
+    const age = hasAgeLabel();
+    const contactLabel = hasContactLabelLoose(); // debug only
+    const ok = nav && age;
+
+    if (DEBUG) {
+      log('isCanonicalServiceTicketPage', { nav, age, contactLabel, ok });
     }
-    return null;
+    return ok;
   }
 
-  function lastNativeButton(panel) {
-    if (!panel) return null;
-    const natives = Array.from(
-      panel.querySelectorAll(".cw_CwActionButton:not([data-origin='attentus'])")
-    );
-    return natives.length ? natives[natives.length - 1] : null;
+  // ---------- field clearing ----------
+
+  function dispatchAll(el) {
+    if (!el) return;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    el.dispatchEvent(new Event('blur', { bubbles: true }));
   }
 
-  function pickAfterAnchor(container) {
-    const panel = findHorizontalPanel() || container;
-    if (!panel) return null;
+  function clearContactInfo() {
+    let didSomething = false;
 
-    const age = findAgeTable(panel);
-    const nativeLast = lastNativeButton(panel);
+    const clearSet = (selectorList) => {
+      selectorList.forEach(sel => {
+        document.querySelectorAll(sel).forEach(inp => {
+          if (!('value' in inp)) return;
+          if (!inp.value) return;
+          inp.value = '';
+          dispatchAll(inp);
+          didSomething = true;
+        });
+      });
+    };
 
-    if (age && nativeLast) {
-      // choose whichever is further to the right in DOM order
-      return (age.compareDocumentPosition(nativeLast) & Node.DOCUMENT_POSITION_FOLLOWING)
-        ? nativeLast
-        : age;
+    // Contact
+    clearSet([
+      'input.cw_contact',
+      'input[aria-label="Contact"]',
+      'input[id*="Contact"][role="combobox"]',
+      'input[name="ContactRecID"]'
+    ]);
+
+    // Email
+    clearSet([
+      'input.cw_emailAddress',
+      'input[aria-label="Email"]',
+      'input[name="EmailAddress"]'
+    ]);
+
+    // Phone block, number and extension
+    const phoneBlock = document.querySelector('.cw_contactPhoneCommunications');
+    if (phoneBlock) {
+      phoneBlock.querySelectorAll('input[type="text"]').forEach(inp => {
+        if (!inp.value) return;
+        inp.value = '';
+        dispatchAll(inp);
+        didSomething = true;
+      });
     }
-    return nativeLast || age || null;
-  }
+    clearSet([
+      'input[aria-label="Phone"]',
+      'input[name="PhoneNumber"]',
+      'input[aria-label*="Ext"]',
+      'input[name*="Ext"]'
+    ]);
 
-  // spacer utilities
-  const isBtn = (el) =>
-    el && el.classList && el.classList.contains("cw_CwActionButton");
-  function makeSpacer() {
-    const s = document.createElement("span");
-    s.className = "att-action-spacer";
-    return s;
-  }
-  function insertAfterWithSpacer(afterEl, node) {
-    const parent = afterEl?.parentElement;
-    if (!parent) return;
-    let spacer = afterEl.nextSibling;
-    if (
-      !(
-        spacer &&
-        spacer.nodeType === 1 &&
-        spacer.classList.contains("att-action-spacer")
-      )
-    ) {
-      spacer = makeSpacer();
-      parent.insertBefore(spacer, afterEl.nextSibling);
+    if (!didSomething) {
+      log('No contact related fields found to clear on this layout');
     }
-    parent.insertBefore(node, spacer.nextSibling);
   }
 
-  function findAnchor() {
-    // Prefer the parent of any existing CW action button to land in the correct container
-    const anyAction = document.querySelector(".cw_CwActionButton");
-    if (anyAction && anyAction.parentElement) {
-      return { container: anyAction.parentElement, before: null };
-    }
-    const pod = headerActionsPod();
-    return pod ? { container: pod, before: null } : null;
-  }
+  // ---------- button creation and placement ----------
 
-  function makeActionButton(onRun) {
-    const outer = document.createElement("div");
-    outer.className = "GMDB3DUBHFJ GMDB3DUBAQG GMDB3DUBOFJ cw_CwActionButton";
-    outer.id = "cw-clear-contact-btn";
-    outer.setAttribute("data-origin", "attentus");
+  function makeButton() {
+    ensureFlashStyles();
+
+    const outer = document.createElement('div');
+    outer.className = 'GMDB3DUBHFJ GMDB3DUBAQG GMDB3DUBOFJ cw_CwActionButton';
+    outer.id = BTN_ID;
+    outer.setAttribute('data-origin', 'attentus');
     outer.tabIndex = 0;
 
-    const btn = document.createElement("div");
-    btn.className = "GMDB3DUBIOG mm_button";
-    btn.setAttribute("role", "button");
-    btn.setAttribute("aria-label", "Clear Contact");
-    btn.title = "Clear contact, email, and phone fields";
+    const btn = document.createElement('div');
+    btn.className = 'GMDB3DUBIOG mm_button';
+    btn.setAttribute('role', 'button');
+    btn.setAttribute('aria-label', 'Clear Contact');
 
-    const inner = document.createElement("div");
-    inner.className = "GMDB3DUBJOG GMDB3DUBNQG";
+    const inner = document.createElement('div');
+    inner.className = 'GMDB3DUBJOG GMDB3DUBNQG';
 
-    const label = document.createElement("div");
-    label.className = "GMDB3DUBBPG";
-    label.textContent = "Clear Contact";
+    const label = document.createElement('div');
+    label.className = 'GMDB3DUBBPG';
+    label.textContent = 'Clear Contact';
 
     inner.appendChild(label);
     btn.appendChild(inner);
@@ -282,159 +191,119 @@ const AttentusCW = (() => {
     const run = (e) => {
       e.preventDefault();
       e.stopPropagation();
-      try {
-        onRun();
-      } catch (err) {
-        console.error("[Clear Contact] click error", err);
-      }
+      clearContactInfo();
+      flashCleared(btn, label);
     };
 
-    outer.addEventListener("pointerup", run, true);
-    outer.addEventListener("click", run, true);
-    outer.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") {
-        e.preventDefault();
+    outer.addEventListener('pointerup', run, true);
+    outer.addEventListener('click', run, true);
+    outer.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
         run(e);
       }
     });
 
+    outer.title = 'Clear Contact, Phone, and Email';
+
     return outer;
   }
 
-  // ---- ordered mounting, Clear Contact should be left most of the three ----
-  function mountIntoOrdered(container, node) {
-    if (!container || !node) return;
-
-    const afterAnchor = pickAfterAnchor(container);
-    if (afterAnchor) {
-      // Clear Contact should be first among Attentus, but still start after Age or native buttons
-      insertAfterWithSpacer(afterAnchor, node);
-    } else {
-      // no anchor found, put at the very start
-      container.insertBefore(node, container.firstChild);
-    }
+  function findFollowButton() {
+    const followLabel = Array.from(document.querySelectorAll('.GMDB3DUBBPG'))
+      .find(el => (el.textContent || '').trim().toLowerCase() === 'follow');
+    if (!followLabel) return null;
+    const followBtn = followLabel.closest('.cw_CwActionButton');
+    return followBtn || null;
   }
 
-  function clearContactFields() {
-    const fireAll = (el) => {
-      try {
-        el.dispatchEvent(new Event("input", { bubbles: true }));
-        el.dispatchEvent(new Event("change", { bubbles: true }));
-        el.dispatchEvent(new Event("blur", { bubbles: true }));
-      } catch {}
+  function placeButton() {
+    if (document.getElementById(BTN_ID)) return true;
+    if (!isCanonicalServiceTicketPage()) {
+      log('gating blocked, not canonical Service Ticket page');
+      return false;
+    }
+
+    const followBtn = findFollowButton();
+    if (!followBtn) {
+      log('Follow button not found, cannot place Clear Contact');
+      return false;
+    }
+
+    const newBtn = makeButton();
+    followBtn.insertAdjacentElement('afterend', newBtn);
+    log('Clear Contact mounted next to Follow');
+    return true;
+  }
+
+  // ---------- SPA safe wiring ----------
+
+  function getSpaRoot() {
+    return document.querySelector('#cwContent') ||
+           document.querySelector('.cw-WorkspaceView') ||
+           document.body;
+  }
+
+  function ensure() {
+    if (!isCanonicalServiceTicketPage()) {
+      const existing = document.getElementById(BTN_ID);
+      if (existing && existing.parentElement) {
+        existing.parentElement.removeChild(existing);
+        log('Clear Contact removed due to gating change');
+      }
+      return;
+    }
+    placeButton();
+  }
+
+  const root = getSpaRoot();
+  if (root) {
+    const mo = new MutationObserver(() => ensure());
+    mo.observe(root, { subtree: true, childList: true });
+  }
+
+  ['pushState', 'replaceState'].forEach(k => {
+    const orig = history[k];
+    if (!orig) return;
+    history[k] = function () {
+      const r = orig.apply(this, arguments);
+      queueMicrotask(ensure);
+      return r;
     };
-    const clear = (el) => {
-      if (!el || !("value" in el)) return false;
-      const before = el.value;
-      el.value = "";
-      fireAll(el);
-      return !!before;
-    };
+  });
+  window.addEventListener('popstate', ensure);
+  window.addEventListener('hashchange', ensure);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) ensure();
+  });
 
-    let did = false;
-
-    // CONTACT
-    const contactLegacy = document.querySelector("input.cw_contact");
-    if (clear(contactLegacy)) did = true;
-
-    [
-      'input[aria-label="Contact"]',
-      'input[id*="Contact"][role="combobox"]',
-      'input[name="ContactRecID"]',
-    ].forEach((sel) =>
-      document.querySelectorAll(sel).forEach((el) => {
-        if (clear(el)) did = true;
-      })
-    );
-
-    // EMAIL
-    const emailLegacy = document.querySelector("input.cw_emailAddress");
-    if (clear(emailLegacy)) did = true;
-
-    ['input[aria-label="Email"]', 'input[name="EmailAddress"]'].forEach((sel) =>
-      document.querySelectorAll(sel).forEach((el) => {
-        if (clear(el)) did = true;
-      })
-    );
-
-    // PHONE (number + extension)
-    const phoneBlock = document.querySelector(".cw_contactPhoneCommunications");
-    if (phoneBlock) {
-      phoneBlock
-        .querySelectorAll('input[type="text"]')
-        .forEach((inp) => {
-          if (clear(inp)) did = true;
-        });
-    }
-    [
-      'input[aria-label="Phone"]',
-      'input[name="PhoneNumber"]',
-      'input[aria-label*="Ext"]',
-      'input[name*="Ext"]',
-    ].forEach((sel) =>
-      document.querySelectorAll(sel).forEach((el) => {
-        if (clear(el)) did = true;
-      })
-    );
-
-    if (!did) {
-      console.warn(
-        "[Clear Contact] No matching fields found to clear on this layout"
-      );
-    }
-  }
-
-  // ---- mount ----
-  function addButton() {
-    if (document.getElementById(BTN_ID)) return;
-    const spot = findAnchor();
-    if (!spot || !spot.container) return AttentusCW.log("Clear Contact: no anchor");
-
-    const button = makeActionButton(clearContactFields);
-    mountIntoOrdered(spot.container, button);
-    AttentusCW.log("Clear Contact mounted (ordered)", { container: spot.container });
-  }
-
-  function tryMount() {
-    if (!AttentusCW.isTicketOrTimeEntryPage()) return;
-
-    AttentusCW.ensureMounted(
-      () =>
-        !!document.querySelector(".cw_CwActionButton") ||
-        !!document.querySelector(
-          ".pod_ticketHeaderActions,.cw-CwActionBar,.cw-CwActionButtons,.mm_toolbar"
-        ),
-      () => addButton(),
-      { attempts: 80, delay: 150 }
-    );
-  }
-
-  tryMount();
-  AttentusCW.observeSpa(tryMount);
-
-  /* Selectors QA, Clear Contact button, Ticket and Time Entry
-     Gating
-       - Uses AttentusCW.isTicketOrTimeEntryPage()
-       - Hard block on:
-         - Classic timesheets: #mytimesheetdaygrid-listview-scroller, .mytimesheetlist, .TimeSheet
-         - Daily Time Entries: any .navigationEntry or banner label with text "Daily Time Entries"
-     Ticket detection
-       - URL params: ?service_recid=, ?recid=, ?serviceticketid=, ?srrecid=
-       - connectwise.aspx with encoded "ticket" or "service ticket" in hash query
-       - Pods: .pod_ticketHeaderActions, .pod_ticketSummary
-       - Banner labels containing "Service Ticket #"
-     Time Entry detection
-       - .pod_timeEntryDetails
-       - .cw_ToolbarButton_TimeStamp
-       - input.cw_ChargeToTextBox or input[id$="ChargeToTextBox"]
-     Must not fire on
-       - Any timesheet context including Daily Time Entries
-       - (Modal windows would be handled by separate checks if needed)
-     Anchor region
-       - Observer root: #cwContent, .cw-WorkspaceView, or body
-       - Container: .pod_ticketHeaderActions, .cw-CwActionBar, .cw-CwActionButtons, .mm_toolbar
-     Placement
-       - Button mounts after Age or last native CW action
-       - Clear Contact is left most among Attentus actions, spacing via .att-action-spacer
-  */
+  setTimeout(ensure, 0);
+  setTimeout(ensure, 250);
+  setTimeout(ensure, 750);
+  setTimeout(ensure, 1500);
 })();
+
+/*
+Selectors QA - Clear Contact button
+
+Positive gating
+- isCanonicalServiceTicketPage() true only when:
+  - Navigation label:
+    - .navigationEntry.cw_CwLabel or related
+    - text contains "Service Ticket" (case insensitive)
+  - Age label:
+    - .cw_CwHTML.mm_label or .gwt-HTML.mm_label.cw_CwHTML
+    - text contains "Age:"
+
+Optional signals (debug)
+- Contact label:
+  - .cw_contact.contact.label or a label with text "Contact"
+
+Must not fire on
+- Any view missing either the Service Ticket nav label or the Age line
+- Timesheets, Daily Time Entries, finance, etc are implicitly excluded
+
+Placement
+- Anchor:
+  - Follow button found via .GMDB3DUBBPG text "Follow"
+  - Clear Contact inserts immediately after that .cw_CwActionButton
+*/
