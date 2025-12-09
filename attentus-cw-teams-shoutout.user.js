@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         attentus-cw-teams-shoutout
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      2.5.1
-// @description  Teams shoutout from the Service Board. Toolbar-mounted button. Exact per-View mapping with canonical fallback. Smart prefill on new views when Ticket column matches. Shift+Click=Setup, Right-click=P0–P2, Alt=Debug.
+// @version      3.0.0
+// @description  Teams shoutout from the Service Board. Toolbar button, per view mapping with smart prefill. Ctrl+Click = HD Board Health Update (priority summary + Tickets with Responses), Right-click = P0-P2 only, Shift+Click = setup.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
 // @match        https://*.myconnectwise.com/*
@@ -28,45 +28,105 @@
   var BASE = location.origin;
   var PATH = '/v4_6_release/services/system_io/Service/fv_sr100_request.rails?service_recid=';
 
+  // status ordering for bullets
+  var STATUS_ORDER = [
+    'New',
+    'New (email)',
+    'MUST ASSIGN',
+    'MUST ASSIGN - Acknowledged',
+    'Re-Opened',
+    'Client Has Responded',
+    'Waiting Approval',
+    'Waiting Client Response',
+    'On-Hold',
+    'Acknowledged'
+  ];
+
+  // priority ordering for output
+  var PRIORITY_ORDER = ['P0','P1','P2','P3','P4','PM']; // PM = Maintenance
+
+  // Maintenance icon data URI (cyan)
+  var MAINT_DATA_PREFIX = 'data:image/gif;base64,R0lGODlhEAAQAJECAAAAAAD49P///wAAACH5BAEAAAIALAAAAAAQABAAAAImlI+pm+APoQGh2lvBxDxoQXXXF4rZZp5gqpYmyXpoSka2w+T6vhcAOw==';
+
   // ---------- utils
   function txt(el){ return (el && el.textContent || '').replace(/\s+/g,' ').trim(); }
   function isTicketId(s){ return /^\d{5,}$/.test((s||'').trim()); }
-  function esc(s){ s = String(s == null ? '' : s); return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
-  function stripSLA(s){ s = String(s||''); s = s.replace(/\b(?:Respond by|Plan by|Waiting|Scheduled|SLA)[^|—-]*$/i,''); s = s.replace(/[|—-]\s*$/,''); return s.trim(); }
+  function esc(s){
+    s = String(s == null ? '' : s);
+    return s.replace(/&/g,'&amp;')
+            .replace(/</g,'&lt;')
+            .replace(/>/g,'&gt;')
+            .replace(/"/g,'&quot;')
+            .replace(/'/g,'&#39;');
+  }
+  function stripSLA(s){
+    s = String(s||'');
+    s = s.replace(/\b(?:Respond by|Plan by|Waiting|Scheduled|SLA)[^|-\u2014]*$/i,'');
+    s = s.replace(/[|\u2014-]\s*$/,'');
+    return s.trim();
+  }
 
-  function toast(msg, ms){ if(ms == null) ms = 1100;
+  function toast(msg, ms){
+    if(ms == null) ms = 1100;
     var n = document.getElementById(TOAST_ID);
-    if(!n){ n = document.createElement('div'); n.id = TOAST_ID;
-      var st = n.style; st.position='fixed'; st.right='16px'; st.bottom='70px'; st.zIndex=2147483646;
-      st.background='#0b0f17'; st.color='#e5e7eb'; st.padding='8px 10px'; st.borderRadius='10px';
-      st.border='1px solid #1f2937'; st.font='12px system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif';
-      st.opacity='0'; st.transition='opacity .15s ease'; document.body.appendChild(n); }
-    n.textContent = msg; n.style.opacity = '1'; if(n._h) clearTimeout(n._h);
+    if(!n){
+      n = document.createElement('div');
+      n.id = TOAST_ID;
+      var st = n.style;
+      st.position='fixed';
+      st.right='16px';
+      st.bottom='70px';
+      st.zIndex=2147483646;
+      st.background='#0b0f17';
+      st.color='#e5e7eb';
+      st.padding='8px 10px';
+      st.borderRadius='10px';
+      st.border='1px solid #1f2937';
+      st.font='12px system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif';
+      st.opacity='0';
+      st.transition='opacity .15s ease';
+      document.body.appendChild(n);
+    }
+    n.textContent = msg;
+    n.style.opacity = '1';
+    if(n._h) clearTimeout(n._h);
     n._h = setTimeout(function(){ n.style.opacity = '0'; }, ms);
   }
 
-  // ---------- storage, unified Promise API for TM/VM
-  function hasGM(){ return (typeof GM_getValue === 'function') || (typeof GM !== 'undefined' && typeof GM.getValue === 'function'); }
+  // ---------- storage
   function gmGet(key, def){
     if(typeof def === 'undefined') def = null;
     try{
-      if(typeof GM_getValue === 'function'){ var v = GM_getValue(key, def); return Promise.resolve(v); }
-      if(typeof GM !== 'undefined' && typeof GM.getValue === 'function'){ return GM.getValue(key, def); }
+      if(typeof GM_getValue === 'function'){
+        var v = GM_getValue(key, def);
+        return Promise.resolve(v);
+      }
+      if(typeof GM !== 'undefined' && typeof GM.getValue === 'function'){
+        return GM.getValue(key, def);
+      }
     }catch(e){}
     return Promise.resolve(def);
   }
   function gmSet(key, val){
     try{
-      if(typeof GM_setValue === 'function'){ GM_setValue(key, val); return Promise.resolve(); }
-      if(typeof GM !== 'undefined' && typeof GM.setValue === 'function'){ return GM.setValue(key, val); }
+      if(typeof GM_setValue === 'function'){
+        GM_setValue(key, val);
+        return Promise.resolve();
+      }
+      if(typeof GM !== 'undefined' && typeof GM.setValue === 'function'){
+        return GM.setValue(key, val);
+      }
     }catch(e){}
     try{ localStorage.setItem(key, val); }catch(e){}
     return Promise.resolve();
   }
   function getSettings(){
     return gmGet(STORAGE, '{}').then(function(raw){
-      try{ return typeof raw === 'string' ? JSON.parse(raw || '{}') : (raw || {}); }
-      catch(e){ return {}; }
+      try{
+        return typeof raw === 'string' ? JSON.parse(raw || '{}') : (raw || {});
+      }catch(e){
+        return {};
+      }
     });
   }
   function setSettings(obj){
@@ -80,55 +140,88 @@
     return document.querySelector('.cw-toolbar-view-dropdown input.cw_CwComboBox') ||
            document.querySelector('.cw-toolbar-view-dropdown [id$="-input"].cw_CwComboBox');
   }
-  function stripInvisibles(s){ return String(s||'').replace(/[\u200B-\u200D\u2060\uFEFF]/g,'').replace(/\u00A0/g,' ').replace(/\s+/g,' ').trim(); }
-  function readViewExact(){ var inp = getViewInput(); var val = inp && typeof inp.value === 'string' ? inp.value.trim() : ''; return val || '(No View)'; }
+  function stripInvisibles(s){
+    return String(s||'')
+      .replace(/[\u200B-\u200D\u2060\uFEFF]/g,'')
+      .replace(/\u00A0/g,' ')
+      .replace(/\s+/g,' ')
+      .trim();
+  }
+  function readViewExact(){
+    var inp = getViewInput();
+    var val = inp && typeof inp.value === 'string' ? inp.value.trim() : '';
+    return val || '(No View)';
+  }
   function readViewCanonical(){ return stripInvisibles(readViewExact()); }
   function keyExact(){ return location.host.toLowerCase() + '::' + readViewExact(); }
   function keyCanonical(){ return location.host.toLowerCase() + '::' + readViewCanonical(); }
 
   // ---------- gating
   function isBoard(){
-    return !!document.querySelector('table.srboard-grid') && !!document.querySelector(BOARD_ROW) && !!getViewInput();
+    return !!document.querySelector('table.srboard-grid') &&
+           !!document.querySelector(BOARD_ROW) &&
+           !!getViewInput();
   }
 
   // ---------- grid helpers
-  function rows(){ return Array.prototype.slice.call(document.querySelectorAll(BOARD_ROW)); }
-  function tdByIndex(row, idx){ return idx >= 0 ? row.querySelector('td[cellindex="' + idx + '"]') : null; }
-  function valFromCell(row, idx){ var td = tdByIndex(row, idx); if(!td) return ''; var a = td.querySelector('a'); return a ? txt(a) : txt(td.querySelector('div') || td); }
+  function rows(){
+    return Array.prototype.slice.call(document.querySelectorAll(BOARD_ROW));
+  }
+  function tdByIndex(row, idx){
+    return idx >= 0 ? row.querySelector('td[cellindex="' + idx + '"]') : null;
+  }
+  function valFromCell(row, idx){
+    var td = tdByIndex(row, idx);
+    if(!td) return '';
+    var a = td.querySelector('a');
+    return a ? txt(a) : txt(td.querySelector('div') || td);
+  }
 
   function headerCells(){
     var set = new Map();
-    var containers = Array.prototype.slice.call(document.querySelectorAll('.cw-ml-header *[cellindex], .x-grid3-hd-row *[cellindex], .x-grid3-header *[cellindex]'));
+    var containers = Array.prototype.slice.call(document.querySelectorAll(
+      '.cw-ml-header *[cellindex], .x-grid3-hd-row *[cellindex], .x-grid3-header *[cellindex]'
+    ));
     for(var i=0;i<containers.length;i++){
-      var c = containers[i], idx = c.getAttribute('cellindex'); if(!idx) continue;
-      var label = (txt(c) || txt(c.querySelector('.gwt-InlineHTML')) || txt(c.querySelector('.x-grid3-hd-inner'))).toLowerCase();
+      var c = containers[i];
+      var idx = c.getAttribute('cellindex');
+      if(!idx) continue;
+      var label = (txt(c) ||
+                   txt(c.querySelector('.gwt-InlineHTML')) ||
+                   txt(c.querySelector('.x-grid3-hd-inner'))).toLowerCase();
       if(label) set.set(+idx, label);
     }
     return set;
   }
   function sampleRowCells(){
-    var r = rows()[0]; if(!r) return new Map();
-    var map = new Map(); var tds = r.querySelectorAll('td[cellindex]');
+    var r = rows()[0];
+    if(!r) return new Map();
+    var map = new Map();
+    var tds = r.querySelectorAll('td[cellindex]');
     for(var i=0;i<tds.length;i++){
-      var td = tds[i], idx = +td.getAttribute('cellindex');
-      var a = td.querySelector('a'), v = a ? txt(a) : txt(td.querySelector('div') || td);
+      var td = tds[i];
+      var idx = +td.getAttribute('cellindex');
+      var a = td.querySelector('a');
+      var v = a ? txt(a) : txt(td.querySelector('div') || td);
       map.set(idx, v);
     }
     return map;
   }
 
-  // Heuristic, detect current Ticket column index
+  // Ticket column detection (only for smart prefill)
   function detectTicketIndex(){
-    // 1) header match
     var headers = headerCells();
     var found = null;
     headers.forEach(function(label, idx){
-      if(/ticket/.test(label)) { found = found == null ? idx : found; }
+      if(/ticket/.test(label)){
+        if(found == null) found = idx;
+      }
     });
     if(found != null) return found;
 
-    // 2) numeric link majority across first few rows
-    var rws = rows(); var counts = {}; var limit = Math.min(rws.length, 8);
+    var rws = rows();
+    var counts = {};
+    var limit = Math.min(rws.length, 8);
     for(var i=0;i<limit;i++){
       var r = rws[i];
       var tds = r.querySelectorAll('td[cellindex]');
@@ -139,74 +232,210 @@
           var id = txt(a);
           if(/^\d{5,}$/.test(id)){
             var idx = +td.getAttribute('cellindex');
-            counts[idx] = (counts[idx]||0) + 1;
+            counts[idx] = (counts[idx] || 0) + 1;
           }
         }
       }
     }
     var bestIdx = null, bestCnt = 0;
-    for(var k in counts){ if(counts.hasOwnProperty(k)){ if(counts[k] > bestCnt){ bestCnt = counts[k]; bestIdx = +k; } } }
-    if(bestCnt >= 2) return bestIdx; // at least two rows agreed
+    for(var k in counts){
+      if(counts.hasOwnProperty(k)){
+        if(counts[k] > bestCnt){
+          bestCnt = counts[k];
+          bestIdx = +k;
+        }
+      }
+    }
+    if(bestCnt >= 2) return bestIdx;
     return null;
   }
 
+  // Status column detection (fallback)
+  function detectStatusIndex(){
+    var headers = headerCells();
+    var found = null;
+    headers.forEach(function(label, idx){
+      if(/status/.test(label)){
+        if(found == null) found = idx;
+      }
+    });
+    return found;
+  }
+
+  // Resource column detection (fallback)
+  function detectResourceIndex(){
+    var headers = headerCells();
+    var found = null;
+    headers.forEach(function(label, idx){
+      if(/resource/.test(label)){
+        if(found == null) found = idx;
+      }
+    });
+    return found;
+  }
+
   // ---------- priority detection
-  function parseRgb(s){ var m = /rgba?\s*\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)/.exec(s||''); return m ? {r:+m[1], g:+m[2], b:+m[3]} : {r:0,g:0,b:0}; }
-  function isBlack(r,g,b){ return r<40&&g<40&&b<40; } function isRed(r,g,b){ return r>150&&g<110&&b<110; }
-  function isOrange(r,g,b){ return r>200&&g>110&&g<200&&b<90; } function isYellow(r,g,b){ return r>200&&g>200&&b<140; } function isBlue(r,g,b){ return b>140&&r<120&&g<190; }
-  function dot(pr){ return pr==='P0'?'⚫️':pr==='P1'?'🔴':pr==='P2'?'🟠':pr==='P4'?'🔵':'🟡'; }
+  function parseRgb(s){
+    var m = /rgba?\s*\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)/.exec(s||'');
+    return m ? {r:+m[1], g:+m[2], b:+m[3]} : {r:0,g:0,b:0};
+  }
+  function isBlack(r,g,b){ return r<40&&g<40&&b<40; }
+  function isRed(r,g,b){ return r>150&&g<110&&b<110; }
+  function isOrange(r,g,b){ return r>200&&g>110&&g<200&&b<90; }
+  function isYellow(r,g,b){ return r>200&&g>200&&b<140; }
+  function isBlue(r,g,b){ return b>140&&r<120&&g<190; }
+
+  function dot(pr){
+    return pr==='P0'?'⚫️':
+           pr==='P1'?'🔴':
+           pr==='P2'?'🟠':
+           pr==='P4'?'🔵':
+           pr==='PM'?'Ⓜ️':
+           '🟡';
+  }
+
+  var PRIORITY_LABELS = {
+    P0: 'P0 Flash Critical',
+    P1: 'P1 Critical',
+    P2: 'P2 High',
+    P3: 'P3 Medium',
+    P4: 'P4 Low',
+    PM: 'Maintenance'
+  };
 
   function extractDataUrlFromNode(n){
     if(!n) return '';
-    function pick(s){ return (s||'').replace(/^.*url\(["']?/, '').replace(/["']?\).*$/, ''); }
+    function pick(s){
+      return (s||'').replace(/^.*url\(["']?/, '').replace(/["']?\).*$/, '');
+    }
     var inline = (n.style && (n.style.background || n.style.backgroundImage)) || '';
     var url = /url\(/.test(inline) ? pick(inline) : '';
-    if(!url){ var cs = getComputedStyle(n); if(/url\(/.test(cs.backgroundImage||'')) url = pick(cs.backgroundImage); }
+    if(!url){
+      var cs = getComputedStyle(n);
+      if(/url\(/.test(cs.backgroundImage||'')) url = pick(cs.backgroundImage);
+    }
     return /^data:image/.test(url) ? url : '';
   }
+
   function sampleDataUrl(url){
     return new Promise(function(res){
       if(!url) return res(null);
-      var img=new Image();
-      img.onload=function(){ try{ var c=document.createElement('canvas'); c.width=img.naturalWidth||16; c.height=img.naturalHeight||16;
-        var g=c.getContext('2d'); g.drawImage(img,0,0); var d=g.getImageData(Math.floor(c.width/2),Math.floor(c.height/2),1,1).data; res({r:d[0],g:d[1],b:d[2]}); }catch(e){ res(null); } };
-      img.onerror=function(){ res(null); }; img.src=url;
+      var img = new Image();
+      img.onload = function(){
+        try{
+          var c = document.createElement('canvas');
+          c.width = img.naturalWidth || 16;
+          c.height = img.naturalHeight || 16;
+          var g = c.getContext('2d');
+          g.drawImage(img,0,0);
+          var d = g.getImageData(Math.floor(c.width/2),Math.floor(c.height/2),1,1).data;
+          res({r:d[0],g:d[1],b:d[2]});
+        }catch(e){
+          res(null);
+        }
+      };
+      img.onerror = function(){ res(null); };
+      img.src = url;
     });
   }
+
   function readPriorityFromCell(td){
     return new Promise(function(resolve){
       if(!td) return resolve('P3');
       var node = td.querySelector('img') || td.firstElementChild || td;
       var url = extractDataUrlFromNode(node);
+
+      // Maintenance explicit detection via data URI
+      if(url && url.indexOf(MAINT_DATA_PREFIX) === 0){
+        resolve('PM');
+        return;
+      }
+
       if(url){
         sampleDataUrl(url).then(function(rgb){
-          if(rgb){ var r=rgb.r,g=rgb.g,b=rgb.b;
-            if(isBlack(r,g,b)) return resolve('P0'); if(isRed(r,g,b)) return resolve('P1'); if(isOrange(r,g,b)) return resolve('P2');
-            if(isYellow(r,g,b)) return resolve('P3'); if(isBlue(r,g,b)) return resolve('P4'); }
+          if(rgb){
+            var r = rgb.r, g = rgb.g, b = rgb.b;
+            if(isBlack(r,g,b)) return resolve('P0');
+            if(isRed(r,g,b))   return resolve('P1');
+            if(isOrange(r,g,b))return resolve('P2');
+            if(isYellow(r,g,b))return resolve('P3');
+            if(isBlue(r,g,b))  return resolve('P4');
+          }
           fallback();
         });
-      } else { fallback(); }
+      }else{
+        fallback();
+      }
       function fallback(){
-        var hint=(td.title||'').toUpperCase()||txt(td).toUpperCase();
-        var m=/\bP([0-4])\b/.exec(hint); if(m) return resolve('P'+m[1]);
-        var rgb=parseRgb(getComputedStyle(node).color); var r=rgb.r,g=rgb.g,b=rgb.b;
-        if(isBlack(r,g,b)) return resolve('P0'); if(isRed(r,g,b)) return resolve('P1'); if(isOrange(r,g,b)) return resolve('P2');
-        if(isYellow(r,g,b)) return resolve('P3'); if(isBlue(r,g,b)) return resolve('P4'); resolve('P3');
+        var hint = (td.title||'').toUpperCase() || txt(td).toUpperCase();
+        var m = /\bP([0-4])\b/.exec(hint);
+        if(m) return resolve('P'+m[1]);
+        var rgb = parseRgb(getComputedStyle(node).color);
+        var r = rgb.r, g = rgb.g, b = rgb.b;
+        if(isBlack(r,g,b)) return resolve('P0');
+        if(isRed(r,g,b))   return resolve('P1');
+        if(isOrange(r,g,b))return resolve('P2');
+        if(isYellow(r,g,b))return resolve('P3');
+        if(isBlue(r,g,b))  return resolve('P4');
+        resolve('P3');
       }
     });
+  }
+
+  // ---------- status helpers for overview
+  var UNASSIGNED_LABEL = 'Unassigned';
+  var UNASSIGNED_RAW = [
+    'New',
+    'New (email)',
+    'MUST ASSIGN',
+    'MUST ASSIGN - Acknowledged'
+  ];
+  function isUnassignedStatus(s){
+    if(!s) return false;
+    var norm = s.replace(/\s+/g,' ').trim().toLowerCase();
+    return norm === 'new' ||
+           norm === 'new (email)' ||
+           norm === 'must assign' ||
+           norm === 'must assign - acknowledged';
+  }
+  function isClientHasResponded(s){
+    if(!s) return false;
+    return s.replace(/\s+/g,' ').trim().toLowerCase() === 'client has responded';
   }
 
   // ---------- setup panel
   function ensurePanel(columns, samples, savedForView) {
     var host = document.getElementById(PANEL_ID);
-    if(!host){ host=document.createElement('div'); host.id=PANEL_ID; host.style.all='initial'; host.style.position='fixed'; host.style.top='72px'; host.style.right='16px'; host.style.zIndex=2147483645; document.body.appendChild(host);
-      var root=host.attachShadow({mode:'open'}); var wrap=document.createElement('div');
+    if(!host){
+      host = document.createElement('div');
+      host.id = PANEL_ID;
+      host.style.all='initial';
+      host.style.position='fixed';
+      host.style.top='72px';
+      host.style.right='16px';
+      host.style.zIndex=2147483645;
+      document.body.appendChild(host);
+
+      var root = host.attachShadow({mode:'open'});
+      var wrap = document.createElement('div');
       wrap.innerHTML =
         '<style>\
           :host { all: initial; }\
-          @media (prefers-color-scheme: dark) { .card { background:#0b0f17; color:#e5e7eb; border-color:#1f2937; } select, textarea { background:#0f172a; color:#e5e7eb; border-color:#334155; } .hdr { background:#111827; color:#e5e7eb; } .btn { background:#1f2937; color:#e5e7eb; border-color:#334155; } .btn.primary { background:#2563eb; color:white; border-color:#1d4ed8; } }\
-          @media (prefers-color-scheme: light) { .card { background:#fff; color:#111; border-color:rgba(0,0,0,.08); } select, textarea { background:white; color:#111; border-color:#cbd5e1; } .hdr { background:#0f172a; color:#fff; } .btn { background:#f1f5f9; color:#111; border-color:#cbd5e1; } .btn.primary { background:#1f73b7; color:white; border-color:#1b659f; } }\
-          .card { font:13px system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; width:420px; border:1px solid; border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,.22); overflow:hidden; }\
+          @media (prefers-color-scheme: dark) {\
+            .card { background:#0b0f17; color:#e5e7eb; border-color:#1f2937; }\
+            select, textarea { background:#0f172a; color:#e5e7eb; border-color:#334155; }\
+            .hdr { background:#111827; color:#e5e7eb; }\
+            .btn { background:#1f2937; color:#e5e7eb; border-color:#334155; }\
+            .btn.primary { background:#2563eb; color:white; border-color:#1d4ed8; }\
+          }\
+          @media (prefers-color-scheme: light) {\
+            .card { background:#fff; color:#111; border-color:rgba(0,0,0,.08); }\
+            select, textarea { background:white; color:#111; border-color:#cbd5e1; }\
+            .hdr { background:#0f172a; color:#fff; }\
+            .btn { background:#f1f5f9; color:#111; border-color:#cbd5e1; }\
+            .btn.primary { background:#1f73b7; color:white; border-color:#1b659f; }\
+          }\
+          .card { font:13px system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; width:460px; border:1px solid; border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,.22); overflow:hidden; }\
           .hdr { padding:10px 12px; font-weight:700; display:flex; justify-content:space-between; align-items:center; }\
           .body{ padding:10px 12px; }\
           .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:8px 0; }\
@@ -216,6 +445,7 @@
           .actions { display:flex; gap:8px; justify-content:flex-end; margin-top:12px; }\
           .btn { border:1px solid; border-radius:10px; padding:6px 12px; cursor:pointer; }\
           .viewtag { font-size:12px; opacity:.8; border:1px solid; padding:2px 8px; border-radius:999px; }\
+          .hint { font-size:11px; opacity:.7; margin-top:4px; }\
         </style>\
         <div class="card" role="dialog" aria-label="Teams shoutout setup">\
           <div class="hdr"><div>Teams shoutout setup</div><div class="viewtag" id="viewtag"></div></div>\
@@ -230,8 +460,13 @@
             </div>\
             <div class="row">\
               <div><label>Contact column</label><select id="col-cont"></select></div>\
+              <div><label>Status column (for overview)</label><select id="col-status"></select></div>\
+            </div>\
+            <div class="row">\
+              <div><label>Resource column (for responses)</label><select id="col-resource"></select></div>\
               <div></div>\
             </div>\
+            <div class="hint">Status is only used for the Ctrl+Click overview. Resource is only used for the "Tickets with Responses" section.</div>\
             <div style="margin-top:10px;">\
               <label>Preview</label>\
               <textarea id="preview" readonly></textarea>\
@@ -242,22 +477,32 @@
             </div>\
           </div>\
         </div>';
-      root.appendChild(wrap); host._root = root; }
-    var root = host._root; var $ = function(sel){ return root.querySelector(sel); };
+      root.appendChild(wrap);
+      host._root = root;
+    }
+
+    var root = host._root;
+    var $ = function(sel){ return root.querySelector(sel); };
     $('#viewtag').textContent = readViewExact();
 
-    var cols = columns, samp = samples;
+    var cols = columns;
+    var samp = samples;
+
     function buildOptions(sel, selectedIdx){
-      var s = $(sel); s.innerHTML = '';
+      var s = $(sel);
+      s.innerHTML = '';
       var entries = [];
       cols.forEach(function(label, idx){ entries.push({idx:idx, label:label}); });
-      samp.forEach(function(val, idx){ if(!cols.has(idx)) entries.push({idx:idx, label:'(no header)'}); });
+      samp.forEach(function(val, idx){
+        if(!cols.has(idx)) entries.push({idx:idx, label:'(no header)'});
+      });
       entries.sort(function(a,b){ return a.idx - b.idx; });
       for(var i=0;i<entries.length;i++){
-        var it=entries[i], sample = samp.get(it.idx) || '';
-        var o=document.createElement('option');
-        o.value=String(it.idx);
-        o.textContent = '#' + it.idx + ' — ' + (it.label||'(no header)') + '  •  ' + (sample ? sample.slice(0,60) : '');
+        var it = entries[i];
+        var sample = samp.get(it.idx) || '';
+        var o = document.createElement('option');
+        o.value = String(it.idx);
+        o.textContent = '#' + it.idx + ' - ' + (it.label||'(no header)') + '  •  ' + (sample ? sample.slice(0,60) : '');
         if(String(it.idx) === String(selectedIdx)) o.selected = true;
         s.appendChild(o);
       }
@@ -268,41 +513,88 @@
     buildOptions('#col-sum',    savedForView && savedForView.summary);
     buildOptions('#col-comp',   savedForView && savedForView.company);
     buildOptions('#col-cont',   savedForView && savedForView.contact);
+    buildOptions(
+      '#col-status',
+      savedForView && typeof savedForView.status === 'number'
+        ? savedForView.status
+        : detectStatusIndex()
+    );
+    buildOptions(
+      '#col-resource',
+      savedForView && typeof savedForView.resource === 'number'
+        ? savedForView.resource
+        : detectResourceIndex()
+    );
 
-    function readSel(){ return {
-      ticket:+root.getElementById('col-ticket').value,
-      priority:+root.getElementById('col-prio').value,
-      summary:+root.getElementById('col-sum').value,
-      company:+root.getElementById('col-comp').value,
-      contact:+root.getElementById('col-cont').value
-    }; }
+    function readSel(){
+      return {
+        ticket:+root.getElementById('col-ticket').value,
+        priority:+root.getElementById('col-prio').value,
+        summary:+root.getElementById('col-sum').value,
+        company:+root.getElementById('col-comp').value,
+        contact:+root.getElementById('col-cont').value,
+        status:+root.getElementById('col-status').value,
+        resource:+root.getElementById('col-resource').value
+      };
+    }
 
     function refreshPreview(){
       try{
-        var sel = readSel(), r = rows()[0], pv = root.getElementById('preview');
-        if(!r){ pv.value = 'No rows to preview.'; return; }
-        function get(i){ var td=r.querySelector('td[cellindex="' + i + '"]'); if(!td) return ''; var a=td.querySelector('a'); return a ? txt(a) : txt(td.querySelector('div')||td); }
-        var ticket = get(sel.ticket), summary = stripSLA(get(sel.summary)), company = stripSLA(get(sel.company)), contact = stripSLA(get(sel.contact));
+        var sel = readSel();
+        var r = rows()[0];
+        var pv = root.getElementById('preview');
+        if(!r){
+          pv.value = 'No rows to preview.';
+          return;
+        }
+        function get(i){
+          var td = r.querySelector('td[cellindex="' + i + '"]');
+          if(!td) return '';
+          var a = td.querySelector('a');
+          return a ? txt(a) : txt(td.querySelector('div')||td);
+        }
+        var ticket = get(sel.ticket);
+        var summary = stripSLA(get(sel.summary));
+        var company = stripSLA(get(sel.company));
+        var contact = stripSLA(get(sel.contact));
         readPriorityFromCell(r.querySelector('td[cellindex="' + sel.priority + '"]')).then(function(pr){
           var url = ticket ? ticketUrl(ticket) : '';
-          pv.value = dot(pr) + ' #' + ticket + ' — ' + summary + ' — ' + company + (contact ? ' — ' + contact : '') + (url ? ' ('+url+')' : '');
+          pv.value = dot(pr) + ' #' + ticket + ' - ' + summary +
+                     (company ? ' - ' + company : '') +
+                     (contact ? ' - ' + contact : '') +
+                     (url ? ' ('+url+')' : '');
         });
-      }catch(e){ console.error('[teams-shoutout] preview error', e); }
+      }catch(e){
+        console.error('[teams-shoutout] preview error', e);
+      }
     }
 
     root.getElementById('save').onclick = function(){
       var sel = readSel();
       getSettings().then(function(all){
-        var ex = keyExact(), ca = keyCanonical();
-        all[ex] = sel; all[ca] = sel;
+        var ex = keyExact();
+        var ca = keyCanonical();
+        all[ex] = sel;
+        all[ca] = sel;
         return setSettings(all);
-      }).then(function(){ toast('Saved mapping for this View'); var el=document.getElementById(PANEL_ID); if(el) el.remove(); })
-        .catch(function(e){ console.error('[teams-shoutout] save error', e); toast('Save failed'); });
+      }).then(function(){
+        toast('Saved mapping for this View');
+        var el = document.getElementById(PANEL_ID);
+        if(el) el.remove();
+      }).catch(function(e){
+        console.error('[teams-shoutout] save error', e);
+        toast('Save failed');
+      });
     };
-    root.getElementById('close').onclick = function(){ var el=document.getElementById(PANEL_ID); if(el) el.remove(); };
+    root.getElementById('close').onclick = function(){
+      var el = document.getElementById(PANEL_ID);
+      if(el) el.remove();
+    };
 
     refreshPreview();
-    ['#col-ticket','#col-prio','#col-sum','#col-comp','#col-cont'].forEach(function(id){ root.querySelector(id).addEventListener('change', refreshPreview); });
+    ['#col-ticket','#col-prio','#col-sum','#col-comp','#col-cont','#col-status','#col-resource'].forEach(function(id){
+      root.querySelector(id).addEventListener('change', refreshPreview);
+    });
   }
 
   // ---------- clipboard
@@ -310,103 +602,314 @@
     return new Promise(function(res){
       try{
         if(navigator.clipboard && window.ClipboardItem){
-          var item=new ClipboardItem({'text/html':new Blob([html],{type:'text/html'}),'text/plain':new Blob([text],{type:'text/plain'})});
-          navigator.clipboard.write([item]).then(function(){ res(true); }).catch(function(){ legacy(); });
+          var item = new ClipboardItem({
+            'text/html':new Blob([html],{type:'text/html'}),
+            'text/plain':new Blob([text],{type:'text/plain'})
+          });
+          navigator.clipboard.write([item]).then(function(){
+            res(true);
+          }).catch(function(){
+            legacy();
+          });
           return;
         }
       }catch(e){}
       try{
-        if(typeof GM_setClipboard === 'function'){ GM_setClipboard(html,{type:'text/html'}); return res(true); }
-        if(typeof GM !== 'undefined' && typeof GM.setClipboard === 'function'){ GM.setClipboard(html,{type:'text/html'}); return res(true); }
+        if(typeof GM_setClipboard === 'function'){
+          GM_setClipboard(html,{type:'text/html'});
+          return res(true);
+        }
+        if(typeof GM !== 'undefined' && typeof GM.setClipboard === 'function'){
+          GM.setClipboard(html,{type:'text/html'});
+          return res(true);
+        }
       }catch(e){}
       legacy();
-      function legacy(){ try{ navigator.clipboard.writeText(text).then(function(){ res(true); }).catch(domCopy); }catch(e){ domCopy(); } }
-      function domCopy(){ try{ var ta=document.createElement('textarea'); ta.value=text; ta.style.position='fixed'; ta.style.left='-9999px'; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); res(true); }catch(e2){ res(false); } }
+      function legacy(){
+        try{
+          navigator.clipboard.writeText(text).then(function(){
+            res(true);
+          }).catch(domCopy);
+        }catch(e){
+          domCopy();
+        }
+      }
+      function domCopy(){
+        try{
+          var ta = document.createElement('textarea');
+          ta.value = text;
+          ta.style.position='fixed';
+          ta.style.left='-9999px';
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          ta.remove();
+          res(true);
+        }catch(e2){
+          res(false);
+        }
+      }
     });
   }
 
-// Replace your existing copyWithMapping with this version
-function copyWithMapping(map, onlyHigh){
-  if(onlyHigh == null) onlyHigh = false;
-  try{
-    var rws = rows(); if(!rws.length){ toast('No rows'); return; }
-
-    var items = [];
-    (function step(i){
-      if(i >= rws.length){
-        // Build HTML, headline + entries with indented meta line
-       // Replace only the HTML-build section inside copyWithMapping
-var htmlParts = ['<strong>Tickets needing attention (' + items.length + ')</strong>','<br><br>'];
-for (var k = 0; k < items.length; k++) {
-  var it = items[k];
-  var metaPieces = [];
-  if (it.company) metaPieces.push(esc(it.company));
-  if (it.contact) metaPieces.push(esc(it.contact));
-
-  // Use a visible indent marker so Teams won't collapse it
-  var meta = metaPieces.length ? ('ㅤ <i>' + metaPieces.join(' — ') + '</i>') : '';
-
-  htmlParts.push(
-    it.dot + ' <a href="' + it.url + '">#' + it.ticket + '</a> <u>' + esc(it.summary) + '</u><br>' +
-    meta
-  );
-  if (k !== items.length - 1) htmlParts.push('<br><br>');
-}
-var html = htmlParts.join('');
-
-
-        // Plain text fallback mirrors spacing, with a simple indent on meta
-        var plainLines = ['Tickets needing attention (' + items.length + ')',''];
-        for(var p=0; p<items.length; p++){
-          var it2 = items[p];
-          plainLines.push(it2.dot + ' #' + it2.ticket + ' ' + it2.summary + ' (' + it2.url + ')');
-          var metaTxt = [];
-          if(it2.company) metaTxt.push(it2.company);
-          if(it2.contact) metaTxt.push(it2.contact);
-          if(metaTxt.length) plainLines.push('ㅤ ' + metaTxt.join(' — '));
-
-          if(p !== items.length - 1) plainLines.push('');
-        }
-        var plain = plainLines.join('\n');
-
-        writeBoth(html, plain).then(function(ok){
-          toast(ok ? ('Copied ' + items.length + ' entr' + (items.length===1?'y':'ies')) : 'Copy failed');
-        });
+  // ---------- shoutout copy (per ticket list)
+  function copyWithMapping(map, onlyHigh){
+    if(onlyHigh == null) onlyHigh = false;
+    try{
+      var rws = rows();
+      if(!rws.length){
+        toast('No rows');
         return;
       }
 
-      var r = rws[i];
-      var ticket = valFromCell(r, map.ticket);
-      if(!ticket || !isTicketId(ticket)) { step(i+1); return; }
+      var items = [];
+      (function step(i){
+        if(i >= rws.length){
+          var htmlParts = ['<strong>Tickets needing attention (' + items.length + ')</strong>','<br><br>'];
+          for(var k=0;k<items.length;k++){
+            var it = items[k];
+            var metaPieces = [];
+            if(it.company) metaPieces.push(esc(it.company));
+            if(it.contact) metaPieces.push(esc(it.contact));
+            var meta = metaPieces.length ? ('ㅤ <i>' + metaPieces.join(' - ') + '</i>') : '';
+            htmlParts.push(
+              it.dot + ' <a href="' + it.url + '">#' + it.ticket + '</a> <u>' + esc(it.summary) + '</u><br>' +
+              meta
+            );
+            if(k !== items.length - 1) htmlParts.push('<br><br>');
+          }
+          var html = htmlParts.join('');
 
-      var summary = stripSLA(valFromCell(r, map.summary));
-      var company = stripSLA(valFromCell(r, map.company));
-      var contact = stripSLA(valFromCell(r, map.contact));
+          var plainLines = ['Tickets needing attention (' + items.length + ')',''];
+          for(var p=0;p<items.length;p++){
+            var it2 = items[p];
+            plainLines.push(it2.dot + ' #' + it2.ticket + ' ' + it2.summary + ' (' + it2.url + ')');
+            var metaTxt = [];
+            if(it2.company) metaTxt.push(it2.company);
+            if(it2.contact) metaTxt.push(it2.contact);
+            if(metaTxt.length) plainLines.push('ㅤ ' + metaTxt.join(' - '));
+            if(p !== items.length - 1) plainLines.push('');
+          }
+          var plain = plainLines.join('\n');
 
-      readPriorityFromCell(tdByIndex(r, map.priority)).then(function(pr){
-        if(onlyHigh && !/^P[0-2]$/.test(pr)) { step(i+1); return; }
-        items.push({
-          dot: dot(pr),
-          ticket: ticket,
-          url: ticketUrl(ticket),
-          summary: summary,
-          company: company,
-          contact: contact
+          writeBoth(html, plain).then(function(ok){
+            toast(ok ? ('Copied ' + items.length + ' entr' + (items.length===1?'y':'ies')) : 'Copy failed');
+          });
+          return;
+        }
+
+        var r = rws[i];
+        var ticket = valFromCell(r, map.ticket);
+        if(!ticket || !isTicketId(ticket)){
+          step(i+1);
+          return;
+        }
+
+        var summary = stripSLA(valFromCell(r, map.summary));
+        var company = stripSLA(valFromCell(r, map.company));
+        var contact = stripSLA(valFromCell(r, map.contact));
+
+        readPriorityFromCell(tdByIndex(r, map.priority)).then(function(pr){
+          if(onlyHigh && !/^P[0-2]$/.test(pr)){
+            step(i+1);
+            return;
+          }
+          items.push({
+            dot: dot(pr),
+            ticket: ticket,
+            url: ticketUrl(ticket),
+            summary: summary,
+            company: company,
+            contact: contact
+          });
+          step(i+1);
         });
-        step(i+1);
-      });
-    })(0);
-  }catch(e){
-    console.error('[teams-shoutout] copy error', e);
-    toast('Copy error, see console');
+      })(0);
+    }catch(e){
+      console.error('[teams-shoutout] copy error', e);
+      toast('Copy error, see console');
+    }
   }
-}
 
+  // ---------- overview copy: table of unassigned + tickets-with-responses
+  function copyOverview(map){
+    try{
+      var rws = rows();
+      if(!rws.length){
+        toast('No rows');
+        return;
+      }
+
+      var statusIdx = (map && typeof map.status === 'number' && !isNaN(map.status))
+        ? map.status
+        : detectStatusIndex();
+
+      var resourceIdx = (map && typeof map.resource === 'number' && !isNaN(map.resource))
+        ? map.resource
+        : null;
+
+      if(resourceIdx == null){
+        toast('Resource column not mapped, open setup');
+        return;
+      }
+
+      var buckets = {};   // { P2: { unassigned: n } }
+      var responses = {}; // { resourceName: count } for Client Has Responded
+      var jobs = [];
+
+      rws.forEach(function(r){
+        var prCell = tdByIndex(r, map.priority);
+        var statusRaw = statusIdx != null ? valFromCell(r, statusIdx) : '';
+        var statusNorm = statusRaw.replace(/\s+/g,' ').trim();
+
+        var resource = valFromCell(r, resourceIdx) || '';
+        resource = resource.replace(/\s+/g,' ').trim();
+
+        var job = readPriorityFromCell(prCell).then(function(pr){
+          var b = buckets[pr] || (buckets[pr] = { unassigned:0 });
+
+          // unassigned tickets = no resource, any status
+          if(!resource){
+            b.unassigned++;
+          }
+
+          // tickets with responses (Client Has Responded), by resource (blank => Unassigned)
+          if(isClientHasResponded(statusNorm)){
+            var key = resource || 'Unassigned';
+            responses[key] = (responses[key] || 0) + 1;
+          }
+        });
+        jobs.push(job);
+      });
+
+      Promise.all(jobs).then(function(){
+        // total = total unassigned tickets across all priorities
+        var totalUnassigned = 0;
+        Object.keys(buckets).forEach(function(pr){
+          totalUnassigned += buckets[pr].unassigned;
+        });
+
+        var activePriorities = PRIORITY_ORDER.filter(function(pr){
+          return buckets[pr] && buckets[pr].unassigned > 0;
+        });
+
+        if(!activePriorities.length && !Object.keys(responses).length){
+          toast('No unassigned tickets or responses to report');
+          return;
+        }
+
+        // build HTML
+        var htmlParts = [
+          '<strong>HD Board Health Update</strong>',
+          totalUnassigned ? ' (' + totalUnassigned + ' unassigned)' : '',
+          '<br><br>'
+        ];
+
+        if(activePriorities.length){
+          htmlParts.push('<table cellpadding="4" cellspacing="0" border="1">');
+          htmlParts.push('<thead><tr><th>Priority</th><th>Unassigned tickets</th></tr></thead><tbody>');
+          activePriorities.forEach(function(pr){
+            var b = buckets[pr];
+            var label = PRIORITY_LABELS[pr] || pr;
+            htmlParts.push(
+              '<tr><td>' + dot(pr) + ' ' + esc(label) + '</td><td>' +
+              String(b.unassigned) + '</td></tr>'
+            );
+          });
+          htmlParts.push('</tbody></table>');
+        }
+
+        // Tickets with Responses section
+        var responseKeys = Object.keys(responses);
+        if(responseKeys.length){
+          if(activePriorities.length) htmlParts.push('<br><br>');
+          htmlParts.push('<strong>Tickets with Responses</strong><br><br>');
+
+          // Unassigned first, then others alpha
+          var orderedRes = [];
+          if(responseKeys.indexOf('Unassigned') !== -1){
+            orderedRes.push('Unassigned');
+          }
+          responseKeys.sort(function(a,b){
+            var aa = a.toLowerCase();
+            var bb = b.toLowerCase();
+            if(aa < bb) return -1;
+            if(aa > bb) return 1;
+            return 0;
+          });
+          responseKeys.forEach(function(k){
+            if(orderedRes.indexOf(k) === -1) orderedRes.push(k);
+          });
+
+          orderedRes.forEach(function(name){
+            var cnt = responses[name] || 0;
+            htmlParts.push('• ' + esc(name) + ', ' + cnt + '<br>');
+          });
+        }
+
+        var html = htmlParts.join('');
+
+        // plain text fallback
+        var plainLines = [];
+        plainLines.push(
+          'HD Board Health Update' +
+          (totalUnassigned ? ' (' + totalUnassigned + ' unassigned)' : '')
+        );
+        plainLines.push('');
+
+        if(activePriorities.length){
+          plainLines.push('Priority vs Unassigned');
+          activePriorities.forEach(function(pr){
+            var b = buckets[pr];
+            var label = PRIORITY_LABELS[pr] || pr;
+            plainLines.push(dot(pr) + ' ' + label + ': ' + b.unassigned);
+          });
+        }
+
+        var responseKeys2 = Object.keys(responses);
+        if(responseKeys2.length){
+          if(activePriorities.length) plainLines.push('');
+          plainLines.push('Tickets with Responses');
+          // same ordering as HTML
+          var orderedRes2 = [];
+          if(responseKeys2.indexOf('Unassigned') !== -1){
+            orderedRes2.push('Unassigned');
+          }
+          responseKeys2.sort(function(a,b){
+            var aa = a.toLowerCase();
+            var bb = b.toLowerCase();
+            if(aa < bb) return -1;
+            if(aa > bb) return 1;
+            return 0;
+          });
+          responseKeys2.forEach(function(k){
+            if(orderedRes2.indexOf(k) === -1) orderedRes2.push(k);
+          });
+          orderedRes2.forEach(function(name){
+            var cnt = responses[name] || 0;
+            plainLines.push('  • ' + name + ', ' + cnt);
+          });
+        }
+
+        var plain = plainLines.join('\n');
+
+        writeBoth(html, plain).then(function(ok){
+          toast(ok ? 'Copied HD Board Health Update' : 'Copy failed');
+        });
+      }).catch(function(err){
+        console.error('[teams-shoutout] overview error', err);
+        toast('Overview error, see console');
+      });
+
+    }catch(e){
+      console.error('[teams-shoutout] overview error', e);
+      toast('Overview error, see console');
+    }
+  }
 
 
   // ---------- setup open with smart prefill
   function firstSavedMapping(all){
-    // return first mapping object from settings, or null
     var keys = Object.keys(all || {});
     for(var i=0;i<keys.length;i++){
       var m = all[keys[i]];
@@ -417,11 +920,11 @@ var html = htmlParts.join('');
 
   function openSetup(){
     try{
-      var cols = headerCells(); var samp = sampleRowCells();
+      var cols = headerCells();
+      var samp = sampleRowCells();
       getSettings().then(function(all){
         var existing = all[keyExact()] || all[keyCanonical()];
         if(!existing){
-          // smart prefill, only if Ticket column index matches
           var guessTicket = detectTicketIndex();
           var candidate = firstSavedMapping(all);
           if(candidate && guessTicket != null && +candidate.ticket === +guessTicket){
@@ -430,10 +933,13 @@ var html = htmlParts.join('');
         }
         ensurePanel(cols, samp, existing);
       });
-    }catch(e){ console.error('[teams-shoutout] openSetup error', e); toast('Setup error, see console'); }
+    }catch(e){
+      console.error('[teams-shoutout] openSetup error', e);
+      toast('Setup error, see console');
+    }
   }
 
-  // ---------- toolbar mount in absolute canvas
+  // ---------- toolbar mount
   function findToolbarCanvas() {
     var canvas = document.querySelector('.x-panel-toolbar .GMDB3DUBHYI .GMDB3DUBALJ') ||
                  document.querySelector('.GMDB3DUBHYI .GMDB3DUBALJ') ||
@@ -474,13 +980,18 @@ var html = htmlParts.join('');
 
     var existing = document.getElementById(BTN_ID);
     if(existing && !document.body.contains(existing)) existing = null;
-    if(existing){ positionToolbarButton(existing); return; }
+    if(existing){
+      positionToolbarButton(existing);
+      return;
+    }
 
     var canvas = findToolbarCanvas();
     if (!canvas) return;
 
     var b = document.createElement('button');
-    b.id = BTN_ID; b.type='button'; b.textContent = 'Teams Shoutout';
+    b.id = BTN_ID;
+    b.type='button';
+    b.textContent = 'Teams Shoutout';
     b.className = 'attentus-btn';
     b.style.border = '1px solid #334155';
     b.style.borderRadius = '8px';
@@ -496,33 +1007,62 @@ var html = htmlParts.join('');
     b.addEventListener('click', function(e){
       if(e.altKey){ debugDump(); return; }
       if(e.shiftKey){ openSetup(); return; }
+
+      var wantOverview = e.ctrlKey || e.metaKey;
+
       getSettings().then(function(all){
         var map = all[keyExact()] || all[keyCanonical()];
-        if(!map){ openSetup(); toast('No mapping for this View, opened setup'); return; }
-        copyWithMapping(map, false);
-      }).catch(function(err){ console.error('[teams-shoutout] click path error', err); toast('Click error, see console'); });
+        if(!map){
+          openSetup();
+          toast('No mapping for this View, opened setup');
+          return;
+        }
+        if(wantOverview){
+          copyOverview(map);
+        }else{
+          copyWithMapping(map, false);
+        }
+      }).catch(function(err){
+        console.error('[teams-shoutout] click path error', err);
+        toast('Click error, see console');
+      });
     });
+
     b.addEventListener('contextmenu', function(e){
       e.preventDefault();
       getSettings().then(function(all){
         var map = all[keyExact()] || all[keyCanonical()];
-        if(!map){ openSetup(); toast('No mapping for this View, opened setup'); return; }
+        if(!map){
+          openSetup();
+          toast('No mapping for this View, opened setup');
+          return;
+        }
         copyWithMapping(map, true);
-      }).catch(function(err){ console.error('[teams-shoutout] context path error', err); toast('Click error, see console'); });
+      }).catch(function(err){
+        console.error('[teams-shoutout] context path error', err);
+        toast('Click error, see console');
+      });
     });
 
-    // Reposition on resize or toolbar reflow
-    window.addEventListener('resize', function(){ var btn = document.getElementById(BTN_ID); if(btn) positionToolbarButton(btn); });
+    window.addEventListener('resize', function(){
+      var btn = document.getElementById(BTN_ID);
+      if(btn) positionToolbarButton(btn);
+    });
     var mo = new MutationObserver(function(){
       var btn = document.getElementById(BTN_ID);
       if(btn && isBoard()) positionToolbarButton(btn);
-      if(btn && !isBoard()) { btn.remove(); }
+      if(btn && !isBoard()){
+        btn.remove();
+      }
     });
     mo.observe(canvas, { attributes:true, childList:true, subtree:true });
   }
 
   function debugDump(){
-    var ex = keyExact(), ca = keyCanonical(), vExact = readViewExact(), vCanon = readViewCanonical();
+    var ex = keyExact();
+    var ca = keyCanonical();
+    var vExact = readViewExact();
+    var vCanon = readViewCanonical();
     getSettings().then(function(all){
       console.debug('[teams-shoutout] view exact:', JSON.stringify(vExact));
       console.debug('[teams-shoutout] view canonical:', JSON.stringify(vCanon));
@@ -534,19 +1074,31 @@ var html = htmlParts.join('');
     });
   }
 
-  function init(){ if(!isBoard()) return; ensureButton(); }
+  function init(){
+    if(!isBoard()) return;
+    ensureButton();
+  }
+
   (function boot(){
     var delays = [0, 250, 750, 1500, 2500];
     (function step(i){
       if(i >= delays.length){
         var mo = new MutationObserver(function(){
-          if(!document.getElementById(BTN_ID)){ if(isBoard()) ensureButton(); }
-          else if(!isBoard()){ var x=document.getElementById(BTN_ID); if(x) x.remove(); }
+          if(!document.getElementById(BTN_ID)){
+            if(isBoard()) ensureButton();
+          }else if(!isBoard()){
+            var x = document.getElementById(BTN_ID);
+            if(x) x.remove();
+          }
         });
         mo.observe(document.body, { childList:true, subtree:true });
         return;
       }
-      setTimeout(function(){ init(); step(i+1); }, delays[i]);
+      setTimeout(function(){
+        init();
+        step(i+1);
+      }, delays[i]);
     })(0);
   })();
+
 })();
