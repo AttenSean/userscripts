@@ -26,6 +26,44 @@
   const visible = (el) => !!el && (el.offsetParent !== null || el.getClientRects().length > 0);
   const norm = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
 
+  const TRIAGE_WORKFLOWS = {
+    spam: {
+      buttonLabel: 'Spam/Phishing',
+      confirmationTitle: 'Confirm Spam/Phishing triage',
+      fieldSummary: 'Classify the ticket as Spam/Phishing with Help Desk ownership, Tier 1 handling, Priority 4 urgency, and a normalized contact-aware summary.',
+      mutations: [
+        { field: 'board', value: 'Help Desk' },
+        { field: 'status', value: 'MUST ASSIGN' },
+        { field: 'type', value: 'Email' },
+        { field: 'subtype', value: 'Spam/Phishing' },
+        { field: 'tier', value: 'Tier 1' },
+        { field: 'priority', value: 'Priority 4' },
+        { field: 'summary', valueFrom: 'summaryTemplate' }
+      ],
+      summaryTemplate: ({ contact }) => `Spam/Phishing${contact ? ` (${contact})` : ''}`,
+      postApplyMessage: 'Spam/Phishing fields applied'
+    },
+    junk: {
+      buttonLabel: 'Junk',
+      confirmationTitle: 'Confirm Junk triage',
+      fieldSummary: 'Move the ticket to the Junk board.',
+      mutations: [
+        { field: 'board', value: 'Junk' }
+      ],
+      postApplyMessage: 'Junk fields applied'
+    },
+    cancel: {
+      buttonLabel: 'Closed/Cancelled',
+      confirmationTitle: 'Confirm Closed/Cancelled triage',
+      fieldSummary: 'Close/cancel the ticket and mark Ticket Tier? as N/A - Cancelled Ticket.',
+      mutations: [
+        { field: 'status', value: '>Closed/Cancelled' },
+        { field: 'tier', value: 'N/A - Cancelled Ticket' }
+      ],
+      postApplyMessage: 'Closed/Cancelled fields applied'
+    }
+  };
+
   async function until(fn, { tries = 60, delay = 60 } = {}) {
     for (let i = 0; i < tries; i++) {
       const value = fn();
@@ -221,60 +259,40 @@
     return (input?.value || '').trim();
   }
 
-  const TRIAGE_DEFINITIONS = {
-    junk: {
-      label: 'Junk',
-      draft: 'Triage draft: mark the ticket as Junk.',
-      fields: [
-        { label: 'Board', value: 'Junk', type: 'combo', find: () => findInputBySelectors(['input.cw_serviceBoard']) || findInputByLabel('Board') }
-      ]
-    },
-    cancel: {
-      label: 'Closed/Cancelled',
-      draft: 'Triage draft: close/cancel the ticket and mark Ticket Tier? as N/A - Cancelled Ticket.',
-      fields: [
-        { label: 'Status', value: '>Closed/Cancelled', type: 'combo', find: () => findInputBySelectors(['input.cw_status']) || findInputByLabel('Status') },
-        { label: 'Ticket Tier?', value: 'N/A - Cancelled Ticket', type: 'combo', find: () => findInputByLabel('Ticket Tier?') }
-      ]
-    },
-    spam: {
-      label: 'Spam/Phishing',
-      draft: 'Triage draft: classify the ticket as Spam/Phishing with low SLA/priority and a normalized summary.',
-      fields: [
-        { label: 'Board', value: 'Help Desk', type: 'combo', find: () => findInputBySelectors(['input.cw_serviceBoard']) || findInputByLabel('Board') },
-        { label: 'Status', value: 'MUST ASSIGN', type: 'combo', find: () => findInputBySelectors(['input.cw_status']) || findInputByLabel('Status') },
-        { label: 'Type', value: 'Email', type: 'combo', find: () => findInputBySelectors(['input.cw_type']) || findInputByLabel('Type') },
-        { label: 'Sub-Type', value: 'Spam/Phishing', type: 'combo', find: () => findInputBySelectors(['input.cw_subType']) || findInputByLabel('Sub-Type') || findInputByLabel('Subtype') },
-        { label: 'Ticket Tier?', value: 'Tier 1', type: 'combo', find: () => findInputByLabel('Ticket Tier?') },
-        { label: 'Impact', value: 'Low', type: 'combo', find: () => findInputBySelectors(['input.cw_impact']) || findInputByLabel('Impact') },
-        { label: 'Urgency', value: 'Low', type: 'combo', find: () => findInputBySelectors(['input.cw_urgency']) || findInputByLabel('Urgency') },
-        { label: 'Priority', value: 'Priority 4', type: 'combo', find: () => findInputBySelectors(['input.cw_priority']) || findInputByLabel('Priority') },
-        {
-          label: 'Summary',
-          value: () => {
-            const contact = findContactName();
-            return `Spam/Phishing${contact ? ` (${contact})` : ''}`;
-          },
-          type: 'text',
-          find: findSummaryInput
-        }
-      ]
-    }
+  const TRIAGE_FIELD_RESOLVERS = {
+    board: { label: 'Board', type: 'combo', find: () => findInputBySelectors(['input.cw_serviceBoard']) || findInputByLabel('Board') },
+    status: { label: 'Status', type: 'combo', find: () => findInputBySelectors(['input.cw_status']) || findInputByLabel('Status') },
+    type: { label: 'Type', type: 'combo', find: () => findInputBySelectors(['input.cw_type']) || findInputByLabel('Type') },
+    subtype: { label: 'Sub-Type', type: 'combo', find: () => findInputBySelectors(['input.cw_subType']) || findInputByLabel('Sub-Type') || findInputByLabel('Subtype') },
+    tier: { label: 'Ticket Tier?', type: 'combo', find: () => findInputByLabel('Ticket Tier?') },
+    priority: { label: 'Priority', type: 'combo', find: () => findInputBySelectors(['input.cw_priority']) || findInputByLabel('Priority') },
+    summary: { label: 'Summary', type: 'text', find: findSummaryInput }
   };
 
-  function getTriageDefinition(kind) {
+  function getTriageWorkflow(kind) {
     const key = norm(kind || '').replace(/[^a-z]/g, '');
-    if (key === 'closedcancelled' || key === 'closed' || key === 'cancelled') return TRIAGE_DEFINITIONS.cancel;
-    if (key === 'spamphishing' || key === 'phishing') return TRIAGE_DEFINITIONS.spam;
-    return TRIAGE_DEFINITIONS[key] || null;
+    if (key === 'closedcancelled' || key === 'closed' || key === 'cancelled') return TRIAGE_WORKFLOWS.cancel;
+    if (key === 'spamphishing' || key === 'phishing') return TRIAGE_WORKFLOWS.spam;
+    return TRIAGE_WORKFLOWS[key] || null;
   }
 
-  function buildFieldPlan(definition) {
-    return definition.fields.map(field => {
-      const input = field.find?.() || null;
-      const value = typeof field.value === 'function' ? field.value() : field.value;
+  function resolveMutationValue(workflow, mutation) {
+    if (mutation.valueFrom === 'summaryTemplate') {
+      return workflow.summaryTemplate?.({ contact: findContactName() }) || '';
+    }
+    return typeof mutation.value === 'function' ? mutation.value() : mutation.value;
+  }
+
+  function buildFieldPlan(workflow) {
+    return workflow.mutations.map(mutation => {
+      const field = TRIAGE_FIELD_RESOLVERS[mutation.field];
+      const input = field?.find?.() || null;
+      const value = resolveMutationValue(workflow, mutation);
       return {
         ...field,
+        ...mutation,
+        label: mutation.label || field?.label || mutation.field,
+        type: mutation.type || field?.type || 'combo',
         input,
         value,
         currentValue: input ? (input.value || '').trim() : '',
@@ -308,16 +326,16 @@
   }
 
   async function copyTriage(kind) {
-    const definition = getTriageDefinition(kind);
-    if (!definition) {
+    const workflow = getTriageWorkflow(kind);
+    if (!workflow) {
       toast(`Unknown triage kind: ${kind}`);
       return false;
     }
 
-    const plan = buildFieldPlan(definition);
-    const draft = [definition.draft, '', 'Fields:', describePlan(plan)].join('\n');
+    const plan = buildFieldPlan(workflow);
+    const draft = [workflow.fieldSummary, '', 'Fields:', describePlan(plan)].join('\n');
     const ok = await copyText(draft);
-    toast(ok ? `${definition.label} draft copied` : 'Could not copy draft');
+    toast(ok ? `${workflow.buttonLabel} draft copied` : 'Could not copy draft');
     return ok;
   }
 
@@ -415,15 +433,15 @@
   }
 
   function confirmAndApplyTriage(kind) {
-    const definition = getTriageDefinition(kind);
-    if (!definition) {
+    const workflow = getTriageWorkflow(kind);
+    if (!workflow) {
       toast(`Unknown triage kind: ${kind}`);
       return false;
     }
 
-    const plan = buildFieldPlan(definition);
-    showActionDialog(`Confirm ${definition.label} triage`, {
-      message: 'No ConnectWise fields will change until you choose Apply Fields. This uses only visible UI/DOM automation; Copy Draft Only keeps draft-mode behavior.',
+    const plan = buildFieldPlan(workflow);
+    showActionDialog(workflow.confirmationTitle, {
+      message: `${workflow.fieldSummary} No ConnectWise fields will change until you choose Apply Fields. This uses only visible UI/DOM automation; Copy Draft Only keeps draft-mode behavior.`,
       fields: plan,
       actions: [
         { label: 'Cancel', onClick: () => toast('Triage cancelled') },
@@ -433,7 +451,7 @@
           primary: true,
           onClick: async () => {
             const ok = await applyFieldPlan(plan);
-            toast(ok ? `${definition.label} fields applied` : `${definition.label} apply stopped`);
+            toast(ok ? (workflow.postApplyMessage || `${workflow.buttonLabel} fields applied`) : `${workflow.buttonLabel} apply stopped`);
           }
         }
       ]
@@ -519,9 +537,9 @@
     slot.id = SLOT_ID;
     Object.assign(slot.style, { display: 'inline-flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' });
     slot.append(
-      makeActionButton('att-cw-helpdesk-spam-btn', 'Spam/Phishing', 'Confirm and apply Spam/Phishing triage fields', () => confirmAndApplyTriage('spam')),
-      makeActionButton('att-cw-helpdesk-junk-btn', 'Junk', 'Confirm and apply Junk triage fields', () => confirmAndApplyTriage('junk')),
-      makeActionButton('att-cw-helpdesk-cancel-btn', 'Closed/Cancelled', 'Confirm and apply Closed/Cancelled triage fields', () => confirmAndApplyTriage('cancel'))
+      makeActionButton('att-cw-helpdesk-spam-btn', TRIAGE_WORKFLOWS.spam.buttonLabel, 'Confirm and apply Spam/Phishing triage fields', () => confirmAndApplyTriage('spam')),
+      makeActionButton('att-cw-helpdesk-junk-btn', TRIAGE_WORKFLOWS.junk.buttonLabel, 'Confirm and apply Junk triage fields', () => confirmAndApplyTriage('junk')),
+      makeActionButton('att-cw-helpdesk-cancel-btn', TRIAGE_WORKFLOWS.cancel.buttonLabel, 'Confirm and apply Closed/Cancelled triage fields', () => confirmAndApplyTriage('cancel'))
     );
 
     bar.append(label, slot);
