@@ -24,7 +24,7 @@
   const BAR_ID = 'att-cw-helpdesk-toolkit-bar';
   const SLOT_ID = 'att-cw-helpdesk-toolkit-slot';
   const TRIAGE_MODE_STORAGE_KEY = 'att_hd_triage_mode';
-  const TRIAGE_MODES = new Set(['draftOnly', 'confirmApply']);
+  const TRIAGE_MODES = new Set(['confirmApply']);
   const DEFAULT_TRIAGE_MODE = 'confirmApply';
 
   const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -36,7 +36,8 @@
   const TRIAGE_APPLY_TOOLTIP = [
     'Changes visible ConnectWise fields only after confirmation.',
     'Does not call ConnectWise or ITGlue APIs.',
-    'Does not save until the user chooses Save or Save & Close in the follow-up dialog.'
+    'Triage button clicks only apply fields to the browser UI; saving is offered only in the post-apply dialog.',
+    'No click shortcut will automatically Save & Close.'
   ].join('\n');
 
   const TRIAGE_DRAFT_TOOLTIP = [
@@ -47,7 +48,7 @@
 
   const TRIAGE_WORKFLOWS = {
     spam: {
-      buttonLabel: 'Apply Spam/Phish…',
+      buttonLabel: 'Spam/Phishing…',
       draftLabel: 'Copy Spam Draft',
       confirmationTitle: 'Confirm Spam/Phishing triage',
       fieldSummary: 'Classify the ticket as Spam/Phishing with Help Desk ownership, Tier 1 handling, Priority 4 urgency, and a normalized contact-aware summary.',
@@ -64,7 +65,7 @@
       postApplyMessage: 'Spam/Phishing fields applied'
     },
     junk: {
-      buttonLabel: 'Apply Junk…',
+      buttonLabel: 'Junk…',
       draftLabel: 'Copy Junk Draft',
       confirmationTitle: 'Confirm Junk triage',
       fieldSummary: 'Move the ticket to the Junk board.',
@@ -74,7 +75,7 @@
       postApplyMessage: 'Junk fields applied'
     },
     cancel: {
-      buttonLabel: 'Apply Cancel…',
+      buttonLabel: 'Closed/Cancelled…',
       draftLabel: 'Copy Cancel Draft',
       confirmationTitle: 'Confirm Closed/Cancelled triage',
       fieldSummary: 'Close/cancel the ticket and mark Ticket Tier? as N/A - Cancelled Ticket.',
@@ -188,6 +189,210 @@
     input.blur();
   }
 
+
+  function dispatchAll(input) {
+    if (!input) return;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    input.dispatchEvent(new Event('blur', { bubbles: true }));
+  }
+
+  function setDomInputValue(input, value) {
+    const nativeSetter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value')?.set;
+    if (nativeSetter) nativeSetter.call(input, value);
+    else input.value = value;
+    dispatchAll(input);
+  }
+
+  const CONTACT_CLEAR_GROUPS = [
+    {
+      label: 'Contact',
+      selectors: [
+        'input.cw_contact',
+        'input[aria-label="Contact"]',
+        'input[id*="Contact"][role="combobox"]',
+        'input[name="ContactRecID"]'
+      ]
+    },
+    {
+      label: 'Email',
+      selectors: [
+        'input.cw_emailAddress',
+        'input[aria-label="Email"]',
+        'input[name="EmailAddress"]'
+      ]
+    },
+    {
+      label: 'Phone / Extension',
+      selectors: [
+        'input[aria-label="Phone"]',
+        'input[name="PhoneNumber"]',
+        'input[aria-label*="Ext"]',
+        'input[name*="Ext"]'
+      ],
+      roots: ['.cw_contactPhoneCommunications'],
+      rootInputSelector: 'input'
+    }
+  ];
+
+  const contactSnapshotsByTicket = new Map();
+
+  function describeInput(input) {
+    return input.getAttribute('aria-label')
+      || input.getAttribute('name')
+      || input.id
+      || input.className
+      || input.type
+      || 'input';
+  }
+
+  function getContactClearInputs() {
+    const seen = new Set();
+    const entries = [];
+
+    const addInput = (input, groupLabel) => {
+      if (!input || !('value' in input) || seen.has(input)) return;
+      seen.add(input);
+      entries.push({ input, groupLabel, label: `${groupLabel} (${describeInput(input)})` });
+    };
+
+    for (const group of CONTACT_CLEAR_GROUPS) {
+      for (const selector of group.selectors || []) {
+        $$(selector).forEach(input => addInput(input, group.label));
+      }
+      for (const rootSelector of group.roots || []) {
+        $$(rootSelector).forEach(root => {
+          $$(group.rootInputSelector || 'input', root).forEach(input => addInput(input, group.label));
+        });
+      }
+    }
+
+    return entries;
+  }
+
+  function snapshotContactInfo(entries = getContactClearInputs()) {
+    const ticketId = getTicketId();
+    const snapshot = {
+      ticketId,
+      createdAt: Date.now(),
+      entries: entries.map(entry => ({
+        ...entry,
+        value: String(entry.input.value || ''),
+        found: true
+      }))
+    };
+
+    if (ticketId) contactSnapshotsByTicket.set(ticketId, snapshot);
+    return snapshot;
+  }
+
+  function buildContactClearPlan(entries = getContactClearInputs()) {
+    return entries.map(entry => ({
+      ...entry,
+      found: true,
+      currentValue: String(entry.input.value || ''),
+      value: '(blank)'
+    }));
+  }
+
+  function clearContactInfo(snapshot = snapshotContactInfo()) {
+    let didSomething = false;
+
+    for (const entry of snapshot.entries || []) {
+      const input = entry.input;
+      if (!input || !('value' in input)) continue;
+      if (String(input.value || '') !== '') didSomething = true;
+      setDomInputValue(input, '');
+    }
+
+    if (!didSomething) toast('Contact, email, and phone fields were already blank');
+    return didSomething;
+  }
+
+  async function revertContactInfo(snapshot) {
+    const activeTicketId = getTicketId();
+    const savedSnapshot = snapshot || (activeTicketId ? contactSnapshotsByTicket.get(activeTicketId) : null);
+    if (!savedSnapshot) {
+      toast('No captured contact values found for this ticket');
+      return false;
+    }
+    if (activeTicketId && savedSnapshot.ticketId && savedSnapshot.ticketId !== activeTicketId) {
+      toast('Contact revert stopped: active ticket changed');
+      return false;
+    }
+
+    for (const entry of savedSnapshot.entries || []) {
+      const input = entry.input;
+      if (!input || !('value' in input) || !input.isConnected) {
+        toast(`${entry.label || entry.groupLabel || 'Contact field'} not found for revert`);
+        return false;
+      }
+      setDomInputValue(input, entry.value || '');
+      await sleep(20);
+    }
+    return true;
+  }
+
+  function showPostClearContactDialog(plan, snapshot) {
+    showActionDialog('Contact fields cleared', {
+      message: 'Contact, email, phone, and extension fields were cleared in the visible ConnectWise UI only. The changes are not saved unless you choose Save or Save & Close.',
+      fields: plan,
+      actions: [
+        {
+          label: 'Revert',
+          primary: true,
+          onClick: async () => {
+            const ok = await revertContactInfo(snapshot);
+            toast(ok ? 'Contact values reverted' : 'Contact revert stopped');
+          }
+        },
+        { label: 'Leave Unsaved', onClick: () => toast('Cleared values left unsaved') },
+        {
+          label: 'Save',
+          onClick: async () => {
+            await sleep(120);
+            if (!clickSave()) toast('Save button not found');
+          }
+        },
+        {
+          label: 'Save & Close',
+          onClick: async () => {
+            await sleep(120);
+            if (!clickSaveAndClose()) toast('Save & Close button not found');
+          }
+        }
+      ]
+    });
+  }
+
+  function confirmAndClearContactInfo() {
+    const entries = getContactClearInputs();
+    if (!entries.length) {
+      toast('No contact fields found to clear');
+      return false;
+    }
+
+    const plan = buildContactClearPlan(entries);
+    showActionDialog('Confirm Clear Contact', {
+      message: 'This clears only visible ConnectWise contact, email, phone, and extension fields through DOM events. No ConnectWise or ITGlue APIs are called, and nothing is saved until you use ConnectWise Save controls.',
+      fields: plan,
+      actions: [
+        { label: 'Cancel', onClick: () => toast('Clear Contact cancelled') },
+        {
+          label: 'Clear Contact',
+          primary: true,
+          onClick: () => {
+            const snapshot = snapshotContactInfo(entries);
+            clearContactInfo(snapshot);
+            toast('Contact fields cleared');
+            showPostClearContactDialog(plan, snapshot);
+          }
+        }
+      ]
+    });
+    return true;
+  }
+
   async function commitComboOnElement(input, desiredValue) {
     if (!input || input.disabled || input.readOnly || !visible(input)) return false;
     if (norm(input.value) === norm(desiredValue)) return true;
@@ -234,6 +439,22 @@
 
   function labelText(el) {
     return norm((el?.textContent || '').replace(/[:?]\s*$/, ''));
+  }
+
+  function findUdfInputByLabel(labelTextToFind) {
+    const needle = norm(String(labelTextToFind).replace(/[:?]\s*$/, ''));
+    const rows = $$('.pod-element-row').filter(visible);
+
+    for (const row of rows) {
+      const label = $('.mm_label, .cw_CwLabel, [id$="-label"], label, .gwt-Label', row);
+      const text = labelText(label);
+      if (text && text === needle) {
+        const input = row.querySelector('input.cw_PsaUserDefinedComboBox, input.GMDB3DUBKVH, input:not([type="hidden"]), textarea');
+        if (visible(input)) return input;
+      }
+    }
+
+    return null;
   }
 
   function findInputByLabel(labelTextToFind) {
@@ -317,7 +538,7 @@
     status: { label: 'Status', type: 'combo', find: () => findInputBySelectors(['input.cw_status']) || findInputByLabel('Status') },
     type: { label: 'Type', type: 'combo', find: () => findInputBySelectors(['input.cw_type']) || findInputByLabel('Type') },
     subtype: { label: 'Subtype', type: 'combo', find: () => findInputBySelectors(['input.cw_subType']) || findInputByLabel('Sub-Type') || findInputByLabel('Subtype') },
-    tier: { label: 'Item/Tier', type: 'combo', find: () => findInputByLabel('Ticket Tier?') || findInputByLabel('Item/Tier') },
+    tier: { label: 'Ticket Tier?', type: 'combo', find: () => findUdfInputByLabel('Ticket Tier?') || findInputByLabel('Ticket Tier?') || findInputByLabel('Item/Tier') },
     priority: { label: 'Priority', type: 'combo', find: () => findInputBySelectors(['input.cw_priority']) || findInputByLabel('Priority') },
     summary: { label: 'Summary', type: 'text', find: findSummaryInput }
   };
@@ -348,19 +569,19 @@
   }
 
   function isDraftOnlyMode() {
-    return getTriageMode() === 'draftOnly';
+    return false;
   }
 
   function getTriageButtonLabel(workflow) {
-    return isDraftOnlyMode() ? (workflow.draftLabel || workflow.buttonLabel) : workflow.buttonLabel;
+    return workflow.buttonLabel;
   }
 
   function getTriageButtonTooltip() {
-    return isDraftOnlyMode() ? TRIAGE_DRAFT_TOOLTIP : TRIAGE_APPLY_TOOLTIP;
+    return TRIAGE_APPLY_TOOLTIP;
   }
 
   function handleTriageButton(kind) {
-    return isDraftOnlyMode() ? copyTriage(kind) : confirmAndApplyTriage(kind);
+    return confirmAndApplyTriage(kind);
   }
 
   function resolveMutationValue(workflow, mutation) {
@@ -564,7 +785,7 @@
 
   function showPostApplyDialog(workflow, plan, snapshot) {
     showActionDialog(workflow.postApplyMessage || `${workflow.buttonLabel} fields applied`, {
-      message: 'The field changes are applied in the visible ConnectWise UI only. Choose what to do with the unsaved changes.',
+      message: 'The requested fields have been changed in the browser UI only. They are not saved in ConnectWise until you choose Save or Save & Close here; otherwise you can leave them unsaved or revert them.',
       fields: plan,
       actions: [
         {
@@ -678,7 +899,7 @@
 
     const plan = buildFieldPlan(workflow);
     showActionDialog(workflow.confirmationTitle, {
-      message: `${workflow.fieldSummary} No ConnectWise fields will change until you choose Apply Fields. This uses only visible UI/DOM automation; the copy-draft action keeps draft-mode behavior.`,
+      message: `${workflow.fieldSummary} No ConnectWise fields will change until you choose Apply Fields. This uses only visible UI/DOM automation; Copy Draft only copies this field plan to the clipboard.`,
       fields: plan,
       actions: [
         { label: 'Cancel', onClick: () => toast('Triage cancelled') },
@@ -807,14 +1028,9 @@
     const currentMode = getTriageMode();
     const options = [
       {
-        value: 'draftOnly',
-        title: 'Draft only',
-        description: 'Triage buttons copy drafts to the clipboard only and do not change fields.'
-      },
-      {
         value: 'confirmApply',
         title: 'Confirm and apply',
-        description: 'Triage buttons open the confirmation modal, then apply fields through the visible UI only.'
+        description: 'Triage buttons open the confirmation modal, then apply fields through the visible UI only. Save and Save & Close appear only after fields are applied.'
       }
     ];
 
@@ -890,7 +1106,7 @@
     document.body.appendChild(overlay);
   }
 
-  function makeBar() {
+  function mountTicketTools() {
     const bar = document.createElement('div');
     bar.id = BAR_ID;
     Object.assign(bar.style, {
@@ -920,6 +1136,7 @@
       makeActionButton('att-cw-helpdesk-spam-btn', getTriageButtonLabel(TRIAGE_WORKFLOWS.spam), getTriageButtonTooltip(), () => handleTriageButton('spam')),
       makeActionButton('att-cw-helpdesk-junk-btn', getTriageButtonLabel(TRIAGE_WORKFLOWS.junk), getTriageButtonTooltip(), () => handleTriageButton('junk')),
       makeActionButton('att-cw-helpdesk-cancel-btn', getTriageButtonLabel(TRIAGE_WORKFLOWS.cancel), getTriageButtonTooltip(), () => handleTriageButton('cancel')),
+      makeActionButton('att-cw-helpdesk-clear-contact-btn', 'Clear Contact', 'Clear visible contact, email, phone, and extension fields after confirmation. Does not call ConnectWise or ITGlue APIs.', () => confirmAndClearContactInfo()),
       makeActionButton('att-cw-helpdesk-settings-btn', 'Settings…', `Configure ${TRIAGE_MODE_STORAGE_KEY}`, () => showToolkitSettingsDialog())
     );
 
@@ -937,7 +1154,7 @@
     const pod = findTicketPodRoot();
     const header = pod && findHeaderBlock(pod);
     if (!header) return false;
-    header.insertAdjacentElement('afterend', makeBar());
+    header.insertAdjacentElement('afterend', mountTicketTools());
     return true;
   }
 
@@ -947,17 +1164,20 @@
     getTriageMode,
     setTriageMode,
     showToolkitSettingsDialog,
+    mountTicketTools,
     handleTriageButton,
     snapshotFields,
     applyFieldChanges,
     revertFieldChanges,
+    clearContactInfo,
+    confirmAndClearContactInfo,
+    revertContactInfo,
+    snapshotContactInfo,
     getTicketId,
     commitComboOnElement,
     openPopupAndGetContainer,
     findInputByLabel,
-    showActionDialog,
-    clickSave,
-    clickSaveAndClose
+    showActionDialog
   };
 
   let lastHref = location.href;
