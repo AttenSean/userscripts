@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         attentus-cw-helpdesk-toolkit
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.0.0
+// @version      1.1.0
 // @description  Helpdesk toolkit for ConnectWise ticket triage. Confirms before DOM-only field changes and keeps clipboard draft fallback mode.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
@@ -20,7 +20,7 @@
   const BAR_ID = 'att-cw-helpdesk-toolkit-bar';
   const SLOT_ID = 'att-cw-helpdesk-toolkit-slot';
   const TRIAGE_MODE_STORAGE_KEY = 'att_hd_triage_mode';
-  const TRIAGE_MODES = new Set(['draftOnly', 'confirmApply']);
+  const TRIAGE_MODES = new Set(['confirmApply']);
   const DEFAULT_TRIAGE_MODE = 'confirmApply';
 
   const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -43,7 +43,7 @@
 
   const TRIAGE_WORKFLOWS = {
     spam: {
-      buttonLabel: 'Apply Spam/Phish…',
+      buttonLabel: 'Spam/Phishing…',
       draftLabel: 'Copy Spam Draft',
       confirmationTitle: 'Confirm Spam/Phishing triage',
       fieldSummary: 'Classify the ticket as Spam/Phishing with Help Desk ownership, Tier 1 handling, Priority 4 urgency, and a normalized contact-aware summary.',
@@ -60,7 +60,7 @@
       postApplyMessage: 'Spam/Phishing fields applied'
     },
     junk: {
-      buttonLabel: 'Apply Junk…',
+      buttonLabel: 'Junk…',
       draftLabel: 'Copy Junk Draft',
       confirmationTitle: 'Confirm Junk triage',
       fieldSummary: 'Move the ticket to the Junk board.',
@@ -70,7 +70,7 @@
       postApplyMessage: 'Junk fields applied'
     },
     cancel: {
-      buttonLabel: 'Apply Cancel…',
+      buttonLabel: 'Closed/Cancelled…',
       draftLabel: 'Copy Cancel Draft',
       confirmationTitle: 'Confirm Closed/Cancelled triage',
       fieldSummary: 'Close/cancel the ticket and mark Ticket Tier? as N/A - Cancelled Ticket.',
@@ -232,6 +232,22 @@
     return norm((el?.textContent || '').replace(/[:?]\s*$/, ''));
   }
 
+  function findUdfInputByLabel(labelTextToFind) {
+    const needle = norm(String(labelTextToFind).replace(/[:?]\s*$/, ''));
+    const rows = $$('.pod-element-row').filter(visible);
+
+    for (const row of rows) {
+      const label = $('.mm_label, .cw_CwLabel, [id$="-label"], label, .gwt-Label', row);
+      const text = labelText(label);
+      if (text && text === needle) {
+        const input = row.querySelector('input.cw_PsaUserDefinedComboBox, input.GMDB3DUBKVH, input:not([type="hidden"]), textarea');
+        if (visible(input)) return input;
+      }
+    }
+
+    return null;
+  }
+
   function findInputByLabel(labelTextToFind) {
     const needle = norm(String(labelTextToFind).replace(/[:?]\s*$/, ''));
     const rows = $$('.pod-element-row, tr, .cw_CwFormRow, .form-group, .x-form-item, .GMDB3DUBHGH');
@@ -313,7 +329,7 @@
     status: { label: 'Status', type: 'combo', find: () => findInputBySelectors(['input.cw_status']) || findInputByLabel('Status') },
     type: { label: 'Type', type: 'combo', find: () => findInputBySelectors(['input.cw_type']) || findInputByLabel('Type') },
     subtype: { label: 'Subtype', type: 'combo', find: () => findInputBySelectors(['input.cw_subType']) || findInputByLabel('Sub-Type') || findInputByLabel('Subtype') },
-    tier: { label: 'Item/Tier', type: 'combo', find: () => findInputByLabel('Ticket Tier?') || findInputByLabel('Item/Tier') },
+    tier: { label: 'Ticket Tier?', type: 'combo', find: () => findUdfInputByLabel('Ticket Tier?') || findInputByLabel('Ticket Tier?') || findInputByLabel('Item/Tier') },
     priority: { label: 'Priority', type: 'combo', find: () => findInputBySelectors(['input.cw_priority']) || findInputByLabel('Priority') },
     summary: { label: 'Summary', type: 'text', find: findSummaryInput }
   };
@@ -344,19 +360,19 @@
   }
 
   function isDraftOnlyMode() {
-    return getTriageMode() === 'draftOnly';
+    return false;
   }
 
   function getTriageButtonLabel(workflow) {
-    return isDraftOnlyMode() ? (workflow.draftLabel || workflow.buttonLabel) : workflow.buttonLabel;
+    return workflow.buttonLabel;
   }
 
   function getTriageButtonTooltip() {
-    return isDraftOnlyMode() ? TRIAGE_DRAFT_TOOLTIP : TRIAGE_APPLY_TOOLTIP;
+    return TRIAGE_APPLY_TOOLTIP;
   }
 
   function handleTriageButton(kind) {
-    return isDraftOnlyMode() ? copyTriage(kind) : confirmAndApplyTriage(kind);
+    return confirmAndApplyTriage(kind);
   }
 
   function resolveMutationValue(workflow, mutation) {
@@ -674,7 +690,7 @@
 
     const plan = buildFieldPlan(workflow);
     showActionDialog(workflow.confirmationTitle, {
-      message: `${workflow.fieldSummary} No ConnectWise fields will change until you choose Apply Fields. This uses only visible UI/DOM automation; the copy-draft action keeps draft-mode behavior.`,
+      message: `${workflow.fieldSummary} No ConnectWise fields will change until you choose Apply Fields. This uses only visible UI/DOM automation; Copy Draft only copies this field plan to the clipboard.`,
       fields: plan,
       actions: [
         { label: 'Cancel', onClick: () => toast('Triage cancelled') },
@@ -802,11 +818,6 @@
 
     const currentMode = getTriageMode();
     const options = [
-      {
-        value: 'draftOnly',
-        title: 'Draft only',
-        description: 'Triage buttons copy drafts to the clipboard only and do not change fields.'
-      },
       {
         value: 'confirmApply',
         title: 'Confirm and apply',
@@ -951,6 +962,7 @@
     commitComboOnElement,
     openPopupAndGetContainer,
     findInputByLabel,
+    findUdfInputByLabel,
     showActionDialog,
     clickSave,
     clickSaveAndClose
