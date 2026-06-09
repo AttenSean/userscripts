@@ -15,6 +15,10 @@ Provenance: Human-authored with AI assistance; human-reviewed.
 
 ## Scripts
 
+- [**attentus-cw-helpdesk-toolkit.user.js**](https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-helpdesk-toolkit.user.js)
+  Unified read-only triage/help desk toolkit for ConnectWise. Combines the durable parts of the daily-use scripts into one install: ticket/contact copy, safe triage draft copy buttons, Time Entry signature/review clipboard buttons, board health/shoutout copy, and tab title cleanup. It intentionally does **not** clear Contact fields, auto-apply triage fields, Save tickets, or call write endpoints.
+
+
 - [**attentus-cw-clear-contact-button.user.js**](https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-clear-contact-button.user.js)  
   Adds a *Clear Contact* button (next to Follow) that wipes Contact, Email, and Phone fields and shows a quick “Cleared” flash.
 
@@ -136,3 +140,22 @@ Provenance: Human-authored with AI assistance; human-reviewed.
 Licensed under the **MIT License**. See [LICENSE](./LICENSE).
 
 © 2025 Sean Dill
+---
+
+## Consolidation assessment
+
+The scripts in the screenshot split into two categories:
+
+| Existing script | Purpose | Consolidation decision | Read-only safety |
+| --- | --- | --- | --- |
+| `attentus-cw-copy-ticket-link.user.js` | Copy the current ticket as a formatted link or URL. | Good fit for the unified toolkit. | Safe; clipboard-only. |
+| `attentus-cw-tab-title-normalize.user.js` | Rename noisy ConnectWise tab titles so tickets and Time Entry tabs are recognizable. | Good fit for the unified toolkit. | Safe; browser-title-only. |
+| `attentus-cw-teams-shoutout.user.js` | Build Teams-ready board health/shoutout text from visible Service Board rows. | Good fit, but the unified version keeps it simpler and visible-row based to reduce brittle per-view setup. | Safe; reads DOM and copies to clipboard. |
+| `attentus-cw-time-entry-clipboard-bar.user.js` | Copy support signature and review request snippets from Time Entry/ticket thread areas. | Good fit for the unified toolkit. | Safe; local settings and clipboard-only. |
+| `attentus-cw-clear-contact-button.user.js` | Clears Contact, Email, and Phone fields in the ticket UI. | Not carried forward as a destructive action. Replaced with `Copy Contact`. | Not safe under the current read-only rule because it edits ConnectWise fields before save. |
+| `attentus-cw-ticket-quick-triage.user.js` | Changes ticket board/status/type/tier/priority/summary and can Save/Save & Close. | Not carried forward as an auto-apply action. Replaced with copy-only triage draft buttons. | Not safe under the current read-only rule because it edits ticket fields and can click Save. |
+
+Recommendation: use the unified userscript first instead of a browser extension. A userscript is easier to install, update, and repair when ConnectWise DOM classes shift. Move to an extension only if you later need cross-tab background state, a polished options page, centrally managed deployment, or browser APIs that userscript managers cannot provide.
+
+The unified script deliberately avoids ConnectWise/ITGlue write behavior: no write endpoints, no field mutation helpers, no automatic Save/Save & Close clicks, and no ITGlue integration.
+
