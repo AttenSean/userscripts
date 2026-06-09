@@ -1139,6 +1139,9 @@
       makeActionButton('att-cw-helpdesk-clear-contact-btn', 'Clear Contact', 'Clear visible contact, email, phone, and extension fields after confirmation. Does not call ConnectWise or ITGlue APIs.', () => confirmAndClearContactInfo()),
       makeActionButton('att-cw-helpdesk-settings-btn', 'Settings…', `Configure ${TRIAGE_MODE_STORAGE_KEY}`, () => showToolkitSettingsDialog())
     );
+    if (titleController.isActive) {
+      slot.appendChild(makeActionButton(TITLE_SETTINGS_BUTTON_ID, 'Title Settings…', 'Configure tab title normalization', () => titleController.openSettings()));
+    }
 
     bar.append(label, slot);
     return bar;
@@ -1157,6 +1160,424 @@
     header.insertAdjacentElement('afterend', mountTicketTools());
     return true;
   }
+
+
+  // -------------------- Tab title normalization --------------------
+  // Folded in from attentus-cw-tab-title-normalize.user.js with toolkit-specific
+  // IDs and a shared guard so the standalone script and toolkit do not both run
+  // title observers during the transition.
+  const TITLE_ENGINE_GUARD = '__attentusCwTabTitleNormalizeActive';
+  const TITLE_ENGINE_DATA_ATTR = 'attCwTitleNormalizeOwner';
+  const TITLE_ENGINE_OWNER = 'helpdesk-toolkit';
+  const TITLE_SETTINGS_BUTTON_ID = 'att-cw-helpdesk-title-settings-btn';
+  const TITLE_SETTINGS_OVERLAY_ID = 'att-cw-helpdesk-title-settings-overlay';
+  const TITLE_K_COMPANY = 'att_tab_title_add_company';
+  const TITLE_K_SB_RENAME = 'att_tab_title_rename_serviceboard';
+  const TITLE_K_TE_TICKET = 'att_tab_title_timeentry_ticket';
+  const TITLE_DEFAULTS = {
+    [TITLE_K_COMPANY]: true,
+    [TITLE_K_SB_RENAME]: true,
+    [TITLE_K_TE_TICKET]: true
+  };
+
+  async function gmGet(key, defVal) {
+    try { if (typeof GM !== 'undefined' && GM.getValue) return await GM.getValue(key, defVal); } catch {}
+    try { if (typeof GM_getValue === 'function') return GM_getValue(key, defVal); } catch {}
+    try { const raw = localStorage.getItem(key); return raw == null ? defVal : JSON.parse(raw); } catch {}
+    return defVal;
+  }
+
+  async function gmSet(key, value) {
+    try { if (typeof GM !== 'undefined' && GM.setValue) return await GM.setValue(key, value); } catch {}
+    try { if (typeof GM_setValue === 'function') return GM_setValue(key, value); } catch {}
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+  }
+
+  function claimTitleEngine() {
+    const active = window[TITLE_ENGINE_GUARD];
+    const domOwner = document.documentElement?.dataset?.[TITLE_ENGINE_DATA_ATTR] || '';
+    if ((active?.owner && active.owner !== TITLE_ENGINE_OWNER) || (domOwner && domOwner !== TITLE_ENGINE_OWNER)) return false;
+    if (active?.owner === TITLE_ENGINE_OWNER || domOwner === TITLE_ENGINE_OWNER) return false;
+
+    window[TITLE_ENGINE_GUARD] = {
+      owner: TITLE_ENGINE_OWNER,
+      script: 'attentus-cw-helpdesk-toolkit',
+      startedAt: Date.now()
+    };
+    if (document.documentElement?.dataset) document.documentElement.dataset[TITLE_ENGINE_DATA_ATTR] = TITLE_ENGINE_OWNER;
+    return true;
+  }
+
+  function createTitleController() {
+    if (!claimTitleEngine()) {
+      return {
+        isActive: false,
+        schedule: () => {},
+        handleDomMutation: () => {},
+        handleRouteChange: () => {},
+        openSettings: () => toast('Tab title settings are controlled by the standalone title normalizer')
+      };
+    }
+
+    const titleSettings = { ...TITLE_DEFAULTS };
+    let titleSettingsReady = (async () => {
+      titleSettings[TITLE_K_COMPANY] = !!(await gmGet(TITLE_K_COMPANY, TITLE_DEFAULTS[TITLE_K_COMPANY]));
+      titleSettings[TITLE_K_SB_RENAME] = !!(await gmGet(TITLE_K_SB_RENAME, TITLE_DEFAULTS[TITLE_K_SB_RENAME]));
+      titleSettings[TITLE_K_TE_TICKET] = !!(await gmGet(TITLE_K_TE_TICKET, TITLE_DEFAULTS[TITLE_K_TE_TICKET]));
+    })();
+
+    const originalTitle = document.title;
+    const titleNorm = value => String(value || '').replace(/\s+/g, ' ').trim();
+    const titleVisible = (el) => !!el && el.nodeType === 1 && (el.offsetParent !== null || el.getClientRects().length > 0);
+    const MIN_TICKET_DIGITS = 5;
+    let lastSnapshotSig = '';
+    let hiddenPoller = null;
+
+    function titleParts(id, summary, company, includeCompany) {
+      const parts = [];
+      if (id) parts.push(`#${id}`);
+      if (summary) parts.push(summary);
+      if (includeCompany && company) parts.push(company);
+      return parts.join(' - ').trim();
+    }
+
+    function isServiceBoardList() {
+      return !!document.querySelector('table.srboard-grid tr.cw-ml-row');
+    }
+
+    function isTimeEntryPage() {
+      const href = location.href.toLowerCase();
+      if (/\btime[_-]?entry\b/.test(href) || /timeentry/.test(href)) return true;
+      const labels = document.querySelectorAll('.GMDB3DUBBPG, .GMDB3DUBORG, .gwt-Label.mm_label, [id$="-label"]');
+      for (const el of labels) {
+        const text = titleNorm(el.textContent).toLowerCase();
+        if (text.includes('time entry')) return true;
+      }
+      return !!(document.querySelector('input.cw_timeStart') || document.querySelector('input.cw_timeEnd'));
+    }
+
+    function ticketIdFromTitleUrl() {
+      try {
+        const url = new URL(location.href);
+        const queryId = url.searchParams.get('service_recid')
+          || url.searchParams.get('srRecID')
+          || url.searchParams.get('serviceTicketId')
+          || url.searchParams.get('recid');
+        if (queryId && /^\d+$/.test(queryId) && queryId.length >= MIN_TICKET_DIGITS) return queryId;
+
+        const match = url.pathname.match(/(?:^|\/)(?:ticket|tickets|sr|service[_-]?ticket)s?\/(\d+)(?:$|[/?#])/i);
+        if (match?.[1] && match[1].length >= MIN_TICKET_DIGITS) return match[1];
+      } catch {}
+      return '';
+    }
+
+    function ticketIdFromTitleDom() {
+      const candidates = document.querySelectorAll(
+        '[id$="-label"], .gwt-Label, .mm_label, .GMDB3DUBNLI, .GMDB3DUBLHH, .GMDB3DUBIHH, .GMDB3DUBORG, .GMDB3DUBBPG'
+      );
+      for (const el of candidates) {
+        if (!titleVisible(el)) continue;
+        const match = titleNorm(el.textContent).match(/ticket\s*#\s*(\d+)/i);
+        if (match?.[1] && match[1].length >= MIN_TICKET_DIGITS) return match[1];
+      }
+      return '';
+    }
+
+    function getTitleTicketId() {
+      return ticketIdFromTitleUrl() || ticketIdFromTitleDom() || '';
+    }
+
+    function getTitleSummary() {
+      const input = document.querySelector('input.cw_PsaSummaryHeader')
+        || document.querySelector('input.cw_summary')
+        || document.querySelector('input[placeholder*="summary" i]');
+      if (input?.value) return titleNorm(input.value);
+
+      const labels = document.querySelectorAll('[id$="-label"], .GMDB3DUBORG, .gwt-Label, .mm_label');
+      for (const el of labels) {
+        if (!titleVisible(el)) continue;
+        const match = titleNorm(el.textContent).match(/^summary:\s*(.+)$/i);
+        if (match) return titleNorm(match[1]);
+      }
+      return '';
+    }
+
+    function getTitleCompany() {
+      const labels = document.querySelectorAll('[id$="-label"], .gwt-Label, .mm_label, .GMDB3DUBORG, .GMDB3DUBBPG');
+      for (const el of labels) {
+        if (!titleVisible(el)) continue;
+        const match = titleNorm(el.textContent).match(/^\s*company:\s*(.+)$/i);
+        if (match) return titleNorm(match[1]);
+      }
+
+      const input = document.querySelector('input.cw_company') || document.querySelector('input[placeholder*="company" i]');
+      return input?.value ? titleNorm(input.value) : '';
+    }
+
+    function parseTitleTicketId(raw) {
+      const match = String(raw || '').match(/(\d{5,})/);
+      return match ? match[1] : null;
+    }
+
+    function getTicketIdFromChargeToOnce() {
+      const input = document.querySelector('input.cw_ChargeToTextBox, input[id$="ChargeToTextBox"], input.GKV5JQ3DMVF.cw_ChargeToTextBox');
+      if (!input) return null;
+
+      let id = parseTitleTicketId(input.value);
+      if (id) return id;
+
+      const scope = input.closest('td,div') || document;
+      const hidden = scope.querySelector('input[type="hidden"][value], input[type="hidden"][name*="ChargeTo"]');
+      id = parseTitleTicketId(hidden?.value);
+      if (id) return id;
+
+      const activeId = input.getAttribute('aria-activedescendant');
+      if (activeId) {
+        const activeEl = document.getElementById(activeId);
+        id = parseTitleTicketId(activeEl?.textContent);
+        if (id) return id;
+      }
+      return null;
+    }
+
+    function getServiceBoardViewName() {
+      const root = document.querySelector('.cw-toolbar-view-dropdown') || document;
+      const input = root.querySelector('input.cw_CwComboBox') || root.querySelector('input[placeholder*="view" i]');
+      const value = (input && (input.value || input.getAttribute('value'))) || '';
+      return titleNorm(value);
+    }
+
+    const schedule = (() => {
+      let pending = false;
+      let lastRun = 0;
+      const MIN_MS = 120;
+
+      const run = () => {
+        pending = false;
+        const now = Date.now();
+        if (now - lastRun < MIN_MS) {
+          pending = true;
+          setTimeout(run, MIN_MS);
+          return;
+        }
+        lastRun = now;
+        updateTitle();
+      };
+
+      return () => {
+        if (pending) return;
+        pending = true;
+        if (document.hidden) { setTimeout(run, 0); return; }
+        if ('requestIdleCallback' in window) requestIdleCallback(run, { timeout: 400 });
+        else if ('requestAnimationFrame' in window) requestAnimationFrame(run);
+        else setTimeout(run, 0);
+      };
+    })();
+
+    const snapshotSignature = snapshot => Object.values(snapshot).map(value => String(value ?? '')).join('|');
+
+    function pageSnapshot() {
+      const ticketId = getTitleTicketId();
+      if (ticketId) {
+        return { kind: 'ticket', id: ticketId, summary: getTitleSummary(), company: getTitleCompany(), url: location.pathname + location.search };
+      }
+      if (isTimeEntryPage()) {
+        const timeTicketId = getTicketIdFromChargeToOnce() || ticketIdFromTitleUrl() || '';
+        return { kind: 'time', id: timeTicketId, url: location.pathname + location.search };
+      }
+      if (isServiceBoardList()) {
+        return { kind: 'board', view: getServiceBoardViewName(), url: location.pathname + location.search };
+      }
+      return { kind: 'other', url: location.pathname + location.search };
+    }
+
+    async function updateTitle() {
+      const snapshot = pageSnapshot();
+      const sig = snapshotSignature(snapshot);
+      if (sig === lastSnapshotSig) return;
+      lastSnapshotSig = sig;
+
+      await titleSettingsReady;
+
+      if (snapshot.kind === 'ticket') {
+        const next = titleParts(snapshot.id, snapshot.summary, snapshot.company, !!titleSettings[TITLE_K_COMPANY]);
+        if (next && document.title !== next) document.title = next;
+        return;
+      }
+
+      if (snapshot.kind === 'time') {
+        const next = titleSettings[TITLE_K_TE_TICKET] && snapshot.id ? `#${snapshot.id} - Time Entry` : 'Time Entry';
+        if (document.title !== next) document.title = next;
+        return;
+      }
+
+      if (snapshot.kind === 'board' && titleSettings[TITLE_K_SB_RENAME]) {
+        const view = snapshot.view?.trim();
+        if (view && document.title !== view) document.title = view;
+        return;
+      }
+
+      if (!isServiceBoardList() && !document.title && document.title !== originalTitle) {
+        document.title = originalTitle;
+      }
+    }
+
+    function attachFieldListeners() {
+      const selectors = [
+        'input.cw_PsaSummaryHeader',
+        'input.cw_summary',
+        'input.cw_company',
+        'input[placeholder*="summary" i]',
+        'input[placeholder*="company" i]',
+        '.cw-toolbar-view-dropdown input.cw_CwComboBox',
+        '.cw-toolbar-view-dropdown input[type="text"]',
+        'input.cw_ChargeToTextBox',
+        'input[id$="ChargeToTextBox"]'
+      ];
+      document.querySelectorAll(selectors.join(',')).forEach(el => {
+        ['input', 'change', 'keyup', 'keydown', 'blur'].forEach(eventName => {
+          el.removeEventListener(eventName, schedule);
+          el.addEventListener(eventName, schedule, { passive: true });
+        });
+      });
+    }
+
+    function handleDomMutation(mutations = []) {
+      for (const mutation of mutations) {
+        if (mutation.type === 'childList') {
+          attachFieldListeners();
+          schedule();
+          return;
+        }
+        if (mutation.type === 'attributes') {
+          const name = mutation.attributeName || '';
+          if (name === 'value' || name === 'placeholder' || name === 'title' || name === 'aria-activedescendant') {
+            attachFieldListeners();
+            schedule();
+            return;
+          }
+        }
+      }
+    }
+
+    function handleRouteChange() {
+      lastSnapshotSig = '';
+      attachFieldListeners();
+      schedule();
+    }
+
+    async function openTitleSettingsDialog() {
+      await titleSettingsReady;
+      document.getElementById(TITLE_SETTINGS_OVERLAY_ID)?.remove();
+
+      const overlay = document.createElement('div');
+      overlay.id = TITLE_SETTINGS_OVERLAY_ID;
+      Object.assign(overlay.style, {
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(0,0,0,.35)',
+        zIndex: 2147483646,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center'
+      });
+
+      const modal = document.createElement('div');
+      Object.assign(modal.style, {
+        width: 'min(440px, 92vw)',
+        background: '#fff',
+        color: '#111827',
+        borderRadius: '12px',
+        boxShadow: '0 10px 30px rgba(0,0,0,.25)',
+        padding: '16px',
+        font: '14px system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif'
+      });
+
+      const addCompanyId = 'att-cw-helpdesk-title-add-company';
+      const serviceBoardId = 'att-cw-helpdesk-title-service-board';
+      const timeEntryId = 'att-cw-helpdesk-title-time-entry';
+      modal.innerHTML = `
+        <div style="font-weight:700; font-size:16px; margin-bottom:8px;">Tab Title Settings</div>
+        <label style="display:flex; align-items:center; gap:8px; margin:8px 0;">
+          <input type="checkbox" id="${addCompanyId}" ${titleSettings[TITLE_K_COMPANY] ? 'checked' : ''}>
+          <span>Append company to ticket tabs</span>
+        </label>
+        <label style="display:flex; align-items:center; gap:8px; margin:8px 0;">
+          <input type="checkbox" id="${serviceBoardId}" ${titleSettings[TITLE_K_SB_RENAME] ? 'checked' : ''}>
+          <span>Rename Service Board tabs to the active View</span>
+        </label>
+        <label style="display:flex; align-items:center; gap:8px; margin:8px 0;">
+          <input type="checkbox" id="${timeEntryId}" ${titleSettings[TITLE_K_TE_TICKET] ? 'checked' : ''}>
+          <span>Add ticket # to Time Entry tabs when available</span>
+        </label>
+      `;
+
+      const row = document.createElement('div');
+      Object.assign(row.style, { display: 'flex', gap: '8px', justifyContent: 'flex-end', marginTop: '12px' });
+
+      const closeButton = document.createElement('button');
+      closeButton.type = 'button';
+      closeButton.textContent = 'Close';
+      Object.assign(closeButton.style, { padding: '7px 11px', border: '1px solid #D1D5DB', borderRadius: '8px', background: '#fff', cursor: 'pointer' });
+      closeButton.addEventListener('click', () => overlay.remove());
+
+      const saveButton = document.createElement('button');
+      saveButton.type = 'button';
+      saveButton.textContent = 'Save';
+      Object.assign(saveButton.style, { padding: '7px 11px', border: '1px solid #111827', borderRadius: '8px', background: '#111827', color: '#fff', cursor: 'pointer', fontWeight: 600 });
+      saveButton.addEventListener('click', async () => {
+        const newAddCompany = !!document.getElementById(addCompanyId)?.checked;
+        const newServiceBoard = !!document.getElementById(serviceBoardId)?.checked;
+        const newTimeEntry = !!document.getElementById(timeEntryId)?.checked;
+
+        await gmSet(TITLE_K_COMPANY, newAddCompany);
+        await gmSet(TITLE_K_SB_RENAME, newServiceBoard);
+        await gmSet(TITLE_K_TE_TICKET, newTimeEntry);
+
+        titleSettings[TITLE_K_COMPANY] = newAddCompany;
+        titleSettings[TITLE_K_SB_RENAME] = newServiceBoard;
+        titleSettings[TITLE_K_TE_TICKET] = newTimeEntry;
+        titleSettingsReady = Promise.resolve();
+        lastSnapshotSig = '';
+        overlay.remove();
+        schedule();
+        toast('Tab title settings saved');
+      });
+
+      row.append(closeButton, saveButton);
+      modal.appendChild(row);
+      overlay.appendChild(modal);
+      document.body.appendChild(overlay);
+    }
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        if (!hiddenPoller) hiddenPoller = setInterval(() => updateTitle(), 1500);
+      } else {
+        if (hiddenPoller) { clearInterval(hiddenPoller); hiddenPoller = null; }
+        schedule();
+      }
+    }, { passive: true });
+
+    window.addEventListener('att:openviews-applied', () => schedule(), { passive: true });
+    window.addEventListener('focus', () => schedule(), { passive: true });
+
+    (async () => {
+      await titleSettingsReady;
+      attachFieldListeners();
+      schedule();
+    })();
+
+    return {
+      isActive: true,
+      schedule,
+      handleDomMutation,
+      handleRouteChange,
+      openSettings: openTitleSettingsDialog
+    };
+  }
+
+  const titleController = createTitleController();
 
   window.attentusHelpdeskToolkit = {
     copyTriage,
@@ -1177,1118 +1598,45 @@
     commitComboOnElement,
     openPopupAndGetContainer,
     findInputByLabel,
-    showActionDialog
+    showActionDialog,
+    clickSave,
+    clickSaveAndClose,
+    titleController
   };
 
   let lastHref = location.href;
-  const observer = new MutationObserver(() => {
+  const observer = new MutationObserver((mutations) => {
     if (lastHref !== location.href) {
       lastHref = location.href;
       $(`#${BAR_ID}`)?.remove();
+      titleController.handleRouteChange();
+    } else {
+      titleController.handleDomMutation(mutations);
     }
     ensureBarPlaced();
   });
-  observer.observe(document.documentElement, { subtree: true, childList: true });
+  observer.observe(document.documentElement, {
+    subtree: true,
+    childList: true,
+    attributes: true,
+    attributeFilter: ['value', 'placeholder', 'title', 'aria-activedescendant']
+  });
 
   ['pushState', 'replaceState'].forEach(key => {
     const original = history[key];
     history[key] = function () {
       const result = original.apply(this, arguments);
-      queueMicrotask(ensureBarPlaced);
+      queueMicrotask(() => {
+        titleController.handleRouteChange();
+        ensureBarPlaced();
+      });
       return result;
     };
   });
 
-  window.addEventListener('popstate', ensureBarPlaced);
+  window.addEventListener('popstate', () => { titleController.handleRouteChange(); ensureBarPlaced(); });
   ensureBarPlaced();
-  setTimeout(ensureBarPlaced, 200);
-  setTimeout(ensureBarPlaced, 700);
-
-  // Board shoutout module: DOM/clipboard-only Teams shoutout tooling ported from attentus-cw-teams-shoutout.
-  (function boardShoutoutModule() {
-    'use strict';
-
-    var BTN_ID = 'att-cw-teams-shoutout-btn';
-    var TOAST_ID = 'att-cw-teams-shoutout-toast';
-    var PANEL_ID = 'att-cw-teams-shoutout-setup';
-    var STORAGE = 'att_cw_shoutout_settings_exact_views_json';
-    var BOARD_ROW = 'table.srboard-grid tr.cw-ml-row';
-
-    var BASE = location.origin;
-    var PATH = '/v4_6_release/services/system_io/Service/fv_sr100_request.rails?service_recid=';
-
-    // status ordering for bullets
-    var STATUS_ORDER = [
-      'New',
-      'New (email)',
-      'MUST ASSIGN',
-      'MUST ASSIGN - Acknowledged',
-      'Re-Opened',
-      'Client Has Responded',
-      'Waiting Approval',
-      'Waiting Client Response',
-      'On-Hold',
-      'Acknowledged'
-    ];
-
-    // priority ordering for output
-    var PRIORITY_ORDER = ['P0','P1','P2','P3','P4','PM']; // PM = Maintenance
-
-    // Maintenance icon data URI (cyan)
-    var MAINT_DATA_PREFIX = 'data:image/gif;base64,R0lGODlhEAAQAJECAAAAAAD49P///wAAACH5BAEAAAIALAAAAAAQABAAAAImlI+pm+APoQGh2lvBxDxoQXXXF4rZZp5gqpYmyXpoSka2w+T6vhcAOw==';
-
-    // ---------- utils
-    function txt(el){ return (el && el.textContent || '').replace(/\s+/g,' ').trim(); }
-    function isTicketId(s){ return /^\d{5,}$/.test((s||'').trim()); }
-    function esc(s){
-      s = String(s == null ? '' : s);
-      return s.replace(/&/g,'&amp;')
-              .replace(/</g,'&lt;')
-              .replace(/>/g,'&gt;')
-              .replace(/"/g,'&quot;')
-              .replace(/'/g,'&#39;');
-    }
-    function stripSLA(s){
-      s = String(s||'');
-      s = s.replace(/\b(?:Respond by|Plan by|Waiting|Scheduled|SLA)[^|-\u2014]*$/i,'');
-      s = s.replace(/[|\u2014-]\s*$/,'');
-      return s.trim();
-    }
-
-    function toast(msg, ms){
-      if(ms == null) ms = 1100;
-      var n = document.getElementById(TOAST_ID);
-      if(!n){
-        n = document.createElement('div');
-        n.id = TOAST_ID;
-        var st = n.style;
-        st.position='fixed';
-        st.right='16px';
-        st.bottom='70px';
-        st.zIndex=2147483646;
-        st.background='#0b0f17';
-        st.color='#e5e7eb';
-        st.padding='8px 10px';
-        st.borderRadius='10px';
-        st.border='1px solid #1f2937';
-        st.font='12px system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif';
-        st.opacity='0';
-        st.transition='opacity .15s ease';
-        document.body.appendChild(n);
-      }
-      n.textContent = msg;
-      n.style.opacity = '1';
-      if(n._h) clearTimeout(n._h);
-      n._h = setTimeout(function(){ n.style.opacity = '0'; }, ms);
-    }
-
-    // ---------- storage
-    function gmGet(key, def){
-      if(typeof def === 'undefined') def = null;
-      try{
-        if(typeof GM_getValue === 'function'){
-          var v = GM_getValue(key, def);
-          return Promise.resolve(v);
-        }
-        if(typeof GM !== 'undefined' && typeof GM.getValue === 'function'){
-          return GM.getValue(key, def);
-        }
-      }catch(e){}
-      return Promise.resolve(def);
-    }
-    function gmSet(key, val){
-      try{
-        if(typeof GM_setValue === 'function'){
-          GM_setValue(key, val);
-          return Promise.resolve();
-        }
-        if(typeof GM !== 'undefined' && typeof GM.setValue === 'function'){
-          return GM.setValue(key, val);
-        }
-      }catch(e){}
-      try{ localStorage.setItem(key, val); }catch(e){}
-      return Promise.resolve();
-    }
-    function getSettings(){
-      return gmGet(STORAGE, '{}').then(function(raw){
-        try{
-          return typeof raw === 'string' ? JSON.parse(raw || '{}') : (raw || {});
-        }catch(e){
-          return {};
-        }
-      });
-    }
-    function setSettings(obj){
-      var str = JSON.stringify(obj || {});
-      return gmSet(STORAGE, str);
-    }
-
-    // ---------- view keys
-    function ticketUrl(id){ return BASE + PATH + encodeURIComponent(id); }
-    function getViewInput(){
-      return document.querySelector('.cw-toolbar-view-dropdown input.cw_CwComboBox') ||
-             document.querySelector('.cw-toolbar-view-dropdown [id$="-input"].cw_CwComboBox');
-    }
-    function stripInvisibles(s){
-      return String(s||'')
-        .replace(/[\u200B-\u200D\u2060\uFEFF]/g,'')
-        .replace(/\u00A0/g,' ')
-        .replace(/\s+/g,' ')
-        .trim();
-    }
-    function readViewExact(){
-      var inp = getViewInput();
-      var val = inp && typeof inp.value === 'string' ? inp.value.trim() : '';
-      return val || '(No View)';
-    }
-    function readViewCanonical(){ return stripInvisibles(readViewExact()); }
-    function keyExact(){ return location.host.toLowerCase() + '::' + readViewExact(); }
-    function keyCanonical(){ return location.host.toLowerCase() + '::' + readViewCanonical(); }
-
-    // ---------- gating
-    function isBoard(){
-      return !!document.querySelector('table.srboard-grid') &&
-             !!document.querySelector(BOARD_ROW) &&
-             !!getViewInput();
-    }
-
-    // ---------- grid helpers
-    function rows(){
-      return Array.prototype.slice.call(document.querySelectorAll(BOARD_ROW));
-    }
-    function tdByIndex(row, idx){
-      return idx >= 0 ? row.querySelector('td[cellindex="' + idx + '"]') : null;
-    }
-    function valFromCell(row, idx){
-      var td = tdByIndex(row, idx);
-      if(!td) return '';
-      var a = td.querySelector('a');
-      return a ? txt(a) : txt(td.querySelector('div') || td);
-    }
-
-    function headerCells(){
-      var set = new Map();
-      var containers = Array.prototype.slice.call(document.querySelectorAll(
-        '.cw-ml-header *[cellindex], .x-grid3-hd-row *[cellindex], .x-grid3-header *[cellindex]'
-      ));
-      for(var i=0;i<containers.length;i++){
-        var c = containers[i];
-        var idx = c.getAttribute('cellindex');
-        if(!idx) continue;
-        var label = (txt(c) ||
-                     txt(c.querySelector('.gwt-InlineHTML')) ||
-                     txt(c.querySelector('.x-grid3-hd-inner'))).toLowerCase();
-        if(label) set.set(+idx, label);
-      }
-      return set;
-    }
-    function sampleRowCells(){
-      var r = rows()[0];
-      if(!r) return new Map();
-      var map = new Map();
-      var tds = r.querySelectorAll('td[cellindex]');
-      for(var i=0;i<tds.length;i++){
-        var td = tds[i];
-        var idx = +td.getAttribute('cellindex');
-        var a = td.querySelector('a');
-        var v = a ? txt(a) : txt(td.querySelector('div') || td);
-        map.set(idx, v);
-      }
-      return map;
-    }
-
-    // Ticket column detection (only for smart prefill)
-    function detectTicketIndex(){
-      var headers = headerCells();
-      var found = null;
-      headers.forEach(function(label, idx){
-        if(/ticket/.test(label)){
-          if(found == null) found = idx;
-        }
-      });
-      if(found != null) return found;
-
-      var rws = rows();
-      var counts = {};
-      var limit = Math.min(rws.length, 8);
-      for(var i=0;i<limit;i++){
-        var r = rws[i];
-        var tds = r.querySelectorAll('td[cellindex]');
-        for(var j=0;j<tds.length;j++){
-          var td = tds[j];
-          var a = td.querySelector('a');
-          if(a){
-            var id = txt(a);
-            if(/^\d{5,}$/.test(id)){
-              var idx = +td.getAttribute('cellindex');
-              counts[idx] = (counts[idx] || 0) + 1;
-            }
-          }
-        }
-      }
-      var bestIdx = null, bestCnt = 0;
-      for(var k in counts){
-        if(counts.hasOwnProperty(k)){
-          if(counts[k] > bestCnt){
-            bestCnt = counts[k];
-            bestIdx = +k;
-          }
-        }
-      }
-      if(bestCnt >= 2) return bestIdx;
-      return null;
-    }
-
-    // Status column detection (fallback)
-    function detectStatusIndex(){
-      var headers = headerCells();
-      var found = null;
-      headers.forEach(function(label, idx){
-        if(/status/.test(label)){
-          if(found == null) found = idx;
-        }
-      });
-      return found;
-    }
-
-    // Resource column detection (fallback)
-    function detectResourceIndex(){
-      var headers = headerCells();
-      var found = null;
-      headers.forEach(function(label, idx){
-        if(/resource/.test(label)){
-          if(found == null) found = idx;
-        }
-      });
-      return found;
-    }
-
-    // ---------- priority detection
-    function parseRgb(s){
-      var m = /rgba?\s*\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)/.exec(s||'');
-      return m ? {r:+m[1], g:+m[2], b:+m[3]} : {r:0,g:0,b:0};
-    }
-    function isBlack(r,g,b){ return r<40&&g<40&&b<40; }
-    function isRed(r,g,b){ return r>150&&g<110&&b<110; }
-    function isOrange(r,g,b){ return r>200&&g>110&&g<200&&b<90; }
-    function isYellow(r,g,b){ return r>200&&g>200&&b<140; }
-    function isBlue(r,g,b){ return b>140&&r<120&&g<190; }
-
-    function dot(pr){
-      return pr==='P0'?'⚫️':
-             pr==='P1'?'🔴':
-             pr==='P2'?'🟠':
-             pr==='P4'?'🔵':
-             pr==='PM'?'Ⓜ️':
-             '🟡';
-    }
-
-    var PRIORITY_LABELS = {
-      P0: 'P0 Flash Critical',
-      P1: 'P1 Critical',
-      P2: 'P2 High',
-      P3: 'P3 Medium',
-      P4: 'P4 Low',
-      PM: 'Maintenance'
-    };
-
-    function extractDataUrlFromNode(n){
-      if(!n) return '';
-      function pick(s){
-        return (s||'').replace(/^.*url\(["']?/, '').replace(/["']?\).*$/, '');
-      }
-      var inline = (n.style && (n.style.background || n.style.backgroundImage)) || '';
-      var url = /url\(/.test(inline) ? pick(inline) : '';
-      if(!url){
-        var cs = getComputedStyle(n);
-        if(/url\(/.test(cs.backgroundImage||'')) url = pick(cs.backgroundImage);
-      }
-      return /^data:image/.test(url) ? url : '';
-    }
-
-    function sampleDataUrl(url){
-      return new Promise(function(res){
-        if(!url) return res(null);
-        var img = new Image();
-        img.onload = function(){
-          try{
-            var c = document.createElement('canvas');
-            c.width = img.naturalWidth || 16;
-            c.height = img.naturalHeight || 16;
-            var g = c.getContext('2d');
-            g.drawImage(img,0,0);
-            var d = g.getImageData(Math.floor(c.width/2),Math.floor(c.height/2),1,1).data;
-            res({r:d[0],g:d[1],b:d[2]});
-          }catch(e){
-            res(null);
-          }
-        };
-        img.onerror = function(){ res(null); };
-        img.src = url;
-      });
-    }
-
-    function readPriorityFromCell(td){
-      return new Promise(function(resolve){
-        if(!td) return resolve('P3');
-        var node = td.querySelector('img') || td.firstElementChild || td;
-        var url = extractDataUrlFromNode(node);
-
-        // Maintenance explicit detection via data URI
-        if(url && url.indexOf(MAINT_DATA_PREFIX) === 0){
-          resolve('PM');
-          return;
-        }
-
-        if(url){
-          sampleDataUrl(url).then(function(rgb){
-            if(rgb){
-              var r = rgb.r, g = rgb.g, b = rgb.b;
-              if(isBlack(r,g,b)) return resolve('P0');
-              if(isRed(r,g,b))   return resolve('P1');
-              if(isOrange(r,g,b))return resolve('P2');
-              if(isYellow(r,g,b))return resolve('P3');
-              if(isBlue(r,g,b))  return resolve('P4');
-            }
-            fallback();
-          });
-        }else{
-          fallback();
-        }
-        function fallback(){
-          var hint = (td.title||'').toUpperCase() || txt(td).toUpperCase();
-          var m = /\bP([0-4])\b/.exec(hint);
-          if(m) return resolve('P'+m[1]);
-          var rgb = parseRgb(getComputedStyle(node).color);
-          var r = rgb.r, g = rgb.g, b = rgb.b;
-          if(isBlack(r,g,b)) return resolve('P0');
-          if(isRed(r,g,b))   return resolve('P1');
-          if(isOrange(r,g,b))return resolve('P2');
-          if(isYellow(r,g,b))return resolve('P3');
-          if(isBlue(r,g,b))  return resolve('P4');
-          resolve('P3');
-        }
-      });
-    }
-
-    // ---------- status helpers for overview
-    var UNASSIGNED_LABEL = 'Unassigned';
-    var UNASSIGNED_RAW = [
-      'New',
-      'New (email)',
-      'MUST ASSIGN',
-      'MUST ASSIGN - Acknowledged'
-    ];
-    function isUnassignedStatus(s){
-      if(!s) return false;
-      var norm = s.replace(/\s+/g,' ').trim().toLowerCase();
-      return norm === 'new' ||
-             norm === 'new (email)' ||
-             norm === 'must assign' ||
-             norm === 'must assign - acknowledged';
-    }
-    function isClientHasResponded(s){
-      if(!s) return false;
-      return s.replace(/\s+/g,' ').trim().toLowerCase() === 'client has responded';
-    }
-
-    // ---------- setup panel
-    function ensurePanel(columns, samples, savedForView) {
-      var host = document.getElementById(PANEL_ID);
-      if(!host){
-        host = document.createElement('div');
-        host.id = PANEL_ID;
-        host.style.all='initial';
-        host.style.position='fixed';
-        host.style.top='72px';
-        host.style.right='16px';
-        host.style.zIndex=2147483645;
-        document.body.appendChild(host);
-
-        var root = host.attachShadow({mode:'open'});
-        var wrap = document.createElement('div');
-        wrap.innerHTML =
-          '<style>\
-            :host { all: initial; }\
-            @media (prefers-color-scheme: dark) {\
-              .card { background:#0b0f17; color:#e5e7eb; border-color:#1f2937; }\
-              select, textarea { background:#0f172a; color:#e5e7eb; border-color:#334155; }\
-              .hdr { background:#111827; color:#e5e7eb; }\
-              .btn { background:#1f2937; color:#e5e7eb; border-color:#334155; }\
-              .btn.primary { background:#2563eb; color:white; border-color:#1d4ed8; }\
-            }\
-            @media (prefers-color-scheme: light) {\
-              .card { background:#fff; color:#111; border-color:rgba(0,0,0,.08); }\
-              select, textarea { background:white; color:#111; border-color:#cbd5e1; }\
-              .hdr { background:#0f172a; color:#fff; }\
-              .btn { background:#f1f5f9; color:#111; border-color:#cbd5e1; }\
-              .btn.primary { background:#1f73b7; color:white; border-color:#1b659f; }\
-            }\
-            .card { font:13px system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; width:460px; border:1px solid; border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,.22); overflow:hidden; }\
-            .hdr { padding:10px 12px; font-weight:700; display:flex; justify-content:space-between; align-items:center; }\
-            .body{ padding:10px 12px; }\
-            .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:8px 0; }\
-            select,button,textarea { font:inherit; }\
-            select,textarea { width:100%; border:1px solid; border-radius:10px; padding:8px 10px; }\
-            textarea { height:84px; resize:vertical; }\
-            .actions { display:flex; gap:8px; justify-content:flex-end; margin-top:12px; }\
-            .btn { border:1px solid; border-radius:10px; padding:6px 12px; cursor:pointer; }\
-            .viewtag { font-size:12px; opacity:.8; border:1px solid; padding:2px 8px; border-radius:999px; }\
-            .hint { font-size:11px; opacity:.7; margin-top:4px; }\
-          </style>\
-          <div class="card" role="dialog" aria-label="Teams shoutout setup">\
-            <div class="hdr"><div>Teams shoutout setup</div><div class="viewtag" id="viewtag"></div></div>\
-            <div class="body">\
-              <div class="row">\
-                <div><label>Ticket # column</label><select id="col-ticket"></select></div>\
-                <div><label>Priority column</label><select id="col-prio"></select></div>\
-              </div>\
-              <div class="row">\
-                <div><label>Summary column</label><select id="col-sum"></select></div>\
-                <div><label>Company column</label><select id="col-comp"></select></div>\
-              </div>\
-              <div class="row">\
-                <div><label>Contact column</label><select id="col-cont"></select></div>\
-                <div><label>Status column (for overview)</label><select id="col-status"></select></div>\
-              </div>\
-              <div class="row">\
-                <div><label>Resource column (for responses)</label><select id="col-resource"></select></div>\
-                <div></div>\
-              </div>\
-              <div class="hint">Status is only used for the Ctrl+Click overview. Resource is only used for the "Tickets with Responses" section.</div>\
-              <div style="margin-top:10px;">\
-                <label>Preview</label>\
-                <textarea id="preview" readonly></textarea>\
-              </div>\
-              <div class="actions">\
-                <button class="btn" id="close">Close</button>\
-                <button class="btn primary" id="save">Save</button>\
-              </div>\
-            </div>\
-          </div>';
-        root.appendChild(wrap);
-        host._root = root;
-      }
-
-      var root = host._root;
-      var $ = function(sel){ return root.querySelector(sel); };
-      $('#viewtag').textContent = readViewExact();
-
-      var cols = columns;
-      var samp = samples;
-
-      function buildOptions(sel, selectedIdx){
-        var s = $(sel);
-        s.innerHTML = '';
-        var entries = [];
-        cols.forEach(function(label, idx){ entries.push({idx:idx, label:label}); });
-        samp.forEach(function(val, idx){
-          if(!cols.has(idx)) entries.push({idx:idx, label:'(no header)'});
-        });
-        entries.sort(function(a,b){ return a.idx - b.idx; });
-        for(var i=0;i<entries.length;i++){
-          var it = entries[i];
-          var sample = samp.get(it.idx) || '';
-          var o = document.createElement('option');
-          o.value = String(it.idx);
-          o.textContent = '#' + it.idx + ' - ' + (it.label||'(no header)') + '  •  ' + (sample ? sample.slice(0,60) : '');
-          if(String(it.idx) === String(selectedIdx)) o.selected = true;
-          s.appendChild(o);
-        }
-      }
-
-      buildOptions('#col-ticket', savedForView && savedForView.ticket);
-      buildOptions('#col-prio',   savedForView && savedForView.priority);
-      buildOptions('#col-sum',    savedForView && savedForView.summary);
-      buildOptions('#col-comp',   savedForView && savedForView.company);
-      buildOptions('#col-cont',   savedForView && savedForView.contact);
-      buildOptions(
-        '#col-status',
-        savedForView && typeof savedForView.status === 'number'
-          ? savedForView.status
-          : detectStatusIndex()
-      );
-      buildOptions(
-        '#col-resource',
-        savedForView && typeof savedForView.resource === 'number'
-          ? savedForView.resource
-          : detectResourceIndex()
-      );
-
-      function readSel(){
-        return {
-          ticket:+root.getElementById('col-ticket').value,
-          priority:+root.getElementById('col-prio').value,
-          summary:+root.getElementById('col-sum').value,
-          company:+root.getElementById('col-comp').value,
-          contact:+root.getElementById('col-cont').value,
-          status:+root.getElementById('col-status').value,
-          resource:+root.getElementById('col-resource').value
-        };
-      }
-
-      function refreshPreview(){
-        try{
-          var sel = readSel();
-          var r = rows()[0];
-          var pv = root.getElementById('preview');
-          if(!r){
-            pv.value = 'No rows to preview.';
-            return;
-          }
-          function get(i){
-            var td = r.querySelector('td[cellindex="' + i + '"]');
-            if(!td) return '';
-            var a = td.querySelector('a');
-            return a ? txt(a) : txt(td.querySelector('div')||td);
-          }
-          var ticket = get(sel.ticket);
-          var summary = stripSLA(get(sel.summary));
-          var company = stripSLA(get(sel.company));
-          var contact = stripSLA(get(sel.contact));
-          readPriorityFromCell(r.querySelector('td[cellindex="' + sel.priority + '"]')).then(function(pr){
-            var url = ticket ? ticketUrl(ticket) : '';
-            pv.value = dot(pr) + ' #' + ticket + ' - ' + summary +
-                       (company ? ' - ' + company : '') +
-                       (contact ? ' - ' + contact : '') +
-                       (url ? ' ('+url+')' : '');
-          });
-        }catch(e){
-          console.error('[teams-shoutout] preview error', e);
-        }
-      }
-
-      root.getElementById('save').onclick = function(){
-        var sel = readSel();
-        getSettings().then(function(all){
-          var ex = keyExact();
-          var ca = keyCanonical();
-          all[ex] = sel;
-          all[ca] = sel;
-          return setSettings(all);
-        }).then(function(){
-          toast('Saved mapping for this View');
-          var el = document.getElementById(PANEL_ID);
-          if(el) el.remove();
-        }).catch(function(e){
-          console.error('[teams-shoutout] save error', e);
-          toast('Save failed');
-        });
-      };
-      root.getElementById('close').onclick = function(){
-        var el = document.getElementById(PANEL_ID);
-        if(el) el.remove();
-      };
-
-      refreshPreview();
-      ['#col-ticket','#col-prio','#col-sum','#col-comp','#col-cont','#col-status','#col-resource'].forEach(function(id){
-        root.querySelector(id).addEventListener('change', refreshPreview);
-      });
-    }
-
-    // ---------- clipboard
-    function writeBoth(html, text){
-      return new Promise(function(res){
-        try{
-          if(navigator.clipboard && window.ClipboardItem){
-            var item = new ClipboardItem({
-              'text/html':new Blob([html],{type:'text/html'}),
-              'text/plain':new Blob([text],{type:'text/plain'})
-            });
-            navigator.clipboard.write([item]).then(function(){
-              res(true);
-            }).catch(function(){
-              legacy();
-            });
-            return;
-          }
-        }catch(e){}
-        try{
-          if(typeof GM_setClipboard === 'function'){
-            GM_setClipboard(html,{type:'text/html'});
-            return res(true);
-          }
-          if(typeof GM !== 'undefined' && typeof GM.setClipboard === 'function'){
-            GM.setClipboard(html,{type:'text/html'});
-            return res(true);
-          }
-        }catch(e){}
-        legacy();
-        function legacy(){
-          try{
-            navigator.clipboard.writeText(text).then(function(){
-              res(true);
-            }).catch(domCopy);
-          }catch(e){
-            domCopy();
-          }
-        }
-        function domCopy(){
-          try{
-            var ta = document.createElement('textarea');
-            ta.value = text;
-            ta.style.position='fixed';
-            ta.style.left='-9999px';
-            document.body.appendChild(ta);
-            ta.select();
-            document.execCommand('copy');
-            ta.remove();
-            res(true);
-          }catch(e2){
-            res(false);
-          }
-        }
-      });
-    }
-
-    // ---------- shoutout copy (per ticket list)
-    function copyWithMapping(map, onlyHigh){
-      if(onlyHigh == null) onlyHigh = false;
-      try{
-        var rws = rows();
-        if(!rws.length){
-          toast('No rows');
-          return;
-        }
-
-        var items = [];
-        (function step(i){
-          if(i >= rws.length){
-            var htmlParts = ['<strong>Tickets needing attention (' + items.length + ')</strong>','<br><br>'];
-            for(var k=0;k<items.length;k++){
-              var it = items[k];
-              var metaPieces = [];
-              if(it.company) metaPieces.push(esc(it.company));
-              if(it.contact) metaPieces.push(esc(it.contact));
-              var meta = metaPieces.length ? ('ㅤ <i>' + metaPieces.join(' - ') + '</i>') : '';
-              htmlParts.push(
-                it.dot + ' <a href="' + it.url + '">#' + it.ticket + '</a> <u>' + esc(it.summary) + '</u><br>' +
-                meta
-              );
-              if(k !== items.length - 1) htmlParts.push('<br><br>');
-            }
-            var html = htmlParts.join('');
-
-            var plainLines = ['Tickets needing attention (' + items.length + ')',''];
-            for(var p=0;p<items.length;p++){
-              var it2 = items[p];
-              plainLines.push(it2.dot + ' #' + it2.ticket + ' ' + it2.summary + ' (' + it2.url + ')');
-              var metaTxt = [];
-              if(it2.company) metaTxt.push(it2.company);
-              if(it2.contact) metaTxt.push(it2.contact);
-              if(metaTxt.length) plainLines.push('ㅤ ' + metaTxt.join(' - '));
-              if(p !== items.length - 1) plainLines.push('');
-            }
-            var plain = plainLines.join('\n');
-
-            writeBoth(html, plain).then(function(ok){
-              toast(ok ? ('Copied ' + items.length + ' entr' + (items.length===1?'y':'ies')) : 'Copy failed');
-            });
-            return;
-          }
-
-          var r = rws[i];
-          var ticket = valFromCell(r, map.ticket);
-          if(!ticket || !isTicketId(ticket)){
-            step(i+1);
-            return;
-          }
-
-          var summary = stripSLA(valFromCell(r, map.summary));
-          var company = stripSLA(valFromCell(r, map.company));
-          var contact = stripSLA(valFromCell(r, map.contact));
-
-          readPriorityFromCell(tdByIndex(r, map.priority)).then(function(pr){
-            if(onlyHigh && !/^P[0-2]$/.test(pr)){
-              step(i+1);
-              return;
-            }
-            items.push({
-              dot: dot(pr),
-              ticket: ticket,
-              url: ticketUrl(ticket),
-              summary: summary,
-              company: company,
-              contact: contact
-            });
-            step(i+1);
-          });
-        })(0);
-      }catch(e){
-        console.error('[teams-shoutout] copy error', e);
-        toast('Copy error, see console');
-      }
-    }
-
-    // ---------- overview copy: table of unassigned + tickets-with-responses
-    function copyOverview(map){
-      try{
-        var rws = rows();
-        if(!rws.length){
-          toast('No rows');
-          return;
-        }
-
-        var statusIdx = (map && typeof map.status === 'number' && !isNaN(map.status))
-          ? map.status
-          : detectStatusIndex();
-
-        var resourceIdx = (map && typeof map.resource === 'number' && !isNaN(map.resource))
-          ? map.resource
-          : null;
-
-        if(resourceIdx == null){
-          toast('Resource column not mapped, open setup');
-          return;
-        }
-
-        var buckets = {};   // { P2: { unassigned: n } }
-        var responses = {}; // { resourceName: count } for Client Has Responded
-        var jobs = [];
-
-        rws.forEach(function(r){
-          var prCell = tdByIndex(r, map.priority);
-          var statusRaw = statusIdx != null ? valFromCell(r, statusIdx) : '';
-          var statusNorm = statusRaw.replace(/\s+/g,' ').trim();
-
-          var resource = valFromCell(r, resourceIdx) || '';
-          resource = resource.replace(/\s+/g,' ').trim();
-
-          var job = readPriorityFromCell(prCell).then(function(pr){
-            var b = buckets[pr] || (buckets[pr] = { unassigned:0 });
-
-            // unassigned tickets = no resource, any status
-            if(!resource){
-              b.unassigned++;
-            }
-
-            // tickets with responses (Client Has Responded), by resource (blank => Unassigned)
-            if(isClientHasResponded(statusNorm)){
-              var key = resource || 'Unassigned';
-              responses[key] = (responses[key] || 0) + 1;
-            }
-          });
-          jobs.push(job);
-        });
-
-        Promise.all(jobs).then(function(){
-          // total = total unassigned tickets across all priorities
-          var totalUnassigned = 0;
-          Object.keys(buckets).forEach(function(pr){
-            totalUnassigned += buckets[pr].unassigned;
-          });
-
-          var activePriorities = PRIORITY_ORDER.filter(function(pr){
-            return buckets[pr] && buckets[pr].unassigned > 0;
-          });
-
-          if(!activePriorities.length && !Object.keys(responses).length){
-            toast('No unassigned tickets or responses to report');
-            return;
-          }
-
-          // build HTML
-          var htmlParts = [
-            '<strong>HD Board Health Update</strong>',
-            totalUnassigned ? ' (' + totalUnassigned + ' unassigned)' : '',
-            '<br><br>'
-          ];
-
-          if(activePriorities.length){
-            htmlParts.push('<table cellpadding="4" cellspacing="0" border="1">');
-            htmlParts.push('<thead><tr><th>Priority</th><th>Unassigned tickets</th></tr></thead><tbody>');
-            activePriorities.forEach(function(pr){
-              var b = buckets[pr];
-              var label = PRIORITY_LABELS[pr] || pr;
-              htmlParts.push(
-                '<tr><td>' + dot(pr) + ' ' + esc(label) + '</td><td>' +
-                String(b.unassigned) + '</td></tr>'
-              );
-            });
-            htmlParts.push('</tbody></table>');
-          }
-
-          // Tickets with Responses section
-          var responseKeys = Object.keys(responses);
-          if(responseKeys.length){
-            if(activePriorities.length) htmlParts.push('<br><br>');
-            htmlParts.push('<strong>Tickets with Responses</strong><br><br>');
-
-            // Unassigned first, then others alpha
-            var orderedRes = [];
-            if(responseKeys.indexOf('Unassigned') !== -1){
-              orderedRes.push('Unassigned');
-            }
-            responseKeys.sort(function(a,b){
-              var aa = a.toLowerCase();
-              var bb = b.toLowerCase();
-              if(aa < bb) return -1;
-              if(aa > bb) return 1;
-              return 0;
-            });
-            responseKeys.forEach(function(k){
-              if(orderedRes.indexOf(k) === -1) orderedRes.push(k);
-            });
-
-            orderedRes.forEach(function(name){
-              var cnt = responses[name] || 0;
-              htmlParts.push('• ' + esc(name) + ', ' + cnt + '<br>');
-            });
-          }
-
-          var html = htmlParts.join('');
-
-          // plain text fallback
-          var plainLines = [];
-          plainLines.push(
-            'HD Board Health Update' +
-            (totalUnassigned ? ' (' + totalUnassigned + ' unassigned)' : '')
-          );
-          plainLines.push('');
-
-          if(activePriorities.length){
-            plainLines.push('Priority vs Unassigned');
-            activePriorities.forEach(function(pr){
-              var b = buckets[pr];
-              var label = PRIORITY_LABELS[pr] || pr;
-              plainLines.push(dot(pr) + ' ' + label + ': ' + b.unassigned);
-            });
-          }
-
-          var responseKeys2 = Object.keys(responses);
-          if(responseKeys2.length){
-            if(activePriorities.length) plainLines.push('');
-            plainLines.push('Tickets with Responses');
-            // same ordering as HTML
-            var orderedRes2 = [];
-            if(responseKeys2.indexOf('Unassigned') !== -1){
-              orderedRes2.push('Unassigned');
-            }
-            responseKeys2.sort(function(a,b){
-              var aa = a.toLowerCase();
-              var bb = b.toLowerCase();
-              if(aa < bb) return -1;
-              if(aa > bb) return 1;
-              return 0;
-            });
-            responseKeys2.forEach(function(k){
-              if(orderedRes2.indexOf(k) === -1) orderedRes2.push(k);
-            });
-            orderedRes2.forEach(function(name){
-              var cnt = responses[name] || 0;
-              plainLines.push('  • ' + name + ', ' + cnt);
-            });
-          }
-
-          var plain = plainLines.join('\n');
-
-          writeBoth(html, plain).then(function(ok){
-            toast(ok ? 'Copied HD Board Health Update' : 'Copy failed');
-          });
-        }).catch(function(err){
-          console.error('[teams-shoutout] overview error', err);
-          toast('Overview error, see console');
-        });
-
-      }catch(e){
-        console.error('[teams-shoutout] overview error', e);
-        toast('Overview error, see console');
-      }
-    }
-
-
-    // ---------- setup open with smart prefill
-    function firstSavedMapping(all){
-      var keys = Object.keys(all || {});
-      for(var i=0;i<keys.length;i++){
-        var m = all[keys[i]];
-        if(m && typeof m === 'object' && typeof m.ticket === 'number') return m;
-      }
-      return null;
-    }
-
-    function openSetup(){
-      try{
-        var cols = headerCells();
-        var samp = sampleRowCells();
-        getSettings().then(function(all){
-          var existing = all[keyExact()] || all[keyCanonical()];
-          if(!existing){
-            var guessTicket = detectTicketIndex();
-            var candidate = firstSavedMapping(all);
-            if(candidate && guessTicket != null && +candidate.ticket === +guessTicket){
-              existing = candidate;
-            }
-          }
-          ensurePanel(cols, samp, existing);
-        });
-      }catch(e){
-        console.error('[teams-shoutout] openSetup error', e);
-        toast('Setup error, see console');
-      }
-    }
-
-    // ---------- toolbar mount
-    function findToolbarCanvas() {
-      var canvas = document.querySelector('.x-panel-toolbar .GMDB3DUBHYI .GMDB3DUBALJ') ||
-                   document.querySelector('.GMDB3DUBHYI .GMDB3DUBALJ') ||
-                   document.querySelector('.x-panel-toolbar') ||
-                   null;
-      return canvas;
-    }
-    function positionToolbarButton(btn) {
-      var canvas = findToolbarCanvas();
-      if (!canvas) return;
-      var searchEl = canvas.querySelector('.cw-toolbar-search');
-      var actionsEl = canvas.querySelector('.cw-toolbar-actions');
-      var clearEl  = canvas.querySelector('.cw-toolbar-clear');
-
-      function boxLeft(node) {
-        if (!node) return null;
-        var left = parseInt(node.style.left || '0', 10);
-        var width = (node.getBoundingClientRect ? node.getBoundingClientRect().width : 0) || 64;
-        return Math.max(0, left + width + 8);
-      }
-
-      var left = boxLeft(searchEl);
-      if (left == null) left = boxLeft(actionsEl);
-      if (left == null) left = boxLeft(clearEl);
-      if (left == null) left = 8;
-
-      btn.style.position = 'absolute';
-      btn.style.top = '3px';
-      btn.style.left = left + 'px';
-      btn.style.zIndex = '2';
-      btn.style.marginLeft = '0';
-      btn.style.height = '20px';
-      btn.style.lineHeight = '18px';
-    }
-
-    function ensureButton(){
-      if(!isBoard()) return;
-
-      var existing = document.getElementById(BTN_ID);
-      if(existing && !document.body.contains(existing)) existing = null;
-      if(existing){
-        positionToolbarButton(existing);
-        return;
-      }
-
-      var canvas = findToolbarCanvas();
-      if (!canvas) return;
-
-      var b = document.createElement('button');
-      b.id = BTN_ID;
-      b.type='button';
-      b.textContent = 'Teams Shoutout';
-      b.className = 'attentus-btn';
-      b.style.border = '1px solid #334155';
-      b.style.borderRadius = '8px';
-      b.style.padding = '0 10px';
-      b.style.background = '#1f2937';
-      b.style.color = '#e5e7eb';
-      b.style.font = '600 12px/18px system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif';
-      b.style.cursor = 'pointer';
-
-      canvas.appendChild(b);
-      positionToolbarButton(b);
-
-      b.addEventListener('click', function(e){
-        if(e.altKey){ debugDump(); return; }
-        if(e.shiftKey){ openSetup(); return; }
-
-        var wantOverview = e.ctrlKey || e.metaKey;
-
-        getSettings().then(function(all){
-          var map = all[keyExact()] || all[keyCanonical()];
-          if(!map){
-            openSetup();
-            toast('No mapping for this View, opened setup');
-            return;
-          }
-          if(wantOverview){
-            copyOverview(map);
-          }else{
-            copyWithMapping(map, false);
-          }
-        }).catch(function(err){
-          console.error('[teams-shoutout] click path error', err);
-          toast('Click error, see console');
-        });
-      });
-
-      b.addEventListener('contextmenu', function(e){
-        e.preventDefault();
-        getSettings().then(function(all){
-          var map = all[keyExact()] || all[keyCanonical()];
-          if(!map){
-            openSetup();
-            toast('No mapping for this View, opened setup');
-            return;
-          }
-          copyWithMapping(map, true);
-        }).catch(function(err){
-          console.error('[teams-shoutout] context path error', err);
-          toast('Click error, see console');
-        });
-      });
-
-      window.addEventListener('resize', function(){
-        var btn = document.getElementById(BTN_ID);
-        if(btn) positionToolbarButton(btn);
-      });
-      var mo = new MutationObserver(function(){
-        var btn = document.getElementById(BTN_ID);
-        if(btn && isBoard()) positionToolbarButton(btn);
-        if(btn && !isBoard()){
-          btn.remove();
-        }
-      });
-      mo.observe(canvas, { attributes:true, childList:true, subtree:true });
-    }
-
-    function debugDump(){
-      var ex = keyExact();
-      var ca = keyCanonical();
-      var vExact = readViewExact();
-      var vCanon = readViewCanonical();
-      getSettings().then(function(all){
-        console.debug('[teams-shoutout] view exact:', JSON.stringify(vExact));
-        console.debug('[teams-shoutout] view canonical:', JSON.stringify(vCanon));
-        console.debug('[teams-shoutout] key exact:', ex);
-        console.debug('[teams-shoutout] key canonical:', ca);
-        console.debug('[teams-shoutout] keys saved:', Object.keys(all));
-        console.debug('[teams-shoutout] mapping hit exact?', !!all[ex], 'hit canonical?', !!all[ca]);
-        toast('Debug info, see console');
-      });
-    }
-
-    function init(){
-      if(!isBoard()) return;
-      ensureButton();
-    }
-
-    (function boot(){
-      var delays = [0, 250, 750, 1500, 2500];
-      (function step(i){
-        if(i >= delays.length){
-          var mo = new MutationObserver(function(){
-            if(!document.getElementById(BTN_ID)){
-              if(isBoard()) ensureButton();
-            }else if(!isBoard()){
-              var x = document.getElementById(BTN_ID);
-              if(x) x.remove();
-            }
-          });
-          mo.observe(document.body, { childList:true, subtree:true });
-          return;
-        }
-        setTimeout(function(){
-          init();
-          step(i+1);
-        }, delays[i]);
-      })(0);
-    })();
-  })();
-
+  titleController.schedule();
+  setTimeout(() => { ensureBarPlaced(); titleController.schedule(); }, 200);
+  setTimeout(() => { ensureBarPlaced(); titleController.schedule(); }, 700);
 })();
