@@ -26,9 +26,16 @@
   const visible = (el) => !!el && (el.offsetParent !== null || el.getClientRects().length > 0);
   const norm = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
 
+  const TRIAGE_APPLY_TOOLTIP = [
+    'Changes visible ConnectWise fields only after confirmation.',
+    'Does not call ConnectWise or ITGlue APIs.',
+    'Does not save until the user chooses Save or Save & Close in the follow-up dialog.'
+  ].join('\n');
+
   const TRIAGE_WORKFLOWS = {
     spam: {
-      buttonLabel: 'Spam/Phishing',
+      buttonLabel: 'Apply Spam/Phish…',
+      draftLabel: 'Copy Spam Draft',
       confirmationTitle: 'Confirm Spam/Phishing triage',
       fieldSummary: 'Classify the ticket as Spam/Phishing with Help Desk ownership, Tier 1 handling, Priority 4 urgency, and a normalized contact-aware summary.',
       mutations: [
@@ -44,7 +51,8 @@
       postApplyMessage: 'Spam/Phishing fields applied'
     },
     junk: {
-      buttonLabel: 'Junk',
+      buttonLabel: 'Apply Junk…',
+      draftLabel: 'Copy Junk Draft',
       confirmationTitle: 'Confirm Junk triage',
       fieldSummary: 'Move the ticket to the Junk board.',
       mutations: [
@@ -53,7 +61,8 @@
       postApplyMessage: 'Junk fields applied'
     },
     cancel: {
-      buttonLabel: 'Closed/Cancelled',
+      buttonLabel: 'Apply Cancel…',
+      draftLabel: 'Copy Cancel Draft',
       confirmationTitle: 'Confirm Closed/Cancelled triage',
       fieldSummary: 'Close/cancel the ticket and mark Ticket Tier? as N/A - Cancelled Ticket.',
       mutations: [
@@ -412,7 +421,7 @@
     const plan = buildFieldPlan(workflow);
     const draft = [workflow.fieldSummary, '', 'Fields:', describePlan(plan)].join('\n');
     const ok = await copyText(draft);
-    toast(ok ? `${workflow.buttonLabel} draft copied` : 'Could not copy draft');
+    toast(ok ? `${workflow.draftLabel || workflow.buttonLabel} copied` : 'Could not copy draft');
     return ok;
   }
 
@@ -507,7 +516,7 @@
   }
 
   function showPostApplyDialog(workflow, plan, snapshot) {
-    showActionDialog(`${workflow.buttonLabel} fields applied`, {
+    showActionDialog(workflow.postApplyMessage || `${workflow.buttonLabel} fields applied`, {
       message: 'The field changes are applied in the visible ConnectWise UI only. Choose what to do with the unsaved changes.',
       fields: plan,
       actions: [
@@ -622,11 +631,11 @@
 
     const plan = buildFieldPlan(workflow);
     showActionDialog(workflow.confirmationTitle, {
-      message: `${workflow.fieldSummary} No ConnectWise fields will change until you choose Apply Fields. This uses only visible UI/DOM automation; Copy Draft Only keeps draft-mode behavior.`,
+      message: `${workflow.fieldSummary} No ConnectWise fields will change until you choose Apply Fields. This uses only visible UI/DOM automation; the copy-draft action keeps draft-mode behavior.`,
       fields: plan,
       actions: [
         { label: 'Cancel', onClick: () => toast('Triage cancelled') },
-        { label: 'Copy Draft Only', onClick: () => copyTriage(kind) },
+        { label: workflow.draftLabel || 'Copy Draft', onClick: () => copyTriage(kind) },
         {
           label: 'Apply Fields',
           primary: true,
@@ -724,9 +733,9 @@
     slot.id = SLOT_ID;
     Object.assign(slot.style, { display: 'inline-flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' });
     slot.append(
-      makeActionButton('att-cw-helpdesk-spam-btn', TRIAGE_WORKFLOWS.spam.buttonLabel, 'Confirm and apply Spam/Phishing triage fields', () => confirmAndApplyTriage('spam')),
-      makeActionButton('att-cw-helpdesk-junk-btn', TRIAGE_WORKFLOWS.junk.buttonLabel, 'Confirm and apply Junk triage fields', () => confirmAndApplyTriage('junk')),
-      makeActionButton('att-cw-helpdesk-cancel-btn', TRIAGE_WORKFLOWS.cancel.buttonLabel, 'Confirm and apply Closed/Cancelled triage fields', () => confirmAndApplyTriage('cancel'))
+      makeActionButton('att-cw-helpdesk-spam-btn', TRIAGE_WORKFLOWS.spam.buttonLabel, TRIAGE_APPLY_TOOLTIP, () => confirmAndApplyTriage('spam')),
+      makeActionButton('att-cw-helpdesk-junk-btn', TRIAGE_WORKFLOWS.junk.buttonLabel, TRIAGE_APPLY_TOOLTIP, () => confirmAndApplyTriage('junk')),
+      makeActionButton('att-cw-helpdesk-cancel-btn', TRIAGE_WORKFLOWS.cancel.buttonLabel, TRIAGE_APPLY_TOOLTIP, () => confirmAndApplyTriage('cancel'))
     );
 
     bar.append(label, slot);
