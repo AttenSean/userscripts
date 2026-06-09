@@ -52,6 +52,9 @@ Provenance: Human-authored with AI assistance; human-reviewed.
 - [**attentus-cw-time-entry-in-tab.user.js**](https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-time-entry-in-tab.user.js)  
   Forces new *Time Entry* forms to open in their own tab for better multitasking.
   
+- [**attentus-cw-helpdesk-toolkit.user.js**](https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-helpdesk-toolkit.user.js)
+  Unified Helpdesk Toolkit for ConnectWise ticket triage. It can apply ticket fields through the ConnectWise browser UI after explicit confirmation, but it does not use ConnectWise or ITGlue API writes. Save and Save & Close are available only after field application and require explicit user selection; Revert is available after field application.
+
 - [**attentus-cw-ticket-quick-triage.user.js**](https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-ticket-quick-triage.user.js)
   Adds a “Quick Triage:” bar with Junk and Spam/Phishing actions. Spam/Phishing sets Help Desk (if not already), MUST ASSIGN → Email → Spam/Phishing, Tier 1, SLA Low/Low → Priority 4, and Summary “Spam/Phishing (Contact)”. Shift+Click (opt-in) applies and Save & Close; Cancel fully reverts (incl. SLA). Hides on Project tickets
 
@@ -59,6 +62,15 @@ Provenance: Human-authored with AI assistance; human-reviewed.
   Ticket-only contact insight under Company pod Email. No-flash stealth scrape. Uses cache when throttled, and never overwrites shown data with a hint. Should only re-run on contact change.
 
 > If a script isn’t listed above but lives in this repo, it’s likely WIP or internal and may not include auto-update headers yet.
+
+
+---
+
+## Consolidation assessment
+
+| Script | Assessment |
+| --- | --- |
+| `attentus-cw-ticket-quick-triage.user.js` | Its safer UI-only, confirmation-driven workflow is being folded into `attentus-cw-helpdesk-toolkit.user.js`. |
 
 ---
 
