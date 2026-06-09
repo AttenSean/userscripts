@@ -10,9 +10,7 @@
 // @grant        GM_setClipboard
 // @grant        GM.setClipboard
 // @grant        GM_getValue
-// @grant        GM.getValue
 // @grant        GM_setValue
-// @grant        GM.setValue
 // @noframes
 // @downloadURL  https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-helpdesk-toolkit.user.js
 // @updateURL    https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-helpdesk-toolkit.user.js
@@ -24,14 +22,111 @@
   const BAR_ID = 'att-cw-helpdesk-toolkit-bar';
   const SLOT_ID = 'att-cw-helpdesk-toolkit-slot';
   const TRIAGE_MODE_STORAGE_KEY = 'att_hd_triage_mode';
-  const TRIAGE_MODES = new Set(['confirmApply']);
+  const SETTINGS_STORAGE_KEY = 'att_hd_toolkit_settings';
+  const TRIAGE_MODES = new Set(['draftOnly', 'confirmApply']);
   const DEFAULT_TRIAGE_MODE = 'confirmApply';
+  const DEFAULT_TOOLKIT_SETTINGS = {
+    clipboard: {
+      includeTicketLink: true,
+      signatureName: '',
+      signatureTemplate: '',
+      reviewChecklist: ''
+    },
+    triage: {
+      defaultMode: DEFAULT_TRIAGE_MODE
+    },
+    boardShoutouts: {
+      mappingsText: ''
+    },
+    safety: {
+      requireClearContactConfirmation: true,
+      requireTriageApplyConfirmation: true,
+      showPostApplySave: true,
+      showPostApplySaveAndClose: true
+    }
+  };
 
   const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
   const visible = (el) => !!el && (el.offsetParent !== null || el.getClientRects().length > 0);
   const norm = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+
+  function cloneDefaultSettings() {
+    return JSON.parse(JSON.stringify(DEFAULT_TOOLKIT_SETTINGS));
+  }
+
+  function storageGet(key, fallback) {
+    try {
+      if (typeof GM_getValue === 'function') return GM_getValue(key, fallback);
+    } catch {}
+    try {
+      const saved = localStorage.getItem(key);
+      return saved === null ? fallback : saved;
+    } catch {}
+    return fallback;
+  }
+
+  function storageSet(key, value) {
+    try {
+      if (typeof GM_setValue === 'function') {
+        GM_setValue(key, value);
+        return true;
+      }
+    } catch {}
+    try {
+      localStorage.setItem(key, value);
+      return true;
+    } catch {}
+    return false;
+  }
+
+  function normalizeToolkitSettings(settings = {}) {
+    const defaults = cloneDefaultSettings();
+    const normalized = {
+      clipboard: { ...defaults.clipboard, ...(settings.clipboard || {}) },
+      triage: { ...defaults.triage, ...(settings.triage || {}) },
+      boardShoutouts: { ...defaults.boardShoutouts, ...(settings.boardShoutouts || {}) },
+      safety: { ...defaults.safety, ...(settings.safety || {}) }
+    };
+    if (!TRIAGE_MODES.has(normalized.triage.defaultMode)) normalized.triage.defaultMode = DEFAULT_TRIAGE_MODE;
+    normalized.clipboard.includeTicketLink = !!normalized.clipboard.includeTicketLink;
+    normalized.clipboard.signatureName = String(normalized.clipboard.signatureName || '');
+    normalized.clipboard.signatureTemplate = String(normalized.clipboard.signatureTemplate || '');
+    normalized.clipboard.reviewChecklist = String(normalized.clipboard.reviewChecklist || '');
+    normalized.boardShoutouts.mappingsText = String(normalized.boardShoutouts.mappingsText || '');
+    normalized.safety.requireClearContactConfirmation = normalized.safety.requireClearContactConfirmation !== false;
+    normalized.safety.requireTriageApplyConfirmation = normalized.safety.requireTriageApplyConfirmation !== false;
+    normalized.safety.showPostApplySave = normalized.safety.showPostApplySave !== false;
+    normalized.safety.showPostApplySaveAndClose = normalized.safety.showPostApplySaveAndClose !== false;
+    return normalized;
+  }
+
+  function getToolkitSettings() {
+    const saved = storageGet(SETTINGS_STORAGE_KEY, '');
+    let parsed = {};
+    if (saved) {
+      try {
+        parsed = typeof saved === 'string' ? JSON.parse(saved) : saved;
+      } catch {}
+    }
+
+    if (!parsed.triage?.defaultMode) {
+      const legacyMode = storageGet(TRIAGE_MODE_STORAGE_KEY, '');
+      if (TRIAGE_MODES.has(legacyMode)) parsed = { ...parsed, triage: { ...(parsed.triage || {}), defaultMode: legacyMode } };
+    }
+
+    return normalizeToolkitSettings(parsed);
+  }
+
+  function setToolkitSettings(settings) {
+    const normalized = normalizeToolkitSettings(settings);
+    storageSet(SETTINGS_STORAGE_KEY, JSON.stringify(normalized));
+    storageSet(TRIAGE_MODE_STORAGE_KEY, normalized.triage.defaultMode);
+    updateTriageButtons();
+    return normalized;
+  }
 
   const TRIAGE_APPLY_TOOLTIP = [
     'Changes visible ConnectWise fields only after confirmation.',
@@ -993,21 +1088,13 @@
   }
 
   function getTriageMode() {
-    try {
-      const saved = localStorage.getItem(TRIAGE_MODE_STORAGE_KEY);
-      return TRIAGE_MODES.has(saved) ? saved : DEFAULT_TRIAGE_MODE;
-    } catch {
-      return DEFAULT_TRIAGE_MODE;
-    }
+    return getToolkitSettings().triage.defaultMode;
   }
 
   function setTriageMode(mode) {
-    const normalizedMode = TRIAGE_MODES.has(mode) ? mode : DEFAULT_TRIAGE_MODE;
-    try {
-      localStorage.setItem(TRIAGE_MODE_STORAGE_KEY, normalizedMode);
-    } catch {}
-    updateTriageButtons();
-    return normalizedMode;
+    const settings = getToolkitSettings();
+    settings.triage.defaultMode = TRIAGE_MODES.has(mode) ? mode : DEFAULT_TRIAGE_MODE;
+    return setToolkitSettings(settings).triage.defaultMode;
   }
 
   function isDraftOnlyMode() {
@@ -1023,7 +1110,10 @@
   }
 
   function handleTriageButton(kind) {
-    return confirmAndApplyTriage(kind);
+    if (isDraftOnlyMode()) return copyTriage(kind);
+    return getToolkitSettings().safety.requireTriageApplyConfirmation
+      ? confirmAndApplyTriage(kind)
+      : applyTriageWithoutConfirmation(kind);
   }
 
   function resolveMutationValue(workflow, mutation) {
@@ -1053,6 +1143,38 @@
 
   function describePlan(plan) {
     return plan.map(item => `${item.label}: ${item.currentValue || '(blank)'} → ${item.value}`).join('\n');
+  }
+
+  function parseBoardShoutoutMappings(mappingsText) {
+    const mappings = new Map();
+    for (const line of String(mappingsText || '').split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const match = trimmed.match(/^(.+?)(?:\s*=>\s*|\s*=\s*|\s*:\s*)(.+)$/);
+      if (!match) continue;
+      mappings.set(norm(match[1]), match[2].trim());
+    }
+    return mappings;
+  }
+
+  function getBoardShoutout(boardName, settings = getToolkitSettings()) {
+    const mappings = parseBoardShoutoutMappings(settings.boardShoutouts.mappingsText);
+    return mappings.get(norm(boardName)) || '';
+  }
+
+  function buildTriageDraft(workflow, plan) {
+    const settings = getToolkitSettings();
+    const lines = [workflow.fieldSummary, '', 'Fields:', describePlan(plan)];
+    const boardItem = plan.find(item => item.field === 'board');
+    const shoutout = getBoardShoutout(boardItem?.value || boardItem?.currentValue || '', settings);
+
+    if (shoutout) lines.push('', `Board shoutout: ${shoutout}`);
+    if (settings.clipboard.includeTicketLink) lines.push('', `Ticket link: ${location.href}`);
+    if (settings.clipboard.reviewChecklist) lines.push('', 'Review checklist:', settings.clipboard.reviewChecklist);
+    if (settings.clipboard.signatureTemplate) lines.push('', settings.clipboard.signatureTemplate);
+    else if (settings.clipboard.signatureName) lines.push('', settings.clipboard.signatureName);
+
+    return lines.join('\n');
   }
 
   const fieldSnapshotsByTicket = new Map();
@@ -1129,7 +1251,7 @@
     }
 
     const plan = buildFieldPlan(workflow);
-    const draft = [workflow.fieldSummary, '', 'Fields:', describePlan(plan)].join('\n');
+    const draft = buildTriageDraft(workflow, plan);
     const ok = await copyText(draft);
     toast(ok ? `${workflow.draftLabel || workflow.buttonLabel} copied` : 'Could not copy draft');
     return ok;
@@ -1226,34 +1348,43 @@
   }
 
   function showPostApplyDialog(workflow, plan, snapshot) {
+    const safety = getToolkitSettings().safety;
+    const actions = [
+      {
+        label: 'Revert',
+        onClick: async () => {
+          const ok = await revertFieldChanges(snapshot);
+          toast(ok ? 'Triage changes reverted' : 'Triage revert stopped');
+        }
+      },
+      { label: 'Leave Unsaved', onClick: () => toast('Changes left unsaved') }
+    ];
+
+    if (safety.showPostApplySave) {
+      actions.push({
+        label: 'Save',
+        primary: true,
+        onClick: async () => {
+          await sleep(120);
+          if (!clickSave()) toast('Save button not found');
+        }
+      });
+    }
+
+    if (safety.showPostApplySaveAndClose) {
+      actions.push({
+        label: 'Save & Close',
+        onClick: async () => {
+          await sleep(120);
+          if (!clickSaveAndClose()) toast('Save & Close button not found');
+        }
+      });
+    }
+
     showActionDialog(workflow.postApplyMessage || `${workflow.buttonLabel} fields applied`, {
       message: 'The requested fields have been changed in the browser UI only. They are not saved in ConnectWise until you choose Save or Save & Close here; otherwise you can leave them unsaved or revert them.',
       fields: plan,
-      actions: [
-        {
-          label: 'Revert',
-          onClick: async () => {
-            const ok = await revertFieldChanges(snapshot);
-            toast(ok ? 'Triage changes reverted' : 'Triage revert stopped');
-          }
-        },
-        { label: 'Leave Unsaved', onClick: () => toast('Changes left unsaved') },
-        {
-          label: 'Save',
-          primary: true,
-          onClick: async () => {
-            await sleep(120);
-            if (!clickSave()) toast('Save button not found');
-          }
-        },
-        {
-          label: 'Save & Close',
-          onClick: async () => {
-            await sleep(120);
-            if (!clickSaveAndClose()) toast('Save & Close button not found');
-          }
-        }
-      ]
+      actions
     });
   }
 
@@ -1365,6 +1496,25 @@
     return true;
   }
 
+
+  async function applyTriageWithoutConfirmation(kind) {
+    const workflow = getTriageWorkflow(kind);
+    if (!workflow) {
+      toast(`Unknown triage kind: ${kind}`);
+      return false;
+    }
+
+    const ticketInfo = {};
+    const result = await applyFieldChanges(workflow, ticketInfo);
+    if (result.ok) {
+      toast(workflow.postApplyMessage || `${workflow.buttonLabel} fields applied`);
+      showPostApplyDialog(workflow, result.plan, result.snapshot);
+      return true;
+    }
+    toast(`${workflow.buttonLabel} apply stopped`);
+    return false;
+  }
+
   function isProjectTicket() {
     const textIncludes = (selector, needle) => $$(selector).some(el => visible(el) && norm(el.textContent).includes(norm(needle)));
     return textIncludes('.navigationEntry.cw_CwLabel, .mm_label, .gwt-Label', 'Project Board')
@@ -1433,6 +1583,7 @@
   }
 
   function showToolkitSettingsDialog() {
+    const settings = getToolkitSettings();
     const overlay = document.createElement('div');
     Object.assign(overlay.style, {
       position: 'fixed',
@@ -1441,15 +1592,17 @@
       zIndex: 2147483645,
       display: 'flex',
       alignItems: 'center',
-      justifyContent: 'center'
+      justifyContent: 'center',
+      padding: '18px'
     });
 
     const card = document.createElement('div');
     Object.assign(card.style, {
       background: '#fff',
       borderRadius: '12px',
-      minWidth: '420px',
-      maxWidth: '620px',
+      width: 'min(760px, calc(100vw - 36px))',
+      maxHeight: 'calc(100vh - 36px)',
+      overflow: 'auto',
       padding: '16px',
       boxShadow: '0 10px 30px rgba(0,0,0,.25)',
       font: '14px system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif',
@@ -1461,22 +1614,88 @@
     Object.assign(heading.style, { fontSize: '16px', fontWeight: 700, marginBottom: '8px' });
 
     const intro = document.createElement('p');
-    intro.textContent = `Triage mode is stored locally as ${TRIAGE_MODE_STORAGE_KEY}. API access remains read-only; confirm/apply mode changes only visible ConnectWise UI fields after confirmation.`;
+    intro.textContent = `Settings are stored locally as ${SETTINGS_STORAGE_KEY} with GM_getValue/GM_setValue when available, then localStorage fallback. API access remains read-only; apply mode changes only visible ConnectWise UI fields.`;
     Object.assign(intro.style, { margin: '0 0 12px', lineHeight: 1.4, color: '#374151' });
 
     const form = document.createElement('div');
-    Object.assign(form.style, { display: 'grid', gap: '10px', marginBottom: '14px' });
+    Object.assign(form.style, { display: 'grid', gap: '12px', marginBottom: '14px' });
 
-    const currentMode = getTriageMode();
-    const options = [
-      {
-        value: 'confirmApply',
-        title: 'Confirm and apply',
-        description: 'Triage buttons open the confirmation modal, then apply fields through the visible UI only. Save and Save & Close appear only after fields are applied.'
+    function makeSection(title, description) {
+      const section = document.createElement('section');
+      Object.assign(section.style, {
+        border: '1px solid #D1D5DB',
+        borderRadius: '12px',
+        padding: '12px',
+        display: 'grid',
+        gap: '10px'
+      });
+      const sectionHeading = document.createElement('div');
+      sectionHeading.textContent = title;
+      Object.assign(sectionHeading.style, { fontWeight: 700, fontSize: '14px' });
+      section.appendChild(sectionHeading);
+      if (description) {
+        const desc = document.createElement('p');
+        desc.textContent = description;
+        Object.assign(desc.style, { margin: '-4px 0 0', color: '#4B5563', lineHeight: 1.4 });
+        section.appendChild(desc);
       }
-    ];
+      return section;
+    }
 
-    for (const option of options) {
+    function makeTextInput(id, labelText, value, placeholder = '') {
+      const label = document.createElement('label');
+      Object.assign(label.style, { display: 'grid', gap: '4px' });
+      const labelTitle = document.createElement('span');
+      labelTitle.textContent = labelText;
+      Object.assign(labelTitle.style, { fontWeight: 600 });
+      const input = document.createElement('input');
+      input.id = id;
+      input.type = 'text';
+      input.value = value || '';
+      input.placeholder = placeholder;
+      Object.assign(input.style, { border: '1px solid #D1D5DB', borderRadius: '8px', padding: '8px' });
+      label.append(labelTitle, input);
+      return label;
+    }
+
+    function makeTextarea(id, labelText, value, placeholder = '') {
+      const label = document.createElement('label');
+      Object.assign(label.style, { display: 'grid', gap: '4px' });
+      const labelTitle = document.createElement('span');
+      labelTitle.textContent = labelText;
+      Object.assign(labelTitle.style, { fontWeight: 600 });
+      const input = document.createElement('textarea');
+      input.id = id;
+      input.value = value || '';
+      input.placeholder = placeholder;
+      input.rows = 4;
+      Object.assign(input.style, { border: '1px solid #D1D5DB', borderRadius: '8px', padding: '8px', resize: 'vertical' });
+      label.append(labelTitle, input);
+      return label;
+    }
+
+    function makeCheckbox(id, labelText, checked, help = '') {
+      const label = document.createElement('label');
+      Object.assign(label.style, { display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '8px', alignItems: 'start' });
+      const input = document.createElement('input');
+      input.id = id;
+      input.type = 'checkbox';
+      input.checked = !!checked;
+      const text = document.createElement('span');
+      const strong = document.createElement('strong');
+      strong.textContent = labelText;
+      text.appendChild(strong);
+      if (help) {
+        const desc = document.createElement('span');
+        desc.textContent = help;
+        Object.assign(desc.style, { display: 'block', color: '#4B5563', fontWeight: 400, marginTop: '2px' });
+        text.appendChild(desc);
+      }
+      label.append(input, text);
+      return label;
+    }
+
+    function makeModeRadio(value, titleText, description) {
       const label = document.createElement('label');
       Object.assign(label.style, {
         display: 'grid',
@@ -1488,24 +1707,62 @@
         borderRadius: '10px',
         cursor: 'pointer'
       });
-
       const input = document.createElement('input');
       input.type = 'radio';
       input.name = 'att-cw-triage-mode';
-      input.value = option.value;
-      input.checked = currentMode === option.value;
-
+      input.value = value;
+      input.checked = settings.triage.defaultMode === value;
       const text = document.createElement('span');
       const title = document.createElement('strong');
-      title.textContent = option.title;
-      const description = document.createElement('span');
-      description.textContent = option.description;
-      Object.assign(description.style, { display: 'block', color: '#4B5563', marginTop: '2px' });
-      text.append(title, description);
-
+      title.textContent = titleText;
+      const desc = document.createElement('span');
+      desc.textContent = description;
+      Object.assign(desc.style, { display: 'block', color: '#4B5563', marginTop: '2px' });
+      text.append(title, desc);
       label.append(input, text);
-      form.appendChild(label);
+      return label;
     }
+
+    const clipboardSection = makeSection(
+      'Clipboard, signature, and review settings',
+      'Stored templates for local clipboard drafts, signatures, and review prompts. These settings do not call external APIs.'
+    );
+    clipboardSection.append(
+      makeCheckbox('att-cw-settings-include-link', 'Include ticket link in clipboard drafts', settings.clipboard.includeTicketLink),
+      makeTextInput('att-cw-settings-signature-name', 'Signature name', settings.clipboard.signatureName, 'Your name or team signature'),
+      makeTextarea('att-cw-settings-signature-template', 'Signature template', settings.clipboard.signatureTemplate, 'Example: Regards,\nHelp Desk'),
+      makeTextarea('att-cw-settings-review-checklist', 'Review checklist', settings.clipboard.reviewChecklist, 'Items to check before saving or closing a ticket')
+    );
+
+    const triageSection = makeSection(
+      'Triage settings',
+      'Choose the default behavior for Spam/Phish, Junk, and Cancel triage buttons.'
+    );
+    triageSection.append(
+      makeModeRadio('draftOnly', 'Copy Draft Only', 'Triage buttons copy drafts to the clipboard only and do not change fields.'),
+      makeModeRadio('confirmApply', 'Apply Fields After Confirmation', 'Triage buttons apply fields through visible UI automation after the configured confirmation step.')
+    );
+
+    const boardSection = makeSection(
+      'Board shoutout mappings',
+      'Map ConnectWise board names to shoutout text for local reference. Use one mapping per line, such as “Help Desk = @helpdesk”.'
+    );
+    boardSection.append(
+      makeTextarea('att-cw-settings-board-mappings', 'Mappings', settings.boardShoutouts.mappingsText, 'Help Desk = @helpdesk\nJunk = @triage')
+    );
+
+    const safetySection = makeSection(
+      'Safety settings',
+      'Controls for confirmation prompts and post-apply save options. API endpoints remain read-only; no ConnectWise or ITGlue data is modified through APIs.'
+    );
+    safetySection.append(
+      makeCheckbox('att-cw-settings-confirm-clear-contact', 'Require confirmation before Clear Contact', settings.safety.requireClearContactConfirmation, 'Stored for Clear Contact actions; no Clear Contact button is added by this settings dialog.'),
+      makeCheckbox('att-cw-settings-confirm-triage-apply', 'Require confirmation before triage field apply', settings.safety.requireTriageApplyConfirmation, 'When disabled, Apply Fields After Confirmation mode applies visible UI fields immediately.'),
+      makeCheckbox('att-cw-settings-show-save', 'Enable Save button in post-apply modal', settings.safety.showPostApplySave),
+      makeCheckbox('att-cw-settings-show-save-close', 'Enable Save & Close button in post-apply modal', settings.safety.showPostApplySaveAndClose)
+    );
+
+    form.append(clipboardSection, triageSection, boardSection, safetySection);
 
     const row = document.createElement('div');
     Object.assign(row.style, { display: 'flex', gap: '8px', justifyContent: 'flex-end', flexWrap: 'wrap' });
@@ -1537,9 +1794,27 @@
     row.append(
       makeButton('Cancel', () => {}),
       makeButton('Save Settings', () => {
-        const selected = $('input[name="att-cw-triage-mode"]:checked', form)?.value || DEFAULT_TRIAGE_MODE;
-        const saved = setTriageMode(selected);
-        toast(`Triage mode set to ${saved}`);
+        const saved = setToolkitSettings({
+          clipboard: {
+            includeTicketLink: $('#att-cw-settings-include-link', form)?.checked,
+            signatureName: $('#att-cw-settings-signature-name', form)?.value || '',
+            signatureTemplate: $('#att-cw-settings-signature-template', form)?.value || '',
+            reviewChecklist: $('#att-cw-settings-review-checklist', form)?.value || ''
+          },
+          triage: {
+            defaultMode: $('input[name="att-cw-triage-mode"]:checked', form)?.value || DEFAULT_TRIAGE_MODE
+          },
+          boardShoutouts: {
+            mappingsText: $('#att-cw-settings-board-mappings', form)?.value || ''
+          },
+          safety: {
+            requireClearContactConfirmation: $('#att-cw-settings-confirm-clear-contact', form)?.checked,
+            requireTriageApplyConfirmation: $('#att-cw-settings-confirm-triage-apply', form)?.checked,
+            showPostApplySave: $('#att-cw-settings-show-save', form)?.checked,
+            showPostApplySaveAndClose: $('#att-cw-settings-show-save-close', form)?.checked
+          }
+        });
+        toast(`Toolkit settings saved; triage mode is ${saved.triage.defaultMode}`);
       }, true)
     );
 
@@ -2026,6 +2301,10 @@
     confirmAndApplyTriage,
     getTriageMode,
     setTriageMode,
+    getToolkitSettings,
+    setToolkitSettings,
+    parseBoardShoutoutMappings,
+    getBoardShoutout,
     showToolkitSettingsDialog,
     mountTicketTools,
     handleTriageButton,
