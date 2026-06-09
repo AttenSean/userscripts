@@ -146,21 +146,13 @@ Provenance: Human-authored with AI assistance; human-reviewed.
 
 The Helpdesk Toolkit may automate visible ConnectWise ticket UI fields after explicit confirmation. That UI field automation is allowed. Direct write calls to ConnectWise or ITGlue APIs are not allowed: do not add API behavior that creates, updates, patches, deletes, or otherwise modifies records. Do not add API POST, PUT, PATCH, or DELETE routes. Save and Save & Close must require an explicit second user action after any confirmed field application.
 
-Run this static scan separately from `node --check` when reviewing `attentus-cw-helpdesk-toolkit.user.js` for direct API write behavior:
+Run this static scan separately from `node --check` when reviewing `attentus-cw-helpdesk-toolkit.user.js` for direct network/API write behavior:
 
 ```sh
-! rg -n --fixed-strings \
-  -e 'fetch(' \
-  -e 'XMLHttpRequest' \
-  -e 'GM_xmlhttpRequest' \
-  -e "method: 'POST'" \
-  -e "method: 'PUT'" \
-  -e "method: 'PATCH'" \
-  -e "method: 'DELETE'" \
-  attentus-cw-helpdesk-toolkit.user.js
+! rg -n "fetch\(|XMLHttpRequest|GM_xmlhttpRequest|method\s*:\s*['\"](POST|PUT|PATCH|DELETE)" attentus-cw-helpdesk-toolkit.user.js
 ```
 
-The leading `!` makes the check pass when no matches are found. Any matches from this scan need human review before release. Expected behavior is no direct ConnectWise or ITGlue write APIs; UI-only field setting in the ConnectWise page remains acceptable.
+The leading `!` makes the check pass when no matches are found. This check is intended to catch direct network/API write behavior, especially ConnectWise or ITGlue API writes. It is not intended to block user-confirmed UI field automation that only changes fields in the ConnectWise browser page after explicit user action. Any matches from this scan need human review before release. Expected behavior is no direct ConnectWise or ITGlue write APIs; UI-only field setting in the ConnectWise page remains acceptable.
 
 ---
 
