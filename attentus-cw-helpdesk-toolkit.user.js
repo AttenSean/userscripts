@@ -184,6 +184,210 @@
     input.blur();
   }
 
+
+  function dispatchAll(input) {
+    if (!input) return;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    input.dispatchEvent(new Event('blur', { bubbles: true }));
+  }
+
+  function setDomInputValue(input, value) {
+    const nativeSetter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value')?.set;
+    if (nativeSetter) nativeSetter.call(input, value);
+    else input.value = value;
+    dispatchAll(input);
+  }
+
+  const CONTACT_CLEAR_GROUPS = [
+    {
+      label: 'Contact',
+      selectors: [
+        'input.cw_contact',
+        'input[aria-label="Contact"]',
+        'input[id*="Contact"][role="combobox"]',
+        'input[name="ContactRecID"]'
+      ]
+    },
+    {
+      label: 'Email',
+      selectors: [
+        'input.cw_emailAddress',
+        'input[aria-label="Email"]',
+        'input[name="EmailAddress"]'
+      ]
+    },
+    {
+      label: 'Phone / Extension',
+      selectors: [
+        'input[aria-label="Phone"]',
+        'input[name="PhoneNumber"]',
+        'input[aria-label*="Ext"]',
+        'input[name*="Ext"]'
+      ],
+      roots: ['.cw_contactPhoneCommunications'],
+      rootInputSelector: 'input'
+    }
+  ];
+
+  const contactSnapshotsByTicket = new Map();
+
+  function describeInput(input) {
+    return input.getAttribute('aria-label')
+      || input.getAttribute('name')
+      || input.id
+      || input.className
+      || input.type
+      || 'input';
+  }
+
+  function getContactClearInputs() {
+    const seen = new Set();
+    const entries = [];
+
+    const addInput = (input, groupLabel) => {
+      if (!input || !('value' in input) || seen.has(input)) return;
+      seen.add(input);
+      entries.push({ input, groupLabel, label: `${groupLabel} (${describeInput(input)})` });
+    };
+
+    for (const group of CONTACT_CLEAR_GROUPS) {
+      for (const selector of group.selectors || []) {
+        $$(selector).forEach(input => addInput(input, group.label));
+      }
+      for (const rootSelector of group.roots || []) {
+        $$(rootSelector).forEach(root => {
+          $$(group.rootInputSelector || 'input', root).forEach(input => addInput(input, group.label));
+        });
+      }
+    }
+
+    return entries;
+  }
+
+  function snapshotContactInfo(entries = getContactClearInputs()) {
+    const ticketId = getTicketId();
+    const snapshot = {
+      ticketId,
+      createdAt: Date.now(),
+      entries: entries.map(entry => ({
+        ...entry,
+        value: String(entry.input.value || ''),
+        found: true
+      }))
+    };
+
+    if (ticketId) contactSnapshotsByTicket.set(ticketId, snapshot);
+    return snapshot;
+  }
+
+  function buildContactClearPlan(entries = getContactClearInputs()) {
+    return entries.map(entry => ({
+      ...entry,
+      found: true,
+      currentValue: String(entry.input.value || ''),
+      value: '(blank)'
+    }));
+  }
+
+  function clearContactInfo(snapshot = snapshotContactInfo()) {
+    let didSomething = false;
+
+    for (const entry of snapshot.entries || []) {
+      const input = entry.input;
+      if (!input || !('value' in input)) continue;
+      if (String(input.value || '') !== '') didSomething = true;
+      setDomInputValue(input, '');
+    }
+
+    if (!didSomething) toast('Contact, email, and phone fields were already blank');
+    return didSomething;
+  }
+
+  async function revertContactInfo(snapshot) {
+    const activeTicketId = getTicketId();
+    const savedSnapshot = snapshot || (activeTicketId ? contactSnapshotsByTicket.get(activeTicketId) : null);
+    if (!savedSnapshot) {
+      toast('No captured contact values found for this ticket');
+      return false;
+    }
+    if (activeTicketId && savedSnapshot.ticketId && savedSnapshot.ticketId !== activeTicketId) {
+      toast('Contact revert stopped: active ticket changed');
+      return false;
+    }
+
+    for (const entry of savedSnapshot.entries || []) {
+      const input = entry.input;
+      if (!input || !('value' in input) || !input.isConnected) {
+        toast(`${entry.label || entry.groupLabel || 'Contact field'} not found for revert`);
+        return false;
+      }
+      setDomInputValue(input, entry.value || '');
+      await sleep(20);
+    }
+    return true;
+  }
+
+  function showPostClearContactDialog(plan, snapshot) {
+    showActionDialog('Contact fields cleared', {
+      message: 'Contact, email, phone, and extension fields were cleared in the visible ConnectWise UI only. The changes are not saved unless you choose Save or Save & Close.',
+      fields: plan,
+      actions: [
+        {
+          label: 'Revert',
+          primary: true,
+          onClick: async () => {
+            const ok = await revertContactInfo(snapshot);
+            toast(ok ? 'Contact values reverted' : 'Contact revert stopped');
+          }
+        },
+        { label: 'Leave Unsaved', onClick: () => toast('Cleared values left unsaved') },
+        {
+          label: 'Save',
+          onClick: async () => {
+            await sleep(120);
+            if (!clickSave()) toast('Save button not found');
+          }
+        },
+        {
+          label: 'Save & Close',
+          onClick: async () => {
+            await sleep(120);
+            if (!clickSaveAndClose()) toast('Save & Close button not found');
+          }
+        }
+      ]
+    });
+  }
+
+  function confirmAndClearContactInfo() {
+    const entries = getContactClearInputs();
+    if (!entries.length) {
+      toast('No contact fields found to clear');
+      return false;
+    }
+
+    const plan = buildContactClearPlan(entries);
+    showActionDialog('Confirm Clear Contact', {
+      message: 'This clears only visible ConnectWise contact, email, phone, and extension fields through DOM events. No ConnectWise or ITGlue APIs are called, and nothing is saved until you use ConnectWise Save controls.',
+      fields: plan,
+      actions: [
+        { label: 'Cancel', onClick: () => toast('Clear Contact cancelled') },
+        {
+          label: 'Clear Contact',
+          primary: true,
+          onClick: () => {
+            const snapshot = snapshotContactInfo(entries);
+            clearContactInfo(snapshot);
+            toast('Contact fields cleared');
+            showPostClearContactDialog(plan, snapshot);
+          }
+        }
+      ]
+    });
+    return true;
+  }
+
   async function commitComboOnElement(input, desiredValue) {
     if (!input || input.disabled || input.readOnly || !visible(input)) return false;
     if (norm(input.value) === norm(desiredValue)) return true;
@@ -886,7 +1090,7 @@
     document.body.appendChild(overlay);
   }
 
-  function makeBar() {
+  function mountTicketTools() {
     const bar = document.createElement('div');
     bar.id = BAR_ID;
     Object.assign(bar.style, {
@@ -916,6 +1120,7 @@
       makeActionButton('att-cw-helpdesk-spam-btn', getTriageButtonLabel(TRIAGE_WORKFLOWS.spam), getTriageButtonTooltip(), () => handleTriageButton('spam')),
       makeActionButton('att-cw-helpdesk-junk-btn', getTriageButtonLabel(TRIAGE_WORKFLOWS.junk), getTriageButtonTooltip(), () => handleTriageButton('junk')),
       makeActionButton('att-cw-helpdesk-cancel-btn', getTriageButtonLabel(TRIAGE_WORKFLOWS.cancel), getTriageButtonTooltip(), () => handleTriageButton('cancel')),
+      makeActionButton('att-cw-helpdesk-clear-contact-btn', 'Clear Contact', 'Clear visible contact, email, phone, and extension fields after confirmation. Does not call ConnectWise or ITGlue APIs.', () => confirmAndClearContactInfo()),
       makeActionButton('att-cw-helpdesk-settings-btn', 'Settings…', `Configure ${TRIAGE_MODE_STORAGE_KEY}`, () => showToolkitSettingsDialog())
     );
 
@@ -933,7 +1138,7 @@
     const pod = findTicketPodRoot();
     const header = pod && findHeaderBlock(pod);
     if (!header) return false;
-    header.insertAdjacentElement('afterend', makeBar());
+    header.insertAdjacentElement('afterend', mountTicketTools());
     return true;
   }
 
@@ -943,10 +1148,15 @@
     getTriageMode,
     setTriageMode,
     showToolkitSettingsDialog,
+    mountTicketTools,
     handleTriageButton,
     snapshotFields,
     applyFieldChanges,
     revertFieldChanges,
+    clearContactInfo,
+    confirmAndClearContactInfo,
+    revertContactInfo,
+    snapshotContactInfo,
     getTicketId,
     commitComboOnElement,
     openPopupAndGetContainer,
