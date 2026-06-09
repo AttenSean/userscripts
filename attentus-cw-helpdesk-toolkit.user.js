@@ -19,6 +19,9 @@
 
   const BAR_ID = 'att-cw-helpdesk-toolkit-bar';
   const SLOT_ID = 'att-cw-helpdesk-toolkit-slot';
+  const TRIAGE_MODE_STORAGE_KEY = 'att_hd_triage_mode';
+  const TRIAGE_MODES = new Set(['draftOnly', 'confirmApply']);
+  const DEFAULT_TRIAGE_MODE = 'confirmApply';
 
   const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
   const $ = (selector, root = document) => root.querySelector(selector);
@@ -30,6 +33,12 @@
     'Changes visible ConnectWise fields only after confirmation.',
     'Does not call ConnectWise or ITGlue APIs.',
     'Does not save until the user chooses Save or Save & Close in the follow-up dialog.'
+  ].join('\n');
+
+  const TRIAGE_DRAFT_TOOLTIP = [
+    'Copies a triage draft to the clipboard only.',
+    'Does not change visible ConnectWise fields.',
+    'Does not call ConnectWise or ITGlue APIs.'
   ].join('\n');
 
   const TRIAGE_WORKFLOWS = {
@@ -314,6 +323,40 @@
     if (key === 'closedcancelled' || key === 'closed' || key === 'cancelled') return TRIAGE_WORKFLOWS.cancel;
     if (key === 'spamphishing' || key === 'phishing') return TRIAGE_WORKFLOWS.spam;
     return TRIAGE_WORKFLOWS[key] || null;
+  }
+
+  function getTriageMode() {
+    try {
+      const saved = localStorage.getItem(TRIAGE_MODE_STORAGE_KEY);
+      return TRIAGE_MODES.has(saved) ? saved : DEFAULT_TRIAGE_MODE;
+    } catch {
+      return DEFAULT_TRIAGE_MODE;
+    }
+  }
+
+  function setTriageMode(mode) {
+    const normalizedMode = TRIAGE_MODES.has(mode) ? mode : DEFAULT_TRIAGE_MODE;
+    try {
+      localStorage.setItem(TRIAGE_MODE_STORAGE_KEY, normalizedMode);
+    } catch {}
+    updateTriageButtons();
+    return normalizedMode;
+  }
+
+  function isDraftOnlyMode() {
+    return getTriageMode() === 'draftOnly';
+  }
+
+  function getTriageButtonLabel(workflow) {
+    return isDraftOnlyMode() ? (workflow.draftLabel || workflow.buttonLabel) : workflow.buttonLabel;
+  }
+
+  function getTriageButtonTooltip() {
+    return isDraftOnlyMode() ? TRIAGE_DRAFT_TOOLTIP : TRIAGE_APPLY_TOOLTIP;
+  }
+
+  function handleTriageButton(kind) {
+    return isDraftOnlyMode() ? copyTriage(kind) : confirmAndApplyTriage(kind);
   }
 
   function resolveMutationValue(workflow, mutation) {
@@ -706,6 +749,143 @@
     return outer;
   }
 
+  function updateTriageButtons() {
+    const buttons = [
+      ['att-cw-helpdesk-spam-btn', TRIAGE_WORKFLOWS.spam],
+      ['att-cw-helpdesk-junk-btn', TRIAGE_WORKFLOWS.junk],
+      ['att-cw-helpdesk-cancel-btn', TRIAGE_WORKFLOWS.cancel]
+    ];
+
+    for (const [id, workflow] of buttons) {
+      const button = document.getElementById(id);
+      if (!button) continue;
+      const label = $('.GMDB3DUBBPG', button);
+      if (label) label.textContent = getTriageButtonLabel(workflow);
+      button.title = getTriageButtonTooltip();
+    }
+  }
+
+  function showToolkitSettingsDialog() {
+    const overlay = document.createElement('div');
+    Object.assign(overlay.style, {
+      position: 'fixed',
+      inset: 0,
+      background: 'rgba(0,0,0,.38)',
+      zIndex: 2147483645,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center'
+    });
+
+    const card = document.createElement('div');
+    Object.assign(card.style, {
+      background: '#fff',
+      borderRadius: '12px',
+      minWidth: '420px',
+      maxWidth: '620px',
+      padding: '16px',
+      boxShadow: '0 10px 30px rgba(0,0,0,.25)',
+      font: '14px system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif',
+      color: '#111827'
+    });
+
+    const heading = document.createElement('div');
+    heading.textContent = 'Helpdesk Toolkit Settings';
+    Object.assign(heading.style, { fontSize: '16px', fontWeight: 700, marginBottom: '8px' });
+
+    const intro = document.createElement('p');
+    intro.textContent = `Triage mode is stored locally as ${TRIAGE_MODE_STORAGE_KEY}. API access remains read-only; confirm/apply mode changes only visible ConnectWise UI fields after confirmation.`;
+    Object.assign(intro.style, { margin: '0 0 12px', lineHeight: 1.4, color: '#374151' });
+
+    const form = document.createElement('div');
+    Object.assign(form.style, { display: 'grid', gap: '10px', marginBottom: '14px' });
+
+    const currentMode = getTriageMode();
+    const options = [
+      {
+        value: 'draftOnly',
+        title: 'Draft only',
+        description: 'Triage buttons copy drafts to the clipboard only and do not change fields.'
+      },
+      {
+        value: 'confirmApply',
+        title: 'Confirm and apply',
+        description: 'Triage buttons open the confirmation modal, then apply fields through the visible UI only.'
+      }
+    ];
+
+    for (const option of options) {
+      const label = document.createElement('label');
+      Object.assign(label.style, {
+        display: 'grid',
+        gridTemplateColumns: 'auto 1fr',
+        gap: '8px',
+        alignItems: 'start',
+        padding: '10px',
+        border: '1px solid #D1D5DB',
+        borderRadius: '10px',
+        cursor: 'pointer'
+      });
+
+      const input = document.createElement('input');
+      input.type = 'radio';
+      input.name = 'att-cw-triage-mode';
+      input.value = option.value;
+      input.checked = currentMode === option.value;
+
+      const text = document.createElement('span');
+      const title = document.createElement('strong');
+      title.textContent = option.title;
+      const description = document.createElement('span');
+      description.textContent = option.description;
+      Object.assign(description.style, { display: 'block', color: '#4B5563', marginTop: '2px' });
+      text.append(title, description);
+
+      label.append(input, text);
+      form.appendChild(label);
+    }
+
+    const row = document.createElement('div');
+    Object.assign(row.style, { display: 'flex', gap: '8px', justifyContent: 'flex-end', flexWrap: 'wrap' });
+
+    function makeButton(label, action, primary = false) {
+      const button = document.createElement('button');
+      button.textContent = label;
+      Object.assign(button.style, {
+        borderRadius: '10px',
+        padding: '8px 12px',
+        cursor: 'pointer',
+        border: '1px solid',
+        fontWeight: 600,
+        background: primary ? '#111827' : '#fff',
+        color: primary ? '#fff' : '#111827',
+        borderColor: primary ? '#111827' : '#D1D5DB'
+      });
+      button.addEventListener('click', async () => {
+        button.disabled = true;
+        try {
+          await action?.();
+        } finally {
+          overlay.remove();
+        }
+      });
+      return button;
+    }
+
+    row.append(
+      makeButton('Cancel', () => {}),
+      makeButton('Save Settings', () => {
+        const selected = $('input[name="att-cw-triage-mode"]:checked', form)?.value || DEFAULT_TRIAGE_MODE;
+        const saved = setTriageMode(selected);
+        toast(`Triage mode set to ${saved}`);
+      }, true)
+    );
+
+    card.append(heading, intro, form, row);
+    overlay.appendChild(card);
+    document.body.appendChild(overlay);
+  }
+
   function makeBar() {
     const bar = document.createElement('div');
     bar.id = BAR_ID;
@@ -733,9 +913,10 @@
     slot.id = SLOT_ID;
     Object.assign(slot.style, { display: 'inline-flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' });
     slot.append(
-      makeActionButton('att-cw-helpdesk-spam-btn', TRIAGE_WORKFLOWS.spam.buttonLabel, TRIAGE_APPLY_TOOLTIP, () => confirmAndApplyTriage('spam')),
-      makeActionButton('att-cw-helpdesk-junk-btn', TRIAGE_WORKFLOWS.junk.buttonLabel, TRIAGE_APPLY_TOOLTIP, () => confirmAndApplyTriage('junk')),
-      makeActionButton('att-cw-helpdesk-cancel-btn', TRIAGE_WORKFLOWS.cancel.buttonLabel, TRIAGE_APPLY_TOOLTIP, () => confirmAndApplyTriage('cancel'))
+      makeActionButton('att-cw-helpdesk-spam-btn', getTriageButtonLabel(TRIAGE_WORKFLOWS.spam), getTriageButtonTooltip(), () => handleTriageButton('spam')),
+      makeActionButton('att-cw-helpdesk-junk-btn', getTriageButtonLabel(TRIAGE_WORKFLOWS.junk), getTriageButtonTooltip(), () => handleTriageButton('junk')),
+      makeActionButton('att-cw-helpdesk-cancel-btn', getTriageButtonLabel(TRIAGE_WORKFLOWS.cancel), getTriageButtonTooltip(), () => handleTriageButton('cancel')),
+      makeActionButton('att-cw-helpdesk-settings-btn', 'Settings…', `Configure ${TRIAGE_MODE_STORAGE_KEY}`, () => showToolkitSettingsDialog())
     );
 
     bar.append(label, slot);
@@ -759,6 +940,10 @@
   window.attentusHelpdeskToolkit = {
     copyTriage,
     confirmAndApplyTriage,
+    getTriageMode,
+    setTriageMode,
+    showToolkitSettingsDialog,
+    handleTriageButton,
     snapshotFields,
     applyFieldChanges,
     revertFieldChanges,
