@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         attentus-cw-helpdesk-toolkit
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.0.0
+// @version      1.1.0
 // @description  Helpdesk toolkit for ConnectWise ticket triage. Confirms before DOM-only field changes and keeps clipboard draft fallback mode.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
@@ -9,6 +9,10 @@
 // @run-at       document-idle
 // @grant        GM_setClipboard
 // @grant        GM.setClipboard
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM.getValue
+// @grant        GM.setValue
 // @noframes
 // @downloadURL  https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-helpdesk-toolkit.user.js
 // @updateURL    https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-helpdesk-toolkit.user.js
@@ -918,6 +922,9 @@
       makeActionButton('att-cw-helpdesk-cancel-btn', getTriageButtonLabel(TRIAGE_WORKFLOWS.cancel), getTriageButtonTooltip(), () => handleTriageButton('cancel')),
       makeActionButton('att-cw-helpdesk-settings-btn', 'Settings…', `Configure ${TRIAGE_MODE_STORAGE_KEY}`, () => showToolkitSettingsDialog())
     );
+    if (titleController.isActive) {
+      slot.appendChild(makeActionButton(TITLE_SETTINGS_BUTTON_ID, 'Title Settings…', 'Configure tab title normalization', () => titleController.openSettings()));
+    }
 
     bar.append(label, slot);
     return bar;
@@ -937,6 +944,424 @@
     return true;
   }
 
+
+  // -------------------- Tab title normalization --------------------
+  // Folded in from attentus-cw-tab-title-normalize.user.js with toolkit-specific
+  // IDs and a shared guard so the standalone script and toolkit do not both run
+  // title observers during the transition.
+  const TITLE_ENGINE_GUARD = '__attentusCwTabTitleNormalizeActive';
+  const TITLE_ENGINE_DATA_ATTR = 'attCwTitleNormalizeOwner';
+  const TITLE_ENGINE_OWNER = 'helpdesk-toolkit';
+  const TITLE_SETTINGS_BUTTON_ID = 'att-cw-helpdesk-title-settings-btn';
+  const TITLE_SETTINGS_OVERLAY_ID = 'att-cw-helpdesk-title-settings-overlay';
+  const TITLE_K_COMPANY = 'att_tab_title_add_company';
+  const TITLE_K_SB_RENAME = 'att_tab_title_rename_serviceboard';
+  const TITLE_K_TE_TICKET = 'att_tab_title_timeentry_ticket';
+  const TITLE_DEFAULTS = {
+    [TITLE_K_COMPANY]: true,
+    [TITLE_K_SB_RENAME]: true,
+    [TITLE_K_TE_TICKET]: true
+  };
+
+  async function gmGet(key, defVal) {
+    try { if (typeof GM !== 'undefined' && GM.getValue) return await GM.getValue(key, defVal); } catch {}
+    try { if (typeof GM_getValue === 'function') return GM_getValue(key, defVal); } catch {}
+    try { const raw = localStorage.getItem(key); return raw == null ? defVal : JSON.parse(raw); } catch {}
+    return defVal;
+  }
+
+  async function gmSet(key, value) {
+    try { if (typeof GM !== 'undefined' && GM.setValue) return await GM.setValue(key, value); } catch {}
+    try { if (typeof GM_setValue === 'function') return GM_setValue(key, value); } catch {}
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+  }
+
+  function claimTitleEngine() {
+    const active = window[TITLE_ENGINE_GUARD];
+    const domOwner = document.documentElement?.dataset?.[TITLE_ENGINE_DATA_ATTR] || '';
+    if ((active?.owner && active.owner !== TITLE_ENGINE_OWNER) || (domOwner && domOwner !== TITLE_ENGINE_OWNER)) return false;
+    if (active?.owner === TITLE_ENGINE_OWNER || domOwner === TITLE_ENGINE_OWNER) return false;
+
+    window[TITLE_ENGINE_GUARD] = {
+      owner: TITLE_ENGINE_OWNER,
+      script: 'attentus-cw-helpdesk-toolkit',
+      startedAt: Date.now()
+    };
+    if (document.documentElement?.dataset) document.documentElement.dataset[TITLE_ENGINE_DATA_ATTR] = TITLE_ENGINE_OWNER;
+    return true;
+  }
+
+  function createTitleController() {
+    if (!claimTitleEngine()) {
+      return {
+        isActive: false,
+        schedule: () => {},
+        handleDomMutation: () => {},
+        handleRouteChange: () => {},
+        openSettings: () => toast('Tab title settings are controlled by the standalone title normalizer')
+      };
+    }
+
+    const titleSettings = { ...TITLE_DEFAULTS };
+    let titleSettingsReady = (async () => {
+      titleSettings[TITLE_K_COMPANY] = !!(await gmGet(TITLE_K_COMPANY, TITLE_DEFAULTS[TITLE_K_COMPANY]));
+      titleSettings[TITLE_K_SB_RENAME] = !!(await gmGet(TITLE_K_SB_RENAME, TITLE_DEFAULTS[TITLE_K_SB_RENAME]));
+      titleSettings[TITLE_K_TE_TICKET] = !!(await gmGet(TITLE_K_TE_TICKET, TITLE_DEFAULTS[TITLE_K_TE_TICKET]));
+    })();
+
+    const originalTitle = document.title;
+    const titleNorm = value => String(value || '').replace(/\s+/g, ' ').trim();
+    const titleVisible = (el) => !!el && el.nodeType === 1 && (el.offsetParent !== null || el.getClientRects().length > 0);
+    const MIN_TICKET_DIGITS = 5;
+    let lastSnapshotSig = '';
+    let hiddenPoller = null;
+
+    function titleParts(id, summary, company, includeCompany) {
+      const parts = [];
+      if (id) parts.push(`#${id}`);
+      if (summary) parts.push(summary);
+      if (includeCompany && company) parts.push(company);
+      return parts.join(' - ').trim();
+    }
+
+    function isServiceBoardList() {
+      return !!document.querySelector('table.srboard-grid tr.cw-ml-row');
+    }
+
+    function isTimeEntryPage() {
+      const href = location.href.toLowerCase();
+      if (/\btime[_-]?entry\b/.test(href) || /timeentry/.test(href)) return true;
+      const labels = document.querySelectorAll('.GMDB3DUBBPG, .GMDB3DUBORG, .gwt-Label.mm_label, [id$="-label"]');
+      for (const el of labels) {
+        const text = titleNorm(el.textContent).toLowerCase();
+        if (text.includes('time entry')) return true;
+      }
+      return !!(document.querySelector('input.cw_timeStart') || document.querySelector('input.cw_timeEnd'));
+    }
+
+    function ticketIdFromTitleUrl() {
+      try {
+        const url = new URL(location.href);
+        const queryId = url.searchParams.get('service_recid')
+          || url.searchParams.get('srRecID')
+          || url.searchParams.get('serviceTicketId')
+          || url.searchParams.get('recid');
+        if (queryId && /^\d+$/.test(queryId) && queryId.length >= MIN_TICKET_DIGITS) return queryId;
+
+        const match = url.pathname.match(/(?:^|\/)(?:ticket|tickets|sr|service[_-]?ticket)s?\/(\d+)(?:$|[/?#])/i);
+        if (match?.[1] && match[1].length >= MIN_TICKET_DIGITS) return match[1];
+      } catch {}
+      return '';
+    }
+
+    function ticketIdFromTitleDom() {
+      const candidates = document.querySelectorAll(
+        '[id$="-label"], .gwt-Label, .mm_label, .GMDB3DUBNLI, .GMDB3DUBLHH, .GMDB3DUBIHH, .GMDB3DUBORG, .GMDB3DUBBPG'
+      );
+      for (const el of candidates) {
+        if (!titleVisible(el)) continue;
+        const match = titleNorm(el.textContent).match(/ticket\s*#\s*(\d+)/i);
+        if (match?.[1] && match[1].length >= MIN_TICKET_DIGITS) return match[1];
+      }
+      return '';
+    }
+
+    function getTitleTicketId() {
+      return ticketIdFromTitleUrl() || ticketIdFromTitleDom() || '';
+    }
+
+    function getTitleSummary() {
+      const input = document.querySelector('input.cw_PsaSummaryHeader')
+        || document.querySelector('input.cw_summary')
+        || document.querySelector('input[placeholder*="summary" i]');
+      if (input?.value) return titleNorm(input.value);
+
+      const labels = document.querySelectorAll('[id$="-label"], .GMDB3DUBORG, .gwt-Label, .mm_label');
+      for (const el of labels) {
+        if (!titleVisible(el)) continue;
+        const match = titleNorm(el.textContent).match(/^summary:\s*(.+)$/i);
+        if (match) return titleNorm(match[1]);
+      }
+      return '';
+    }
+
+    function getTitleCompany() {
+      const labels = document.querySelectorAll('[id$="-label"], .gwt-Label, .mm_label, .GMDB3DUBORG, .GMDB3DUBBPG');
+      for (const el of labels) {
+        if (!titleVisible(el)) continue;
+        const match = titleNorm(el.textContent).match(/^\s*company:\s*(.+)$/i);
+        if (match) return titleNorm(match[1]);
+      }
+
+      const input = document.querySelector('input.cw_company') || document.querySelector('input[placeholder*="company" i]');
+      return input?.value ? titleNorm(input.value) : '';
+    }
+
+    function parseTitleTicketId(raw) {
+      const match = String(raw || '').match(/(\d{5,})/);
+      return match ? match[1] : null;
+    }
+
+    function getTicketIdFromChargeToOnce() {
+      const input = document.querySelector('input.cw_ChargeToTextBox, input[id$="ChargeToTextBox"], input.GKV5JQ3DMVF.cw_ChargeToTextBox');
+      if (!input) return null;
+
+      let id = parseTitleTicketId(input.value);
+      if (id) return id;
+
+      const scope = input.closest('td,div') || document;
+      const hidden = scope.querySelector('input[type="hidden"][value], input[type="hidden"][name*="ChargeTo"]');
+      id = parseTitleTicketId(hidden?.value);
+      if (id) return id;
+
+      const activeId = input.getAttribute('aria-activedescendant');
+      if (activeId) {
+        const activeEl = document.getElementById(activeId);
+        id = parseTitleTicketId(activeEl?.textContent);
+        if (id) return id;
+      }
+      return null;
+    }
+
+    function getServiceBoardViewName() {
+      const root = document.querySelector('.cw-toolbar-view-dropdown') || document;
+      const input = root.querySelector('input.cw_CwComboBox') || root.querySelector('input[placeholder*="view" i]');
+      const value = (input && (input.value || input.getAttribute('value'))) || '';
+      return titleNorm(value);
+    }
+
+    const schedule = (() => {
+      let pending = false;
+      let lastRun = 0;
+      const MIN_MS = 120;
+
+      const run = () => {
+        pending = false;
+        const now = Date.now();
+        if (now - lastRun < MIN_MS) {
+          pending = true;
+          setTimeout(run, MIN_MS);
+          return;
+        }
+        lastRun = now;
+        updateTitle();
+      };
+
+      return () => {
+        if (pending) return;
+        pending = true;
+        if (document.hidden) { setTimeout(run, 0); return; }
+        if ('requestIdleCallback' in window) requestIdleCallback(run, { timeout: 400 });
+        else if ('requestAnimationFrame' in window) requestAnimationFrame(run);
+        else setTimeout(run, 0);
+      };
+    })();
+
+    const snapshotSignature = snapshot => Object.values(snapshot).map(value => String(value ?? '')).join('|');
+
+    function pageSnapshot() {
+      const ticketId = getTitleTicketId();
+      if (ticketId) {
+        return { kind: 'ticket', id: ticketId, summary: getTitleSummary(), company: getTitleCompany(), url: location.pathname + location.search };
+      }
+      if (isTimeEntryPage()) {
+        const timeTicketId = getTicketIdFromChargeToOnce() || ticketIdFromTitleUrl() || '';
+        return { kind: 'time', id: timeTicketId, url: location.pathname + location.search };
+      }
+      if (isServiceBoardList()) {
+        return { kind: 'board', view: getServiceBoardViewName(), url: location.pathname + location.search };
+      }
+      return { kind: 'other', url: location.pathname + location.search };
+    }
+
+    async function updateTitle() {
+      const snapshot = pageSnapshot();
+      const sig = snapshotSignature(snapshot);
+      if (sig === lastSnapshotSig) return;
+      lastSnapshotSig = sig;
+
+      await titleSettingsReady;
+
+      if (snapshot.kind === 'ticket') {
+        const next = titleParts(snapshot.id, snapshot.summary, snapshot.company, !!titleSettings[TITLE_K_COMPANY]);
+        if (next && document.title !== next) document.title = next;
+        return;
+      }
+
+      if (snapshot.kind === 'time') {
+        const next = titleSettings[TITLE_K_TE_TICKET] && snapshot.id ? `#${snapshot.id} - Time Entry` : 'Time Entry';
+        if (document.title !== next) document.title = next;
+        return;
+      }
+
+      if (snapshot.kind === 'board' && titleSettings[TITLE_K_SB_RENAME]) {
+        const view = snapshot.view?.trim();
+        if (view && document.title !== view) document.title = view;
+        return;
+      }
+
+      if (!isServiceBoardList() && !document.title && document.title !== originalTitle) {
+        document.title = originalTitle;
+      }
+    }
+
+    function attachFieldListeners() {
+      const selectors = [
+        'input.cw_PsaSummaryHeader',
+        'input.cw_summary',
+        'input.cw_company',
+        'input[placeholder*="summary" i]',
+        'input[placeholder*="company" i]',
+        '.cw-toolbar-view-dropdown input.cw_CwComboBox',
+        '.cw-toolbar-view-dropdown input[type="text"]',
+        'input.cw_ChargeToTextBox',
+        'input[id$="ChargeToTextBox"]'
+      ];
+      document.querySelectorAll(selectors.join(',')).forEach(el => {
+        ['input', 'change', 'keyup', 'keydown', 'blur'].forEach(eventName => {
+          el.removeEventListener(eventName, schedule);
+          el.addEventListener(eventName, schedule, { passive: true });
+        });
+      });
+    }
+
+    function handleDomMutation(mutations = []) {
+      for (const mutation of mutations) {
+        if (mutation.type === 'childList') {
+          attachFieldListeners();
+          schedule();
+          return;
+        }
+        if (mutation.type === 'attributes') {
+          const name = mutation.attributeName || '';
+          if (name === 'value' || name === 'placeholder' || name === 'title' || name === 'aria-activedescendant') {
+            attachFieldListeners();
+            schedule();
+            return;
+          }
+        }
+      }
+    }
+
+    function handleRouteChange() {
+      lastSnapshotSig = '';
+      attachFieldListeners();
+      schedule();
+    }
+
+    async function openTitleSettingsDialog() {
+      await titleSettingsReady;
+      document.getElementById(TITLE_SETTINGS_OVERLAY_ID)?.remove();
+
+      const overlay = document.createElement('div');
+      overlay.id = TITLE_SETTINGS_OVERLAY_ID;
+      Object.assign(overlay.style, {
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(0,0,0,.35)',
+        zIndex: 2147483646,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center'
+      });
+
+      const modal = document.createElement('div');
+      Object.assign(modal.style, {
+        width: 'min(440px, 92vw)',
+        background: '#fff',
+        color: '#111827',
+        borderRadius: '12px',
+        boxShadow: '0 10px 30px rgba(0,0,0,.25)',
+        padding: '16px',
+        font: '14px system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif'
+      });
+
+      const addCompanyId = 'att-cw-helpdesk-title-add-company';
+      const serviceBoardId = 'att-cw-helpdesk-title-service-board';
+      const timeEntryId = 'att-cw-helpdesk-title-time-entry';
+      modal.innerHTML = `
+        <div style="font-weight:700; font-size:16px; margin-bottom:8px;">Tab Title Settings</div>
+        <label style="display:flex; align-items:center; gap:8px; margin:8px 0;">
+          <input type="checkbox" id="${addCompanyId}" ${titleSettings[TITLE_K_COMPANY] ? 'checked' : ''}>
+          <span>Append company to ticket tabs</span>
+        </label>
+        <label style="display:flex; align-items:center; gap:8px; margin:8px 0;">
+          <input type="checkbox" id="${serviceBoardId}" ${titleSettings[TITLE_K_SB_RENAME] ? 'checked' : ''}>
+          <span>Rename Service Board tabs to the active View</span>
+        </label>
+        <label style="display:flex; align-items:center; gap:8px; margin:8px 0;">
+          <input type="checkbox" id="${timeEntryId}" ${titleSettings[TITLE_K_TE_TICKET] ? 'checked' : ''}>
+          <span>Add ticket # to Time Entry tabs when available</span>
+        </label>
+      `;
+
+      const row = document.createElement('div');
+      Object.assign(row.style, { display: 'flex', gap: '8px', justifyContent: 'flex-end', marginTop: '12px' });
+
+      const closeButton = document.createElement('button');
+      closeButton.type = 'button';
+      closeButton.textContent = 'Close';
+      Object.assign(closeButton.style, { padding: '7px 11px', border: '1px solid #D1D5DB', borderRadius: '8px', background: '#fff', cursor: 'pointer' });
+      closeButton.addEventListener('click', () => overlay.remove());
+
+      const saveButton = document.createElement('button');
+      saveButton.type = 'button';
+      saveButton.textContent = 'Save';
+      Object.assign(saveButton.style, { padding: '7px 11px', border: '1px solid #111827', borderRadius: '8px', background: '#111827', color: '#fff', cursor: 'pointer', fontWeight: 600 });
+      saveButton.addEventListener('click', async () => {
+        const newAddCompany = !!document.getElementById(addCompanyId)?.checked;
+        const newServiceBoard = !!document.getElementById(serviceBoardId)?.checked;
+        const newTimeEntry = !!document.getElementById(timeEntryId)?.checked;
+
+        await gmSet(TITLE_K_COMPANY, newAddCompany);
+        await gmSet(TITLE_K_SB_RENAME, newServiceBoard);
+        await gmSet(TITLE_K_TE_TICKET, newTimeEntry);
+
+        titleSettings[TITLE_K_COMPANY] = newAddCompany;
+        titleSettings[TITLE_K_SB_RENAME] = newServiceBoard;
+        titleSettings[TITLE_K_TE_TICKET] = newTimeEntry;
+        titleSettingsReady = Promise.resolve();
+        lastSnapshotSig = '';
+        overlay.remove();
+        schedule();
+        toast('Tab title settings saved');
+      });
+
+      row.append(closeButton, saveButton);
+      modal.appendChild(row);
+      overlay.appendChild(modal);
+      document.body.appendChild(overlay);
+    }
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        if (!hiddenPoller) hiddenPoller = setInterval(() => updateTitle(), 1500);
+      } else {
+        if (hiddenPoller) { clearInterval(hiddenPoller); hiddenPoller = null; }
+        schedule();
+      }
+    }, { passive: true });
+
+    window.addEventListener('att:openviews-applied', () => schedule(), { passive: true });
+    window.addEventListener('focus', () => schedule(), { passive: true });
+
+    (async () => {
+      await titleSettingsReady;
+      attachFieldListeners();
+      schedule();
+    })();
+
+    return {
+      isActive: true,
+      schedule,
+      handleDomMutation,
+      handleRouteChange,
+      openSettings: openTitleSettingsDialog
+    };
+  }
+
+  const titleController = createTitleController();
+
   window.attentusHelpdeskToolkit = {
     copyTriage,
     confirmAndApplyTriage,
@@ -953,30 +1378,43 @@
     findInputByLabel,
     showActionDialog,
     clickSave,
-    clickSaveAndClose
+    clickSaveAndClose,
+    titleController
   };
 
   let lastHref = location.href;
-  const observer = new MutationObserver(() => {
+  const observer = new MutationObserver((mutations) => {
     if (lastHref !== location.href) {
       lastHref = location.href;
       $(`#${BAR_ID}`)?.remove();
+      titleController.handleRouteChange();
+    } else {
+      titleController.handleDomMutation(mutations);
     }
     ensureBarPlaced();
   });
-  observer.observe(document.documentElement, { subtree: true, childList: true });
+  observer.observe(document.documentElement, {
+    subtree: true,
+    childList: true,
+    attributes: true,
+    attributeFilter: ['value', 'placeholder', 'title', 'aria-activedescendant']
+  });
 
   ['pushState', 'replaceState'].forEach(key => {
     const original = history[key];
     history[key] = function () {
       const result = original.apply(this, arguments);
-      queueMicrotask(ensureBarPlaced);
+      queueMicrotask(() => {
+        titleController.handleRouteChange();
+        ensureBarPlaced();
+      });
       return result;
     };
   });
 
-  window.addEventListener('popstate', ensureBarPlaced);
+  window.addEventListener('popstate', () => { titleController.handleRouteChange(); ensureBarPlaced(); });
   ensureBarPlaced();
-  setTimeout(ensureBarPlaced, 200);
-  setTimeout(ensureBarPlaced, 700);
+  titleController.schedule();
+  setTimeout(() => { ensureBarPlaced(); titleController.schedule(); }, 200);
+  setTimeout(() => { ensureBarPlaced(); titleController.schedule(); }, 700);
 })();
