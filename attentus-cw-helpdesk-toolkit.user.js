@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         attentus-cw-helpdesk-toolkit
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.1.0
+// @version      1.0.1
 // @description  Helpdesk toolkit for ConnectWise ticket triage. Confirms before DOM-only field changes and keeps clipboard draft fallback mode.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
@@ -32,7 +32,8 @@
   const TRIAGE_APPLY_TOOLTIP = [
     'Changes visible ConnectWise fields only after confirmation.',
     'Does not call ConnectWise or ITGlue APIs.',
-    'Does not save until the user chooses Save or Save & Close in the follow-up dialog.'
+    'Triage button clicks only apply fields to the browser UI; saving is offered only in the post-apply dialog.',
+    'No click shortcut will automatically Save & Close.'
   ].join('\n');
 
   const TRIAGE_DRAFT_TOOLTIP = [
@@ -780,7 +781,7 @@
 
   function showPostApplyDialog(workflow, plan, snapshot) {
     showActionDialog(workflow.postApplyMessage || `${workflow.buttonLabel} fields applied`, {
-      message: 'The field changes are applied in the visible ConnectWise UI only. Choose what to do with the unsaved changes.',
+      message: 'The requested fields have been changed in the browser UI only. They are not saved in ConnectWise until you choose Save or Save & Close here; otherwise you can leave them unsaved or revert them.',
       fields: plan,
       actions: [
         {
@@ -1025,7 +1026,7 @@
       {
         value: 'confirmApply',
         title: 'Confirm and apply',
-        description: 'Triage buttons open the confirmation modal, then apply fields through the visible UI only.'
+        description: 'Triage buttons open the confirmation modal, then apply fields through the visible UI only. Save and Save & Close appear only after fields are applied.'
       }
     ];
 
@@ -1172,10 +1173,7 @@
     commitComboOnElement,
     openPopupAndGetContainer,
     findInputByLabel,
-    findUdfInputByLabel,
-    showActionDialog,
-    clickSave,
-    clickSaveAndClose
+    showActionDialog
   };
 
   let lastHref = location.href;
