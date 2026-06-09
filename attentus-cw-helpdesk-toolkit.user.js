@@ -259,12 +259,43 @@
     return (input?.value || '').trim();
   }
 
+  function getTicketIdFromHeader() {
+    const header = $('.pod_service_ticket_ticket_header, .mm_podHeader.pod_service_ticket_ticket_header');
+    if (!header || !visible(header)) return '';
+
+    const label = document.getElementById(`${header.id}-label`) || header.nextElementSibling || header;
+    const scanNodes = [label, header, header.parentElement, header.parentElement?.nextElementSibling].filter(Boolean);
+    for (const node of scanNodes) {
+      const match = String(node.textContent || '').match(/\b(?:service\s+)?ticket\s*#\s*(\d{3,})\b/i);
+      if (match) return match[1];
+    }
+    return '';
+  }
+
+  function getTicketIdFromUrl() {
+    try {
+      const url = new URL(location.href);
+      const params = url.searchParams;
+      const id = params.get('service_recid') || params.get('srRecID') || params.get('serviceTicketId') || params.get('recid');
+      if (id && /^\d{3,}$/.test(id)) return id;
+
+      const match = url.pathname.match(/(?:^|\/)(?:ticket|tickets|sr|service[_-]?ticket)s?\/(\d{3,})/i);
+      return match ? match[1] : '';
+    } catch {
+      return '';
+    }
+  }
+
+  function getTicketId() {
+    return getTicketIdFromHeader() || getTicketIdFromUrl();
+  }
+
   const TRIAGE_FIELD_RESOLVERS = {
     board: { label: 'Board', type: 'combo', find: () => findInputBySelectors(['input.cw_serviceBoard']) || findInputByLabel('Board') },
     status: { label: 'Status', type: 'combo', find: () => findInputBySelectors(['input.cw_status']) || findInputByLabel('Status') },
     type: { label: 'Type', type: 'combo', find: () => findInputBySelectors(['input.cw_type']) || findInputByLabel('Type') },
-    subtype: { label: 'Sub-Type', type: 'combo', find: () => findInputBySelectors(['input.cw_subType']) || findInputByLabel('Sub-Type') || findInputByLabel('Subtype') },
-    tier: { label: 'Ticket Tier?', type: 'combo', find: () => findInputByLabel('Ticket Tier?') },
+    subtype: { label: 'Subtype', type: 'combo', find: () => findInputBySelectors(['input.cw_subType']) || findInputByLabel('Sub-Type') || findInputByLabel('Subtype') },
+    tier: { label: 'Item/Tier', type: 'combo', find: () => findInputByLabel('Ticket Tier?') || findInputByLabel('Item/Tier') },
     priority: { label: 'Priority', type: 'combo', find: () => findInputBySelectors(['input.cw_priority']) || findInputByLabel('Priority') },
     summary: { label: 'Summary', type: 'text', find: findSummaryInput }
   };
@@ -305,6 +336,52 @@
     return plan.map(item => `${item.label}: ${item.currentValue || '(blank)'} → ${item.value}`).join('\n');
   }
 
+  const fieldSnapshotsByTicket = new Map();
+
+  function uniqueWorkflowMutations(workflow) {
+    const seen = new Set();
+    return (workflow?.mutations || []).filter(mutation => {
+      const fieldKey = mutation.field;
+      if (seen.has(fieldKey)) return false;
+      seen.add(fieldKey);
+      return true;
+    });
+  }
+
+  function snapshotFields(workflow) {
+    const ticketId = getTicketId();
+    if (!ticketId) {
+      toast('Ticket # not found; fields were not changed');
+      return null;
+    }
+
+    const snapshot = {
+      ticketId,
+      workflow: workflow?.buttonLabel || '',
+      createdAt: Date.now(),
+      fields: {},
+      entries: []
+    };
+
+    for (const mutation of uniqueWorkflowMutations(workflow)) {
+      const resolver = TRIAGE_FIELD_RESOLVERS[mutation.field];
+      const label = mutation.label || resolver?.label || mutation.field;
+      const input = resolver?.find?.() || null;
+      const entry = {
+        field: mutation.field,
+        label,
+        type: mutation.type || resolver?.type || 'combo',
+        value: input ? (input.value || '').trim() : '',
+        found: !!input
+      };
+      snapshot.fields[label] = entry;
+      snapshot.entries.push(entry);
+    }
+
+    fieldSnapshotsByTicket.set(ticketId, snapshot);
+    return snapshot;
+  }
+
   async function copyText(text) {
     try {
       if (window.GM?.setClipboard) {
@@ -339,22 +416,31 @@
     return ok;
   }
 
-  async function applyFieldPlan(plan) {
+  async function applyFieldChanges(workflow, ticketInfo = {}) {
+    const snapshot = snapshotFields(workflow);
+    if (!snapshot) return { ok: false, snapshot: null, plan: [] };
+
+    if (ticketInfo && typeof ticketInfo === 'object') {
+      ticketInfo.ticketId = snapshot.ticketId;
+      ticketInfo.snapshot = snapshot;
+    }
+
+    const plan = buildFieldPlan(workflow);
     for (const item of plan) {
       const input = item.input || item.find?.();
       if (!input) {
         toast(`${item.label} field not found`);
-        return false;
+        return { ok: false, snapshot, plan };
       }
       const ok = item.type === 'text'
         ? await commitTextOnElement(input, item.value)
         : await commitComboOnElement(input, item.value);
       if (!ok) {
         toast(`Could not set ${item.label}`);
-        return false;
+        return { ok: false, snapshot, plan };
       }
     }
-    return true;
+    return { ok: true, snapshot, plan };
   }
 
   function clickLikeUser(el) {
@@ -386,15 +472,27 @@
     return String(input.value || '') === '';
   }
 
-  async function revertFieldPlan(plan) {
-    for (const item of plan) {
-      const input = item.input || item.find?.();
+  async function revertFieldChanges(snapshot) {
+    const activeTicketId = getTicketId();
+    const savedSnapshot = snapshot || (activeTicketId ? fieldSnapshotsByTicket.get(activeTicketId) : null);
+    if (!savedSnapshot) {
+      toast('No captured field values found for this ticket');
+      return false;
+    }
+    if (activeTicketId && savedSnapshot.ticketId !== activeTicketId) {
+      toast('Revert stopped: active ticket changed');
+      return false;
+    }
+
+    for (const item of savedSnapshot.entries || []) {
+      const resolver = TRIAGE_FIELD_RESOLVERS[item.field];
+      const input = resolver?.find?.() || null;
       if (!input) {
         toast(`${item.label} field not found for revert`);
         return false;
       }
 
-      const previousValue = item.currentValue || '';
+      const previousValue = item.value || '';
       const ok = previousValue
         ? (item.type === 'text'
           ? await commitTextOnElement(input, previousValue)
@@ -408,7 +506,7 @@
     return true;
   }
 
-  function showPostApplyDialog(workflow, plan) {
+  function showPostApplyDialog(workflow, plan, snapshot) {
     showActionDialog(`${workflow.buttonLabel} fields applied`, {
       message: 'The field changes are applied in the visible ConnectWise UI only. Choose what to do with the unsaved changes.',
       fields: plan,
@@ -416,7 +514,7 @@
         {
           label: 'Revert',
           onClick: async () => {
-            const ok = await revertFieldPlan(plan);
+            const ok = await revertFieldChanges(snapshot);
             toast(ok ? 'Triage changes reverted' : 'Triage revert stopped');
           }
         },
@@ -533,10 +631,11 @@
           label: 'Apply Fields',
           primary: true,
           onClick: async () => {
-            const ok = await applyFieldPlan(plan);
-            if (ok) {
+            const ticketInfo = {};
+            const result = await applyFieldChanges(workflow, ticketInfo);
+            if (result.ok) {
               toast(workflow.postApplyMessage || `${workflow.buttonLabel} fields applied`);
-              showPostApplyDialog(workflow, plan);
+              showPostApplyDialog(workflow, result.plan, result.snapshot);
             } else {
               toast(`${workflow.buttonLabel} apply stopped`);
             }
@@ -651,6 +750,10 @@
   window.attentusHelpdeskToolkit = {
     copyTriage,
     confirmAndApplyTriage,
+    snapshotFields,
+    applyFieldChanges,
+    revertFieldChanges,
+    getTicketId,
     commitComboOnElement,
     openPopupAndGetContainer,
     findInputByLabel,
