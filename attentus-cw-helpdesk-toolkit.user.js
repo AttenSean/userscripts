@@ -24,7 +24,7 @@
   const BAR_ID = 'att-cw-helpdesk-toolkit-bar';
   const SLOT_ID = 'att-cw-helpdesk-toolkit-slot';
   const TRIAGE_MODE_STORAGE_KEY = 'att_hd_triage_mode';
-  const TRIAGE_MODES = new Set(['draftOnly', 'confirmApply']);
+  const TRIAGE_MODES = new Set(['confirmApply']);
   const DEFAULT_TRIAGE_MODE = 'confirmApply';
 
   const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -36,7 +36,8 @@
   const TRIAGE_APPLY_TOOLTIP = [
     'Changes visible ConnectWise fields only after confirmation.',
     'Does not call ConnectWise or ITGlue APIs.',
-    'Does not save until the user chooses Save or Save & Close in the follow-up dialog.'
+    'Triage button clicks only apply fields to the browser UI; saving is offered only in the post-apply dialog.',
+    'No click shortcut will automatically Save & Close.'
   ].join('\n');
 
   const TRIAGE_DRAFT_TOOLTIP = [
@@ -47,7 +48,7 @@
 
   const TRIAGE_WORKFLOWS = {
     spam: {
-      buttonLabel: 'Apply Spam/Phish…',
+      buttonLabel: 'Spam/Phishing…',
       draftLabel: 'Copy Spam Draft',
       confirmationTitle: 'Confirm Spam/Phishing triage',
       fieldSummary: 'Classify the ticket as Spam/Phishing with Help Desk ownership, Tier 1 handling, Priority 4 urgency, and a normalized contact-aware summary.',
@@ -64,7 +65,7 @@
       postApplyMessage: 'Spam/Phishing fields applied'
     },
     junk: {
-      buttonLabel: 'Apply Junk…',
+      buttonLabel: 'Junk…',
       draftLabel: 'Copy Junk Draft',
       confirmationTitle: 'Confirm Junk triage',
       fieldSummary: 'Move the ticket to the Junk board.',
@@ -74,7 +75,7 @@
       postApplyMessage: 'Junk fields applied'
     },
     cancel: {
-      buttonLabel: 'Apply Cancel…',
+      buttonLabel: 'Closed/Cancelled…',
       draftLabel: 'Copy Cancel Draft',
       confirmationTitle: 'Confirm Closed/Cancelled triage',
       fieldSummary: 'Close/cancel the ticket and mark Ticket Tier? as N/A - Cancelled Ticket.',
@@ -630,6 +631,210 @@
     input.blur();
   }
 
+
+  function dispatchAll(input) {
+    if (!input) return;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    input.dispatchEvent(new Event('blur', { bubbles: true }));
+  }
+
+  function setDomInputValue(input, value) {
+    const nativeSetter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value')?.set;
+    if (nativeSetter) nativeSetter.call(input, value);
+    else input.value = value;
+    dispatchAll(input);
+  }
+
+  const CONTACT_CLEAR_GROUPS = [
+    {
+      label: 'Contact',
+      selectors: [
+        'input.cw_contact',
+        'input[aria-label="Contact"]',
+        'input[id*="Contact"][role="combobox"]',
+        'input[name="ContactRecID"]'
+      ]
+    },
+    {
+      label: 'Email',
+      selectors: [
+        'input.cw_emailAddress',
+        'input[aria-label="Email"]',
+        'input[name="EmailAddress"]'
+      ]
+    },
+    {
+      label: 'Phone / Extension',
+      selectors: [
+        'input[aria-label="Phone"]',
+        'input[name="PhoneNumber"]',
+        'input[aria-label*="Ext"]',
+        'input[name*="Ext"]'
+      ],
+      roots: ['.cw_contactPhoneCommunications'],
+      rootInputSelector: 'input'
+    }
+  ];
+
+  const contactSnapshotsByTicket = new Map();
+
+  function describeInput(input) {
+    return input.getAttribute('aria-label')
+      || input.getAttribute('name')
+      || input.id
+      || input.className
+      || input.type
+      || 'input';
+  }
+
+  function getContactClearInputs() {
+    const seen = new Set();
+    const entries = [];
+
+    const addInput = (input, groupLabel) => {
+      if (!input || !('value' in input) || seen.has(input)) return;
+      seen.add(input);
+      entries.push({ input, groupLabel, label: `${groupLabel} (${describeInput(input)})` });
+    };
+
+    for (const group of CONTACT_CLEAR_GROUPS) {
+      for (const selector of group.selectors || []) {
+        $$(selector).forEach(input => addInput(input, group.label));
+      }
+      for (const rootSelector of group.roots || []) {
+        $$(rootSelector).forEach(root => {
+          $$(group.rootInputSelector || 'input', root).forEach(input => addInput(input, group.label));
+        });
+      }
+    }
+
+    return entries;
+  }
+
+  function snapshotContactInfo(entries = getContactClearInputs()) {
+    const ticketId = getTicketId();
+    const snapshot = {
+      ticketId,
+      createdAt: Date.now(),
+      entries: entries.map(entry => ({
+        ...entry,
+        value: String(entry.input.value || ''),
+        found: true
+      }))
+    };
+
+    if (ticketId) contactSnapshotsByTicket.set(ticketId, snapshot);
+    return snapshot;
+  }
+
+  function buildContactClearPlan(entries = getContactClearInputs()) {
+    return entries.map(entry => ({
+      ...entry,
+      found: true,
+      currentValue: String(entry.input.value || ''),
+      value: '(blank)'
+    }));
+  }
+
+  function clearContactInfo(snapshot = snapshotContactInfo()) {
+    let didSomething = false;
+
+    for (const entry of snapshot.entries || []) {
+      const input = entry.input;
+      if (!input || !('value' in input)) continue;
+      if (String(input.value || '') !== '') didSomething = true;
+      setDomInputValue(input, '');
+    }
+
+    if (!didSomething) toast('Contact, email, and phone fields were already blank');
+    return didSomething;
+  }
+
+  async function revertContactInfo(snapshot) {
+    const activeTicketId = getTicketId();
+    const savedSnapshot = snapshot || (activeTicketId ? contactSnapshotsByTicket.get(activeTicketId) : null);
+    if (!savedSnapshot) {
+      toast('No captured contact values found for this ticket');
+      return false;
+    }
+    if (activeTicketId && savedSnapshot.ticketId && savedSnapshot.ticketId !== activeTicketId) {
+      toast('Contact revert stopped: active ticket changed');
+      return false;
+    }
+
+    for (const entry of savedSnapshot.entries || []) {
+      const input = entry.input;
+      if (!input || !('value' in input) || !input.isConnected) {
+        toast(`${entry.label || entry.groupLabel || 'Contact field'} not found for revert`);
+        return false;
+      }
+      setDomInputValue(input, entry.value || '');
+      await sleep(20);
+    }
+    return true;
+  }
+
+  function showPostClearContactDialog(plan, snapshot) {
+    showActionDialog('Contact fields cleared', {
+      message: 'Contact, email, phone, and extension fields were cleared in the visible ConnectWise UI only. The changes are not saved unless you choose Save or Save & Close.',
+      fields: plan,
+      actions: [
+        {
+          label: 'Revert',
+          primary: true,
+          onClick: async () => {
+            const ok = await revertContactInfo(snapshot);
+            toast(ok ? 'Contact values reverted' : 'Contact revert stopped');
+          }
+        },
+        { label: 'Leave Unsaved', onClick: () => toast('Cleared values left unsaved') },
+        {
+          label: 'Save',
+          onClick: async () => {
+            await sleep(120);
+            if (!clickSave()) toast('Save button not found');
+          }
+        },
+        {
+          label: 'Save & Close',
+          onClick: async () => {
+            await sleep(120);
+            if (!clickSaveAndClose()) toast('Save & Close button not found');
+          }
+        }
+      ]
+    });
+  }
+
+  function confirmAndClearContactInfo() {
+    const entries = getContactClearInputs();
+    if (!entries.length) {
+      toast('No contact fields found to clear');
+      return false;
+    }
+
+    const plan = buildContactClearPlan(entries);
+    showActionDialog('Confirm Clear Contact', {
+      message: 'This clears only visible ConnectWise contact, email, phone, and extension fields through DOM events. No ConnectWise or ITGlue APIs are called, and nothing is saved until you use ConnectWise Save controls.',
+      fields: plan,
+      actions: [
+        { label: 'Cancel', onClick: () => toast('Clear Contact cancelled') },
+        {
+          label: 'Clear Contact',
+          primary: true,
+          onClick: () => {
+            const snapshot = snapshotContactInfo(entries);
+            clearContactInfo(snapshot);
+            toast('Contact fields cleared');
+            showPostClearContactDialog(plan, snapshot);
+          }
+        }
+      ]
+    });
+    return true;
+  }
+
   async function commitComboOnElement(input, desiredValue) {
     if (!input || input.disabled || input.readOnly || !visible(input)) return false;
     if (norm(input.value) === norm(desiredValue)) return true;
@@ -676,6 +881,22 @@
 
   function labelText(el) {
     return norm((el?.textContent || '').replace(/[:?]\s*$/, ''));
+  }
+
+  function findUdfInputByLabel(labelTextToFind) {
+    const needle = norm(String(labelTextToFind).replace(/[:?]\s*$/, ''));
+    const rows = $$('.pod-element-row').filter(visible);
+
+    for (const row of rows) {
+      const label = $('.mm_label, .cw_CwLabel, [id$="-label"], label, .gwt-Label', row);
+      const text = labelText(label);
+      if (text && text === needle) {
+        const input = row.querySelector('input.cw_PsaUserDefinedComboBox, input.GMDB3DUBKVH, input:not([type="hidden"]), textarea');
+        if (visible(input)) return input;
+      }
+    }
+
+    return null;
   }
 
   function findInputByLabel(labelTextToFind) {
@@ -759,7 +980,7 @@
     status: { label: 'Status', type: 'combo', find: () => findInputBySelectors(['input.cw_status']) || findInputByLabel('Status') },
     type: { label: 'Type', type: 'combo', find: () => findInputBySelectors(['input.cw_type']) || findInputByLabel('Type') },
     subtype: { label: 'Subtype', type: 'combo', find: () => findInputBySelectors(['input.cw_subType']) || findInputByLabel('Sub-Type') || findInputByLabel('Subtype') },
-    tier: { label: 'Item/Tier', type: 'combo', find: () => findInputByLabel('Ticket Tier?') || findInputByLabel('Item/Tier') },
+    tier: { label: 'Ticket Tier?', type: 'combo', find: () => findUdfInputByLabel('Ticket Tier?') || findInputByLabel('Ticket Tier?') || findInputByLabel('Item/Tier') },
     priority: { label: 'Priority', type: 'combo', find: () => findInputBySelectors(['input.cw_priority']) || findInputByLabel('Priority') },
     summary: { label: 'Summary', type: 'text', find: findSummaryInput }
   };
@@ -790,19 +1011,19 @@
   }
 
   function isDraftOnlyMode() {
-    return getTriageMode() === 'draftOnly';
+    return false;
   }
 
   function getTriageButtonLabel(workflow) {
-    return isDraftOnlyMode() ? (workflow.draftLabel || workflow.buttonLabel) : workflow.buttonLabel;
+    return workflow.buttonLabel;
   }
 
   function getTriageButtonTooltip() {
-    return isDraftOnlyMode() ? TRIAGE_DRAFT_TOOLTIP : TRIAGE_APPLY_TOOLTIP;
+    return TRIAGE_APPLY_TOOLTIP;
   }
 
   function handleTriageButton(kind) {
-    return isDraftOnlyMode() ? copyTriage(kind) : confirmAndApplyTriage(kind);
+    return confirmAndApplyTriage(kind);
   }
 
   function resolveMutationValue(workflow, mutation) {
@@ -1006,7 +1227,7 @@
 
   function showPostApplyDialog(workflow, plan, snapshot) {
     showActionDialog(workflow.postApplyMessage || `${workflow.buttonLabel} fields applied`, {
-      message: 'The field changes are applied in the visible ConnectWise UI only. Choose what to do with the unsaved changes.',
+      message: 'The requested fields have been changed in the browser UI only. They are not saved in ConnectWise until you choose Save or Save & Close here; otherwise you can leave them unsaved or revert them.',
       fields: plan,
       actions: [
         {
@@ -1120,7 +1341,7 @@
 
     const plan = buildFieldPlan(workflow);
     showActionDialog(workflow.confirmationTitle, {
-      message: `${workflow.fieldSummary} No ConnectWise fields will change until you choose Apply Fields. This uses only visible UI/DOM automation; the copy-draft action keeps draft-mode behavior.`,
+      message: `${workflow.fieldSummary} No ConnectWise fields will change until you choose Apply Fields. This uses only visible UI/DOM automation; Copy Draft only copies this field plan to the clipboard.`,
       fields: plan,
       actions: [
         { label: 'Cancel', onClick: () => toast('Triage cancelled') },
@@ -1249,14 +1470,9 @@
     const currentMode = getTriageMode();
     const options = [
       {
-        value: 'draftOnly',
-        title: 'Draft only',
-        description: 'Triage buttons copy drafts to the clipboard only and do not change fields.'
-      },
-      {
         value: 'confirmApply',
         title: 'Confirm and apply',
-        description: 'Triage buttons open the confirmation modal, then apply fields through the visible UI only.'
+        description: 'Triage buttons open the confirmation modal, then apply fields through the visible UI only. Save and Save & Close appear only after fields are applied.'
       }
     ];
 
@@ -1332,7 +1548,7 @@
     document.body.appendChild(overlay);
   }
 
-  function makeBar() {
+  function mountTicketTools() {
     const bar = document.createElement('div');
     bar.id = BAR_ID;
     Object.assign(bar.style, {
@@ -1362,8 +1578,12 @@
       makeActionButton('att-cw-helpdesk-spam-btn', getTriageButtonLabel(TRIAGE_WORKFLOWS.spam), getTriageButtonTooltip(), () => handleTriageButton('spam')),
       makeActionButton('att-cw-helpdesk-junk-btn', getTriageButtonLabel(TRIAGE_WORKFLOWS.junk), getTriageButtonTooltip(), () => handleTriageButton('junk')),
       makeActionButton('att-cw-helpdesk-cancel-btn', getTriageButtonLabel(TRIAGE_WORKFLOWS.cancel), getTriageButtonTooltip(), () => handleTriageButton('cancel')),
+      makeActionButton('att-cw-helpdesk-clear-contact-btn', 'Clear Contact', 'Clear visible contact, email, phone, and extension fields after confirmation. Does not call ConnectWise or ITGlue APIs.', () => confirmAndClearContactInfo()),
       makeActionButton('att-cw-helpdesk-settings-btn', 'Settings…', `Configure ${TRIAGE_MODE_STORAGE_KEY}`, () => showToolkitSettingsDialog())
     );
+    if (titleController.isActive) {
+      slot.appendChild(makeActionButton(TITLE_SETTINGS_BUTTON_ID, 'Title Settings…', 'Configure tab title normalization', () => titleController.openSettings()));
+    }
 
     bar.append(label, slot);
     return bar;
@@ -1379,9 +1599,427 @@
     const pod = findTicketPodRoot();
     const header = pod && findHeaderBlock(pod);
     if (!header) return false;
-    header.insertAdjacentElement('afterend', makeBar());
+    header.insertAdjacentElement('afterend', mountTicketTools());
     return true;
   }
+
+
+  // -------------------- Tab title normalization --------------------
+  // Folded in from attentus-cw-tab-title-normalize.user.js with toolkit-specific
+  // IDs and a shared guard so the standalone script and toolkit do not both run
+  // title observers during the transition.
+  const TITLE_ENGINE_GUARD = '__attentusCwTabTitleNormalizeActive';
+  const TITLE_ENGINE_DATA_ATTR = 'attCwTitleNormalizeOwner';
+  const TITLE_ENGINE_OWNER = 'helpdesk-toolkit';
+  const TITLE_SETTINGS_BUTTON_ID = 'att-cw-helpdesk-title-settings-btn';
+  const TITLE_SETTINGS_OVERLAY_ID = 'att-cw-helpdesk-title-settings-overlay';
+  const TITLE_K_COMPANY = 'att_tab_title_add_company';
+  const TITLE_K_SB_RENAME = 'att_tab_title_rename_serviceboard';
+  const TITLE_K_TE_TICKET = 'att_tab_title_timeentry_ticket';
+  const TITLE_DEFAULTS = {
+    [TITLE_K_COMPANY]: true,
+    [TITLE_K_SB_RENAME]: true,
+    [TITLE_K_TE_TICKET]: true
+  };
+
+  async function gmGet(key, defVal) {
+    try { if (typeof GM !== 'undefined' && GM.getValue) return await GM.getValue(key, defVal); } catch {}
+    try { if (typeof GM_getValue === 'function') return GM_getValue(key, defVal); } catch {}
+    try { const raw = localStorage.getItem(key); return raw == null ? defVal : JSON.parse(raw); } catch {}
+    return defVal;
+  }
+
+  async function gmSet(key, value) {
+    try { if (typeof GM !== 'undefined' && GM.setValue) return await GM.setValue(key, value); } catch {}
+    try { if (typeof GM_setValue === 'function') return GM_setValue(key, value); } catch {}
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+  }
+
+  function claimTitleEngine() {
+    const active = window[TITLE_ENGINE_GUARD];
+    const domOwner = document.documentElement?.dataset?.[TITLE_ENGINE_DATA_ATTR] || '';
+    if ((active?.owner && active.owner !== TITLE_ENGINE_OWNER) || (domOwner && domOwner !== TITLE_ENGINE_OWNER)) return false;
+    if (active?.owner === TITLE_ENGINE_OWNER || domOwner === TITLE_ENGINE_OWNER) return false;
+
+    window[TITLE_ENGINE_GUARD] = {
+      owner: TITLE_ENGINE_OWNER,
+      script: 'attentus-cw-helpdesk-toolkit',
+      startedAt: Date.now()
+    };
+    if (document.documentElement?.dataset) document.documentElement.dataset[TITLE_ENGINE_DATA_ATTR] = TITLE_ENGINE_OWNER;
+    return true;
+  }
+
+  function createTitleController() {
+    if (!claimTitleEngine()) {
+      return {
+        isActive: false,
+        schedule: () => {},
+        handleDomMutation: () => {},
+        handleRouteChange: () => {},
+        openSettings: () => toast('Tab title settings are controlled by the standalone title normalizer')
+      };
+    }
+
+    const titleSettings = { ...TITLE_DEFAULTS };
+    let titleSettingsReady = (async () => {
+      titleSettings[TITLE_K_COMPANY] = !!(await gmGet(TITLE_K_COMPANY, TITLE_DEFAULTS[TITLE_K_COMPANY]));
+      titleSettings[TITLE_K_SB_RENAME] = !!(await gmGet(TITLE_K_SB_RENAME, TITLE_DEFAULTS[TITLE_K_SB_RENAME]));
+      titleSettings[TITLE_K_TE_TICKET] = !!(await gmGet(TITLE_K_TE_TICKET, TITLE_DEFAULTS[TITLE_K_TE_TICKET]));
+    })();
+
+    const originalTitle = document.title;
+    const titleNorm = value => String(value || '').replace(/\s+/g, ' ').trim();
+    const titleVisible = (el) => !!el && el.nodeType === 1 && (el.offsetParent !== null || el.getClientRects().length > 0);
+    const MIN_TICKET_DIGITS = 5;
+    let lastSnapshotSig = '';
+    let hiddenPoller = null;
+
+    function titleParts(id, summary, company, includeCompany) {
+      const parts = [];
+      if (id) parts.push(`#${id}`);
+      if (summary) parts.push(summary);
+      if (includeCompany && company) parts.push(company);
+      return parts.join(' - ').trim();
+    }
+
+    function isServiceBoardList() {
+      return !!document.querySelector('table.srboard-grid tr.cw-ml-row');
+    }
+
+    function isTimeEntryPage() {
+      const href = location.href.toLowerCase();
+      if (/\btime[_-]?entry\b/.test(href) || /timeentry/.test(href)) return true;
+      const labels = document.querySelectorAll('.GMDB3DUBBPG, .GMDB3DUBORG, .gwt-Label.mm_label, [id$="-label"]');
+      for (const el of labels) {
+        const text = titleNorm(el.textContent).toLowerCase();
+        if (text.includes('time entry')) return true;
+      }
+      return !!(document.querySelector('input.cw_timeStart') || document.querySelector('input.cw_timeEnd'));
+    }
+
+    function ticketIdFromTitleUrl() {
+      try {
+        const url = new URL(location.href);
+        const queryId = url.searchParams.get('service_recid')
+          || url.searchParams.get('srRecID')
+          || url.searchParams.get('serviceTicketId')
+          || url.searchParams.get('recid');
+        if (queryId && /^\d+$/.test(queryId) && queryId.length >= MIN_TICKET_DIGITS) return queryId;
+
+        const match = url.pathname.match(/(?:^|\/)(?:ticket|tickets|sr|service[_-]?ticket)s?\/(\d+)(?:$|[/?#])/i);
+        if (match?.[1] && match[1].length >= MIN_TICKET_DIGITS) return match[1];
+      } catch {}
+      return '';
+    }
+
+    function ticketIdFromTitleDom() {
+      const candidates = document.querySelectorAll(
+        '[id$="-label"], .gwt-Label, .mm_label, .GMDB3DUBNLI, .GMDB3DUBLHH, .GMDB3DUBIHH, .GMDB3DUBORG, .GMDB3DUBBPG'
+      );
+      for (const el of candidates) {
+        if (!titleVisible(el)) continue;
+        const match = titleNorm(el.textContent).match(/ticket\s*#\s*(\d+)/i);
+        if (match?.[1] && match[1].length >= MIN_TICKET_DIGITS) return match[1];
+      }
+      return '';
+    }
+
+    function getTitleTicketId() {
+      return ticketIdFromTitleUrl() || ticketIdFromTitleDom() || '';
+    }
+
+    function getTitleSummary() {
+      const input = document.querySelector('input.cw_PsaSummaryHeader')
+        || document.querySelector('input.cw_summary')
+        || document.querySelector('input[placeholder*="summary" i]');
+      if (input?.value) return titleNorm(input.value);
+
+      const labels = document.querySelectorAll('[id$="-label"], .GMDB3DUBORG, .gwt-Label, .mm_label');
+      for (const el of labels) {
+        if (!titleVisible(el)) continue;
+        const match = titleNorm(el.textContent).match(/^summary:\s*(.+)$/i);
+        if (match) return titleNorm(match[1]);
+      }
+      return '';
+    }
+
+    function getTitleCompany() {
+      const labels = document.querySelectorAll('[id$="-label"], .gwt-Label, .mm_label, .GMDB3DUBORG, .GMDB3DUBBPG');
+      for (const el of labels) {
+        if (!titleVisible(el)) continue;
+        const match = titleNorm(el.textContent).match(/^\s*company:\s*(.+)$/i);
+        if (match) return titleNorm(match[1]);
+      }
+
+      const input = document.querySelector('input.cw_company') || document.querySelector('input[placeholder*="company" i]');
+      return input?.value ? titleNorm(input.value) : '';
+    }
+
+    function parseTitleTicketId(raw) {
+      const match = String(raw || '').match(/(\d{5,})/);
+      return match ? match[1] : null;
+    }
+
+    function getTicketIdFromChargeToOnce() {
+      const input = document.querySelector('input.cw_ChargeToTextBox, input[id$="ChargeToTextBox"], input.GKV5JQ3DMVF.cw_ChargeToTextBox');
+      if (!input) return null;
+
+      let id = parseTitleTicketId(input.value);
+      if (id) return id;
+
+      const scope = input.closest('td,div') || document;
+      const hidden = scope.querySelector('input[type="hidden"][value], input[type="hidden"][name*="ChargeTo"]');
+      id = parseTitleTicketId(hidden?.value);
+      if (id) return id;
+
+      const activeId = input.getAttribute('aria-activedescendant');
+      if (activeId) {
+        const activeEl = document.getElementById(activeId);
+        id = parseTitleTicketId(activeEl?.textContent);
+        if (id) return id;
+      }
+      return null;
+    }
+
+    function getServiceBoardViewName() {
+      const root = document.querySelector('.cw-toolbar-view-dropdown') || document;
+      const input = root.querySelector('input.cw_CwComboBox') || root.querySelector('input[placeholder*="view" i]');
+      const value = (input && (input.value || input.getAttribute('value'))) || '';
+      return titleNorm(value);
+    }
+
+    const schedule = (() => {
+      let pending = false;
+      let lastRun = 0;
+      const MIN_MS = 120;
+
+      const run = () => {
+        pending = false;
+        const now = Date.now();
+        if (now - lastRun < MIN_MS) {
+          pending = true;
+          setTimeout(run, MIN_MS);
+          return;
+        }
+        lastRun = now;
+        updateTitle();
+      };
+
+      return () => {
+        if (pending) return;
+        pending = true;
+        if (document.hidden) { setTimeout(run, 0); return; }
+        if ('requestIdleCallback' in window) requestIdleCallback(run, { timeout: 400 });
+        else if ('requestAnimationFrame' in window) requestAnimationFrame(run);
+        else setTimeout(run, 0);
+      };
+    })();
+
+    const snapshotSignature = snapshot => Object.values(snapshot).map(value => String(value ?? '')).join('|');
+
+    function pageSnapshot() {
+      const ticketId = getTitleTicketId();
+      if (ticketId) {
+        return { kind: 'ticket', id: ticketId, summary: getTitleSummary(), company: getTitleCompany(), url: location.pathname + location.search };
+      }
+      if (isTimeEntryPage()) {
+        const timeTicketId = getTicketIdFromChargeToOnce() || ticketIdFromTitleUrl() || '';
+        return { kind: 'time', id: timeTicketId, url: location.pathname + location.search };
+      }
+      if (isServiceBoardList()) {
+        return { kind: 'board', view: getServiceBoardViewName(), url: location.pathname + location.search };
+      }
+      return { kind: 'other', url: location.pathname + location.search };
+    }
+
+    async function updateTitle() {
+      const snapshot = pageSnapshot();
+      const sig = snapshotSignature(snapshot);
+      if (sig === lastSnapshotSig) return;
+      lastSnapshotSig = sig;
+
+      await titleSettingsReady;
+
+      if (snapshot.kind === 'ticket') {
+        const next = titleParts(snapshot.id, snapshot.summary, snapshot.company, !!titleSettings[TITLE_K_COMPANY]);
+        if (next && document.title !== next) document.title = next;
+        return;
+      }
+
+      if (snapshot.kind === 'time') {
+        const next = titleSettings[TITLE_K_TE_TICKET] && snapshot.id ? `#${snapshot.id} - Time Entry` : 'Time Entry';
+        if (document.title !== next) document.title = next;
+        return;
+      }
+
+      if (snapshot.kind === 'board' && titleSettings[TITLE_K_SB_RENAME]) {
+        const view = snapshot.view?.trim();
+        if (view && document.title !== view) document.title = view;
+        return;
+      }
+
+      if (!isServiceBoardList() && !document.title && document.title !== originalTitle) {
+        document.title = originalTitle;
+      }
+    }
+
+    function attachFieldListeners() {
+      const selectors = [
+        'input.cw_PsaSummaryHeader',
+        'input.cw_summary',
+        'input.cw_company',
+        'input[placeholder*="summary" i]',
+        'input[placeholder*="company" i]',
+        '.cw-toolbar-view-dropdown input.cw_CwComboBox',
+        '.cw-toolbar-view-dropdown input[type="text"]',
+        'input.cw_ChargeToTextBox',
+        'input[id$="ChargeToTextBox"]'
+      ];
+      document.querySelectorAll(selectors.join(',')).forEach(el => {
+        ['input', 'change', 'keyup', 'keydown', 'blur'].forEach(eventName => {
+          el.removeEventListener(eventName, schedule);
+          el.addEventListener(eventName, schedule, { passive: true });
+        });
+      });
+    }
+
+    function handleDomMutation(mutations = []) {
+      for (const mutation of mutations) {
+        if (mutation.type === 'childList') {
+          attachFieldListeners();
+          schedule();
+          return;
+        }
+        if (mutation.type === 'attributes') {
+          const name = mutation.attributeName || '';
+          if (name === 'value' || name === 'placeholder' || name === 'title' || name === 'aria-activedescendant') {
+            attachFieldListeners();
+            schedule();
+            return;
+          }
+        }
+      }
+    }
+
+    function handleRouteChange() {
+      lastSnapshotSig = '';
+      attachFieldListeners();
+      schedule();
+    }
+
+    async function openTitleSettingsDialog() {
+      await titleSettingsReady;
+      document.getElementById(TITLE_SETTINGS_OVERLAY_ID)?.remove();
+
+      const overlay = document.createElement('div');
+      overlay.id = TITLE_SETTINGS_OVERLAY_ID;
+      Object.assign(overlay.style, {
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(0,0,0,.35)',
+        zIndex: 2147483646,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center'
+      });
+
+      const modal = document.createElement('div');
+      Object.assign(modal.style, {
+        width: 'min(440px, 92vw)',
+        background: '#fff',
+        color: '#111827',
+        borderRadius: '12px',
+        boxShadow: '0 10px 30px rgba(0,0,0,.25)',
+        padding: '16px',
+        font: '14px system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif'
+      });
+
+      const addCompanyId = 'att-cw-helpdesk-title-add-company';
+      const serviceBoardId = 'att-cw-helpdesk-title-service-board';
+      const timeEntryId = 'att-cw-helpdesk-title-time-entry';
+      modal.innerHTML = `
+        <div style="font-weight:700; font-size:16px; margin-bottom:8px;">Tab Title Settings</div>
+        <label style="display:flex; align-items:center; gap:8px; margin:8px 0;">
+          <input type="checkbox" id="${addCompanyId}" ${titleSettings[TITLE_K_COMPANY] ? 'checked' : ''}>
+          <span>Append company to ticket tabs</span>
+        </label>
+        <label style="display:flex; align-items:center; gap:8px; margin:8px 0;">
+          <input type="checkbox" id="${serviceBoardId}" ${titleSettings[TITLE_K_SB_RENAME] ? 'checked' : ''}>
+          <span>Rename Service Board tabs to the active View</span>
+        </label>
+        <label style="display:flex; align-items:center; gap:8px; margin:8px 0;">
+          <input type="checkbox" id="${timeEntryId}" ${titleSettings[TITLE_K_TE_TICKET] ? 'checked' : ''}>
+          <span>Add ticket # to Time Entry tabs when available</span>
+        </label>
+      `;
+
+      const row = document.createElement('div');
+      Object.assign(row.style, { display: 'flex', gap: '8px', justifyContent: 'flex-end', marginTop: '12px' });
+
+      const closeButton = document.createElement('button');
+      closeButton.type = 'button';
+      closeButton.textContent = 'Close';
+      Object.assign(closeButton.style, { padding: '7px 11px', border: '1px solid #D1D5DB', borderRadius: '8px', background: '#fff', cursor: 'pointer' });
+      closeButton.addEventListener('click', () => overlay.remove());
+
+      const saveButton = document.createElement('button');
+      saveButton.type = 'button';
+      saveButton.textContent = 'Save';
+      Object.assign(saveButton.style, { padding: '7px 11px', border: '1px solid #111827', borderRadius: '8px', background: '#111827', color: '#fff', cursor: 'pointer', fontWeight: 600 });
+      saveButton.addEventListener('click', async () => {
+        const newAddCompany = !!document.getElementById(addCompanyId)?.checked;
+        const newServiceBoard = !!document.getElementById(serviceBoardId)?.checked;
+        const newTimeEntry = !!document.getElementById(timeEntryId)?.checked;
+
+        await gmSet(TITLE_K_COMPANY, newAddCompany);
+        await gmSet(TITLE_K_SB_RENAME, newServiceBoard);
+        await gmSet(TITLE_K_TE_TICKET, newTimeEntry);
+
+        titleSettings[TITLE_K_COMPANY] = newAddCompany;
+        titleSettings[TITLE_K_SB_RENAME] = newServiceBoard;
+        titleSettings[TITLE_K_TE_TICKET] = newTimeEntry;
+        titleSettingsReady = Promise.resolve();
+        lastSnapshotSig = '';
+        overlay.remove();
+        schedule();
+        toast('Tab title settings saved');
+      });
+
+      row.append(closeButton, saveButton);
+      modal.appendChild(row);
+      overlay.appendChild(modal);
+      document.body.appendChild(overlay);
+    }
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        if (!hiddenPoller) hiddenPoller = setInterval(() => updateTitle(), 1500);
+      } else {
+        if (hiddenPoller) { clearInterval(hiddenPoller); hiddenPoller = null; }
+        schedule();
+      }
+    }, { passive: true });
+
+    window.addEventListener('att:openviews-applied', () => schedule(), { passive: true });
+    window.addEventListener('focus', () => schedule(), { passive: true });
+
+    (async () => {
+      await titleSettingsReady;
+      attachFieldListeners();
+      schedule();
+    })();
+
+    return {
+      isActive: true,
+      schedule,
+      handleDomMutation,
+      handleRouteChange,
+      openSettings: openTitleSettingsDialog
+    };
+  }
+
+  const titleController = createTitleController();
 
   window.attentusHelpdeskToolkit = {
     copyTriage,
@@ -1389,10 +2027,15 @@
     getTriageMode,
     setTriageMode,
     showToolkitSettingsDialog,
+    mountTicketTools,
     handleTriageButton,
     snapshotFields,
     applyFieldChanges,
     revertFieldChanges,
+    clearContactInfo,
+    confirmAndClearContactInfo,
+    revertContactInfo,
+    snapshotContactInfo,
     getTicketId,
     commitComboOnElement,
     openPopupAndGetContainer,
@@ -1407,7 +2050,7 @@
   };
 
   let lastHref = location.href;
-  const observer = new MutationObserver(() => {
+  const observer = new MutationObserver((mutations) => {
     if (lastHref !== location.href) {
       lastHref = location.href;
       $(`#${BAR_ID}`)?.remove();
@@ -1416,7 +2059,12 @@
     ensureBarPlaced();
     ensureTimeEntryClipboard();
   });
-  observer.observe(document.documentElement, { subtree: true, childList: true });
+  observer.observe(document.documentElement, {
+    subtree: true,
+    childList: true,
+    attributes: true,
+    attributeFilter: ['value', 'placeholder', 'title', 'aria-activedescendant']
+  });
 
   ['pushState', 'replaceState'].forEach(key => {
     const original = history[key];
