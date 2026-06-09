@@ -133,6 +133,31 @@ Provenance: Human-authored with AI assistance; human-reviewed.
 
 ### Local testing
 - You can install directly from a local file during development, then switch to the GitHub **Raw** link for updates once pushed.
+- Keep syntax checking separate from safety scanning:
+
+  ```sh
+  node --check attentus-cw-helpdesk-toolkit.user.js
+  ```
+
+### Testing and safety
+
+The Helpdesk Toolkit may automate browser UI fields after explicit user action. That UI field automation is allowed. Direct write calls to ConnectWise or ITGlue APIs are not allowed: do not add API behavior that creates, updates, patches, deletes, or otherwise modifies records.
+
+Run this static scan separately from `node --check` when reviewing `attentus-cw-helpdesk-toolkit.user.js` for direct API write behavior:
+
+```sh
+! rg -n --fixed-strings \
+  -e 'fetch(' \
+  -e 'XMLHttpRequest' \
+  -e 'GM_xmlhttpRequest' \
+  -e "method: 'POST'" \
+  -e "method: 'PUT'" \
+  -e "method: 'PATCH'" \
+  -e "method: 'DELETE'" \
+  attentus-cw-helpdesk-toolkit.user.js
+```
+
+The leading `!` makes the check pass when no matches are found. Any matches from this scan need human review before release. Expected behavior is no direct ConnectWise or ITGlue write APIs; UI-only field setting in the ConnectWise page remains acceptable.
 
 ---
 
