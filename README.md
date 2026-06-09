@@ -53,7 +53,7 @@ Provenance: Human-authored with AI assistance; human-reviewed.
   Forces new *Time Entry* forms to open in their own tab for better multitasking.
   
 - [**attentus-cw-helpdesk-toolkit.user.js**](https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-helpdesk-toolkit.user.js)
-  Unified Helpdesk Toolkit for ConnectWise ticket triage. It can apply ticket fields through the ConnectWise browser UI after explicit confirmation, but it does not use ConnectWise or ITGlue API writes. Save and Save & Close are available only after field application and require explicit user selection; Revert is available after field application.
+  Unified Helpdesk Toolkit for ConnectWise ticket triage and helper actions. The toolkit may modify visible ConnectWise ticket UI fields after explicit confirmation, but all API endpoints must remain read-only: it must not call ConnectWise or ITGlue write APIs, and it must not create API POST, PUT, PATCH, or DELETE routes. Clear Contact can clear the visible ticket Contact, Email, and Phone fields after confirmation. Triage can apply fields through the visible ConnectWise browser UI after confirmation. Save and Save & Close are never automatic from the initial confirmation; they require an explicit second user action after fields have been applied. Board shoutouts and Time Entry snippets remain clipboard-only.
 
 - [**attentus-cw-ticket-quick-triage.user.js**](https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-ticket-quick-triage.user.js)
   Adds a “Quick Triage:” bar with Junk and Spam/Phishing actions. Spam/Phishing sets Help Desk (if not already), MUST ASSIGN → Email → Spam/Phishing, Tier 1, SLA Low/Low → Priority 4, and Summary “Spam/Phishing (Contact)”. Shift+Click (opt-in) applies and Save & Close; Cancel fully reverts (incl. SLA). Hides on Project tickets
@@ -70,7 +70,10 @@ Provenance: Human-authored with AI assistance; human-reviewed.
 
 | Script | Assessment |
 | --- | --- |
-| `attentus-cw-ticket-quick-triage.user.js` | Its safer UI-only, confirmation-driven workflow is being folded into `attentus-cw-helpdesk-toolkit.user.js`. |
+| `attentus-cw-clear-contact-button.user.js` | Clear Contact is eligible for consolidation into `attentus-cw-helpdesk-toolkit.user.js` as a confirmation-gated visible-UI field clear for ticket Contact, Email, and Phone fields. It must not use ConnectWise or ITGlue write APIs. |
+| `attentus-cw-ticket-quick-triage.user.js` | Quick Triage is eligible for consolidation into `attentus-cw-helpdesk-toolkit.user.js` as a confirmation-gated visible-UI field workflow. Save and Save & Close must remain separate follow-up actions after field application. |
+| Board shoutout workflows | Eligible for consolidation only as clipboard-only helpers; they must not post shoutouts or create/update records through APIs. |
+| Time Entry snippet workflows | Eligible for consolidation only as clipboard-only helpers; they must not create or update time entries through APIs. |
 
 ---
 
@@ -141,7 +144,7 @@ Provenance: Human-authored with AI assistance; human-reviewed.
 
 ### Testing and safety
 
-The Helpdesk Toolkit may automate browser UI fields after explicit user action. That UI field automation is allowed. Direct write calls to ConnectWise or ITGlue APIs are not allowed: do not add API behavior that creates, updates, patches, deletes, or otherwise modifies records.
+The Helpdesk Toolkit may automate visible ConnectWise ticket UI fields after explicit confirmation. That UI field automation is allowed. Direct write calls to ConnectWise or ITGlue APIs are not allowed: do not add API behavior that creates, updates, patches, deletes, or otherwise modifies records. Do not add API POST, PUT, PATCH, or DELETE routes. Save and Save & Close must require an explicit second user action after any confirmed field application.
 
 Run this static scan separately from `node --check` when reviewing `attentus-cw-helpdesk-toolkit.user.js` for direct API write behavior:
 
