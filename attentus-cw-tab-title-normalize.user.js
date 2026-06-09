@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         attentus-cw-tab-title-normalize
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      2.1.0
+// @version      2.1.1
 // @description  Ticket tabs: “#123456 - Summary - Company” (company toggleable). Service Board tabs: set to the active View name (toggleable). Time Entry tabs: “#123456 - Time Entry” when possible. More reliable in background tabs; listens to the View combobox; responds to Open-Views event.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
@@ -18,6 +18,20 @@
 
 (() => {
   'use strict';
+
+  const TITLE_ENGINE_GUARD = '__attentusCwTabTitleNormalizeActive';
+  const TITLE_ENGINE_DATA_ATTR = 'attCwTitleNormalizeOwner';
+  const TITLE_ENGINE_OWNER = 'standalone-tab-title-normalize';
+  const activeTitleEngine = window[TITLE_ENGINE_GUARD];
+  const domTitleEngineOwner = document.documentElement?.dataset?.[TITLE_ENGINE_DATA_ATTR] || '';
+  if ((activeTitleEngine?.owner && activeTitleEngine.owner !== TITLE_ENGINE_OWNER) || (domTitleEngineOwner && domTitleEngineOwner !== TITLE_ENGINE_OWNER)) return;
+  if (activeTitleEngine?.owner === TITLE_ENGINE_OWNER || domTitleEngineOwner === TITLE_ENGINE_OWNER) return;
+  window[TITLE_ENGINE_GUARD] = {
+    owner: TITLE_ENGINE_OWNER,
+    script: 'attentus-cw-tab-title-normalize',
+    startedAt: Date.now()
+  };
+  if (document.documentElement?.dataset) document.documentElement.dataset[TITLE_ENGINE_DATA_ATTR] = TITLE_ENGINE_OWNER;
 
   // -------------------- storage helpers --------------------
   async function gmGet(key, defVal) {
