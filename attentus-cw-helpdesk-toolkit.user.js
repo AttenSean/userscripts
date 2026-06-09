@@ -357,6 +357,89 @@
     return true;
   }
 
+  function clickLikeUser(el) {
+    if (!el) return false;
+    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    el.click();
+    el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    return true;
+  }
+
+  function findToolbarButton(cls) {
+    const el = $('.' + cls);
+    return visible(el) ? el : null;
+  }
+
+  function clickSave() {
+    return clickLikeUser(findToolbarButton('cw_ToolbarButton_Save'));
+  }
+
+  function clickSaveAndClose() {
+    return clickLikeUser(findToolbarButton('cw_ToolbarButton_SaveAndClose'));
+  }
+
+  async function clearField(input) {
+    input.focus();
+    dispatchInput(input, '');
+    commitBlur(input);
+    await sleep(60);
+    return String(input.value || '') === '';
+  }
+
+  async function revertFieldPlan(plan) {
+    for (const item of plan) {
+      const input = item.input || item.find?.();
+      if (!input) {
+        toast(`${item.label} field not found for revert`);
+        return false;
+      }
+
+      const previousValue = item.currentValue || '';
+      const ok = previousValue
+        ? (item.type === 'text'
+          ? await commitTextOnElement(input, previousValue)
+          : await commitComboOnElement(input, previousValue))
+        : await clearField(input);
+      if (!ok) {
+        toast(`Could not revert ${item.label}`);
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function showPostApplyDialog(workflow, plan) {
+    showActionDialog(`${workflow.buttonLabel} fields applied`, {
+      message: 'The field changes are applied in the visible ConnectWise UI only. Choose what to do with the unsaved changes.',
+      fields: plan,
+      actions: [
+        {
+          label: 'Revert',
+          onClick: async () => {
+            const ok = await revertFieldPlan(plan);
+            toast(ok ? 'Triage changes reverted' : 'Triage revert stopped');
+          }
+        },
+        { label: 'Leave Unsaved', onClick: () => toast('Changes left unsaved') },
+        {
+          label: 'Save',
+          primary: true,
+          onClick: async () => {
+            await sleep(120);
+            if (!clickSave()) toast('Save button not found');
+          }
+        },
+        {
+          label: 'Save & Close',
+          onClick: async () => {
+            await sleep(120);
+            if (!clickSaveAndClose()) toast('Save & Close button not found');
+          }
+        }
+      ]
+    });
+  }
+
   function showActionDialog(title, { message, fields = [], actions = [] }) {
     const overlay = document.createElement('div');
     Object.assign(overlay.style, {
@@ -451,7 +534,12 @@
           primary: true,
           onClick: async () => {
             const ok = await applyFieldPlan(plan);
-            toast(ok ? (workflow.postApplyMessage || `${workflow.buttonLabel} fields applied`) : `${workflow.buttonLabel} apply stopped`);
+            if (ok) {
+              toast(workflow.postApplyMessage || `${workflow.buttonLabel} fields applied`);
+              showPostApplyDialog(workflow, plan);
+            } else {
+              toast(`${workflow.buttonLabel} apply stopped`);
+            }
           }
         }
       ]
@@ -566,7 +654,9 @@
     commitComboOnElement,
     openPopupAndGetContainer,
     findInputByLabel,
-    showActionDialog
+    showActionDialog,
+    clickSave,
+    clickSaveAndClose
   };
 
   let lastHref = location.href;
