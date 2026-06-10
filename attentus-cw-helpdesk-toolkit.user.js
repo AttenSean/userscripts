@@ -51,6 +51,8 @@
   const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
   const visible = (el) => !!el && (el.offsetParent !== null || el.getClientRects().length > 0);
   const norm = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const DEBUG = !!localStorage.getItem('attentus-debug');
+  const log = (...args) => { if (DEBUG) console.log('[HelpdeskToolkit]', ...args); };
 
 
   function cloneDefaultSettings() {
@@ -903,6 +905,11 @@
   }
 
   function confirmAndClearContactInfo() {
+    if (!isCanonicalServiceTicketPage()) {
+      toast('Clear Contact is available only on canonical Service Ticket pages');
+      return false;
+    }
+
     const entries = getContactClearInputs();
     if (!entries.length) {
       toast('No contact fields found to clear');
@@ -1111,6 +1118,10 @@
 
   function handleTriageButton(kind) {
     if (isDraftOnlyMode()) return copyTriage(kind);
+    if (!isCanonicalServiceTicketPage()) {
+      toast('Apply triage is available only on canonical Service Ticket pages');
+      return false;
+    }
     return getToolkitSettings().safety.requireTriageApplyConfirmation
       ? confirmAndApplyTriage(kind)
       : applyTriageWithoutConfirmation(kind);
@@ -1515,11 +1526,62 @@
     return false;
   }
 
+
+  // ---------- Ticket context gates ----------
+
+  function hasServiceTicketNavLabel() {
+    const nodes = document.querySelectorAll(
+      '.navigationEntry.cw_CwLabel, .navigationEntry.mm_label, .navigationEntry.gwt-Label'
+    );
+    return Array.from(nodes).some(el => /service\s+ticket/i.test((el.textContent || '').trim()));
+  }
+
+  function hasAgeLabel() {
+    const nodes = document.querySelectorAll('.cw_CwHTML.mm_label, .gwt-HTML.mm_label.cw_CwHTML');
+    return Array.from(nodes).some(el => /age\s*:/i.test((el.textContent || '').trim()));
+  }
+
+  // Optional debug-only signal. This is intentionally not part of the strict gate
+  // because ConnectWise contact-label markup varies across layouts.
+  function hasContactLabelLoose() {
+    if (document.querySelector('.cw_contact.contact.label')) return true;
+
+    const labels = document.querySelectorAll('.mm_label, .cw_CwLabel, .gwt-Label');
+    return Array.from(labels).some(el => {
+      const text = norm(el.textContent).replace(/[:?]\s*$/, '');
+      return text === 'contact';
+    });
+  }
+
   function isProjectTicket() {
     const textIncludes = (selector, needle) => $$(selector).some(el => visible(el) && norm(el.textContent).includes(norm(needle)));
     return textIncludes('.navigationEntry.cw_CwLabel, .mm_label, .gwt-Label', 'Project Board')
       || visible($('input.cw_projectBoard'))
       || visible($('.cw_project'));
+  }
+
+  function isTicketContextLoose() {
+    const project = isProjectTicket();
+    const hasTicketPod = !!findTicketPodRoot();
+    const hasTicketId = !!getTicketId();
+    const hasTicketUrl = /[?&](service_recid|srrecid|serviceticketid|recid)=\d{3,}/i.test(location.search || '')
+      || /(?:^|\/)(?:ticket|tickets|sr|service[_-]?ticket)s?\/\d{3,}/i.test(location.pathname || '');
+    const hasTicketLabel = $$('.cw_CwLabel,.gwt-Label,.mm_label').some(el => /service\s*ticket\s*#/i.test((el.textContent || '')));
+    const ok = !project && (hasTicketPod || hasTicketId || hasTicketUrl || hasTicketLabel);
+
+    if (DEBUG) log('isTicketContextLoose', { project, hasTicketPod, hasTicketId, hasTicketUrl, hasTicketLabel, ok });
+    return ok;
+  }
+
+  function isCanonicalServiceTicketPage() {
+    const project = isProjectTicket();
+    const nav = hasServiceTicketNavLabel();
+    const age = hasAgeLabel();
+    const contactLabel = hasContactLabelLoose();
+    const ok = !project && nav && age;
+
+    if (DEBUG) log('isCanonicalServiceTicketPage', { project, nav, age, contactLabel, ok });
+    return ok;
   }
 
   function findTicketPodRoot() {
@@ -1846,14 +1908,22 @@
       userSelect: 'none'
     });
 
+    const strictTicketPage = isCanonicalServiceTicketPage();
     const slot = document.createElement('div');
     slot.id = SLOT_ID;
+    slot.dataset.strictTicketPage = strictTicketPage ? 'true' : 'false';
     Object.assign(slot.style, { display: 'inline-flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' });
+
+    if (strictTicketPage) {
+      slot.append(
+        makeActionButton('att-cw-helpdesk-spam-btn', getTriageButtonLabel(TRIAGE_WORKFLOWS.spam), getTriageButtonTooltip(), () => handleTriageButton('spam')),
+        makeActionButton('att-cw-helpdesk-junk-btn', getTriageButtonLabel(TRIAGE_WORKFLOWS.junk), getTriageButtonTooltip(), () => handleTriageButton('junk')),
+        makeActionButton('att-cw-helpdesk-cancel-btn', getTriageButtonLabel(TRIAGE_WORKFLOWS.cancel), getTriageButtonTooltip(), () => handleTriageButton('cancel')),
+        makeActionButton('att-cw-helpdesk-clear-contact-btn', 'Clear Contact', 'Clear visible contact, email, phone, and extension fields after confirmation. Does not call ConnectWise or ITGlue APIs.', () => confirmAndClearContactInfo())
+      );
+    }
+
     slot.append(
-      makeActionButton('att-cw-helpdesk-spam-btn', getTriageButtonLabel(TRIAGE_WORKFLOWS.spam), getTriageButtonTooltip(), () => handleTriageButton('spam')),
-      makeActionButton('att-cw-helpdesk-junk-btn', getTriageButtonLabel(TRIAGE_WORKFLOWS.junk), getTriageButtonTooltip(), () => handleTriageButton('junk')),
-      makeActionButton('att-cw-helpdesk-cancel-btn', getTriageButtonLabel(TRIAGE_WORKFLOWS.cancel), getTriageButtonTooltip(), () => handleTriageButton('cancel')),
-      makeActionButton('att-cw-helpdesk-clear-contact-btn', 'Clear Contact', 'Clear visible contact, email, phone, and extension fields after confirmation. Does not call ConnectWise or ITGlue APIs.', () => confirmAndClearContactInfo()),
       makeActionButton('att-cw-helpdesk-settings-btn', 'Settings…', `Configure ${TRIAGE_MODE_STORAGE_KEY}`, () => showToolkitSettingsDialog())
     );
     if (titleController.isActive) {
@@ -1865,12 +1935,18 @@
   }
 
   function ensureBarPlaced() {
-    if (isProjectTicket()) {
+    if (!isTicketContextLoose()) {
       $(`#${BAR_ID}`)?.remove();
       return false;
     }
 
-    if ($(`#${SLOT_ID}`)) return true;
+    const strictTicketPage = isCanonicalServiceTicketPage();
+    const existingSlot = $(`#${SLOT_ID}`);
+    if (existingSlot) {
+      if (existingSlot.dataset.strictTicketPage === (strictTicketPage ? 'true' : 'false')) return true;
+      $(`#${BAR_ID}`)?.remove();
+    }
+
     const pod = findTicketPodRoot();
     const header = pod && findHeaderBlock(pod);
     if (!header) return false;
