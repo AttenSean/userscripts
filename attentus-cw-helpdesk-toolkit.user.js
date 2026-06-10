@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         attentus-cw-helpdesk-toolkit
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.1.0
+// @version      1.1.1
 // @description  Helpdesk toolkit for ConnectWise ticket triage. Confirms before DOM-only field changes and keeps clipboard draft fallback mode.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
@@ -1475,6 +1475,11 @@
   }
 
   function confirmAndApplyTriage(kind) {
+    if (isProjectTicket()) {
+      toast('Field-mutating triage is not available on Project Tickets');
+      return false;
+    }
+
     const workflow = getTriageWorkflow(kind);
     if (!workflow) {
       toast(`Unknown triage kind: ${kind}`);
@@ -1509,6 +1514,11 @@
 
 
   async function applyTriageWithoutConfirmation(kind) {
+    if (isProjectTicket()) {
+      toast('Field-mutating triage is not available on Project Tickets');
+      return false;
+    }
+
     const workflow = getTriageWorkflow(kind);
     if (!workflow) {
       toast(`Unknown triage kind: ${kind}`);
@@ -1556,6 +1566,7 @@
   function isProjectTicket() {
     const textIncludes = (selector, needle) => $$(selector).some(el => visible(el) && norm(el.textContent).includes(norm(needle)));
     return textIncludes('.navigationEntry.cw_CwLabel, .mm_label, .gwt-Label', 'Project Board')
+      || textIncludes('.navigationEntry.cw_CwLabel, .mm_label, .gwt-Label', 'Project Ticket')
       || visible($('input.cw_projectBoard'))
       || visible($('.cw_project'));
   }
@@ -1592,6 +1603,21 @@
 
   function findHeaderBlock(podRoot) {
     return podRoot?.querySelector('.pod_service_ticket_ticket_header')?.closest('.GMDB3DUBHGH') || null;
+  }
+
+  const FIELD_MUTATING_TOOL_IDS = [
+    'att-cw-helpdesk-spam-btn',
+    'att-cw-helpdesk-junk-btn',
+    'att-cw-helpdesk-cancel-btn',
+    'att-cw-helpdesk-clear-contact-btn'
+  ];
+
+  function removeFieldMutatingControls(root = document) {
+    FIELD_MUTATING_TOOL_IDS.forEach(id => root.querySelector(`#${id}`)?.remove());
+  }
+
+  function canShowFieldMutatingControls() {
+    return !isProjectTicket() && isCanonicalServiceTicketPage();
   }
 
   function makeActionButton(id, text, title, handler) {
@@ -1908,13 +1934,13 @@
       userSelect: 'none'
     });
 
-    const strictTicketPage = isCanonicalServiceTicketPage();
+    const showFieldMutatingControls = canShowFieldMutatingControls();
     const slot = document.createElement('div');
     slot.id = SLOT_ID;
-    slot.dataset.strictTicketPage = strictTicketPage ? 'true' : 'false';
+    slot.dataset.fieldMutatingControls = showFieldMutatingControls ? 'true' : 'false';
     Object.assign(slot.style, { display: 'inline-flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' });
 
-    if (strictTicketPage) {
+    if (showFieldMutatingControls) {
       slot.append(
         makeActionButton('att-cw-helpdesk-spam-btn', getTriageButtonLabel(TRIAGE_WORKFLOWS.spam), getTriageButtonTooltip(), () => handleTriageButton('spam')),
         makeActionButton('att-cw-helpdesk-junk-btn', getTriageButtonLabel(TRIAGE_WORKFLOWS.junk), getTriageButtonTooltip(), () => handleTriageButton('junk')),
@@ -1935,16 +1961,29 @@
   }
 
   function ensureBarPlaced() {
-    if (!isTicketContextLoose()) {
-      $(`#${BAR_ID}`)?.remove();
+    const existingBar = $(`#${BAR_ID}`);
+
+    if (isProjectTicket()) {
+      if (existingBar) {
+        removeFieldMutatingControls(existingBar);
+        existingBar.remove();
+      }
       return false;
     }
 
-    const strictTicketPage = isCanonicalServiceTicketPage();
+    if (!isTicketContextLoose()) {
+      existingBar?.remove();
+      return false;
+    }
+
+    const showFieldMutatingControls = canShowFieldMutatingControls();
     const existingSlot = $(`#${SLOT_ID}`);
     if (existingSlot) {
-      if (existingSlot.dataset.strictTicketPage === (strictTicketPage ? 'true' : 'false')) return true;
-      $(`#${BAR_ID}`)?.remove();
+      if (existingSlot.dataset.fieldMutatingControls === (showFieldMutatingControls ? 'true' : 'false')) {
+        if (!showFieldMutatingControls) removeFieldMutatingControls(existingSlot);
+        return true;
+      }
+      existingBar?.remove();
     }
 
     const pod = findTicketPodRoot();
