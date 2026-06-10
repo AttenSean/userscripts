@@ -19,7 +19,12 @@
 (function () {
   'use strict';
 
-  const BAR_ID = 'att-cw-helpdesk-toolkit-bar';
+  const TICKET_GROUP_ID = 'att-hd-toolkit-ticket-group';
+  const BOARD_GROUP_ID = 'att-hd-toolkit-board-group';
+  const TIME_GROUP_ID = 'att-hd-toolkit-time-group';
+  const LEGACY_TICKET_GROUP_ID = 'att-cw-helpdesk-toolkit-bar';
+  const LEGACY_TIME_GROUP_ID = 'cw-notes-inline-copy-group';
+  const BAR_ID = TICKET_GROUP_ID;
   const SLOT_ID = 'att-cw-helpdesk-toolkit-slot';
   const TRIAGE_MODE_STORAGE_KEY = 'att_hd_triage_mode';
   const SETTINGS_STORAGE_KEY = 'att_hd_toolkit_settings';
@@ -215,7 +220,7 @@
     renton: 'https://www.attentus.tech/renton_reviews'
   };
   const TIME_ENTRY_LOCATIONS = Object.keys(TIME_ENTRY_REVIEW_URLS);
-  const TIME_ENTRY_CLIP_GROUP_ID = 'cw-notes-inline-copy-group';
+  const TIME_ENTRY_CLIP_GROUP_ID = TIME_GROUP_ID;
   const TIME_ENTRY_CLIP_ORIGIN = 'att-clipboard-bar';
 
   function ensureTimeEntryClipStyles() {
@@ -224,12 +229,12 @@
       s.id = 'att-clipbar-style';
       s.textContent = `
       #att-clipbar-row { display:inline-flex; align-items:center; gap:8px; vertical-align:middle; }
-      #cw-notes-inline-copy-group { display:inline-flex; flex-wrap:wrap; gap:6px; align-items:center; margin:8px 0; }
-      #cw-notes-inline-copy-group .mm_button {
+      #att-hd-toolkit-time-group, #cw-notes-inline-copy-group { display:inline-flex; flex-wrap:wrap; gap:6px; align-items:center; margin:8px 0; }
+      #att-hd-toolkit-time-group .mm_button, #cw-notes-inline-copy-group .mm_button {
         display:inline-block !important; pointer-events:auto !important; opacity:1 !important; cursor:pointer !important;
         padding:4px 8px; border-radius:6px; border:1px solid rgba(0,0,0,.2); background:#2563eb; color:#fff; line-height:1.2; white-space:nowrap;
       }
-      #cw-notes-inline-copy-group select { padding:4px 6px; border-radius:6px; }
+      #att-hd-toolkit-time-group select, #cw-notes-inline-copy-group select { padding:4px 6px; border-radius:6px; }
     `;
       document.head.appendChild(s);
     }
@@ -477,7 +482,7 @@
   }
 
   function mountTimeEntryClipGroup(nextToStamp) {
-    const existing = document.getElementById(TIME_ENTRY_CLIP_GROUP_ID);
+    const existing = document.getElementById(TIME_ENTRY_CLIP_GROUP_ID) || document.getElementById(LEGACY_TIME_GROUP_ID);
     if (existing) {
       if (existing.previousElementSibling === nextToStamp || existing.parentElement?.previousElementSibling === nextToStamp) return true;
       if (existing.dataset?.origin === TIME_ENTRY_CLIP_ORIGIN) existing.remove();
@@ -510,7 +515,7 @@
     const pod = targetEl.closest?.('.pod_service_ticket_discussion, .pod_hosted_15');
     if (pod) return false;
 
-    const existing = document.getElementById(TIME_ENTRY_CLIP_GROUP_ID);
+    const existing = document.getElementById(TIME_ENTRY_CLIP_GROUP_ID) || document.getElementById(LEGACY_TIME_GROUP_ID);
     if (existing && (existing.previousElementSibling === targetEl || existing.nextElementSibling === targetEl)) return true;
     if (existing && existing.dataset && existing.dataset.origin === TIME_ENTRY_CLIP_ORIGIN) existing.remove();
 
@@ -603,8 +608,16 @@
   }
 
   function removeTimeEntryClipGroupIfAny() {
-    const ex = document.getElementById(TIME_ENTRY_CLIP_GROUP_ID);
-    if (ex && ex.dataset && ex.dataset.origin === TIME_ENTRY_CLIP_ORIGIN && ex.parentNode) ex.parentNode.removeChild(ex);
+    for (const id of [TIME_ENTRY_CLIP_GROUP_ID, LEGACY_TIME_GROUP_ID]) {
+      const ex = document.getElementById(id);
+      if (ex && ex.dataset && ex.dataset.origin === TIME_ENTRY_CLIP_ORIGIN && ex.parentNode) ex.parentNode.removeChild(ex);
+    }
+    const row = document.getElementById('att-clipbar-row');
+    if (row?.dataset?.origin === TIME_ENTRY_CLIP_ORIGIN && row.parentNode) {
+      const stamp = row.querySelector('.cw_ToolbarButton_TimeStamp');
+      if (stamp) row.insertAdjacentElement('beforebegin', stamp);
+      row.remove();
+    }
   }
 
   async function ensureTimeEntryClipboard() {
@@ -2443,15 +2456,86 @@
     ensureTimeEntryClipboard
   };
 
-  let lastHref = location.href;
-  const observer = new MutationObserver((mutations) => {
-    if (lastHref !== location.href) {
-      lastHref = location.href;
-      $(`#${BAR_ID}`)?.remove();
-      removeTimeEntryClipGroupIfAny();
+  function isTimeEntryPageContext() {
+    const href = location.href.toLowerCase();
+    if (/\btime[_-]?entry\b/.test(href) || /timeentry/.test(href)) return true;
+    if (isTimeEntryTimesheetContext()) return true;
+    if (document.querySelector('input.cw_timeStart, input.cw_timeEnd')) return true;
+    return Array.from(document.querySelectorAll('.GMDB3DUBBPG, .GMDB3DUBORG, .gwt-Label.mm_label, [id$="-label"]'))
+      .some(el => visible(el) && /time\s+entry/i.test(el.textContent || ''));
+  }
+
+  function isBoardContextLoose() {
+    if (document.querySelector('table.srboard-grid tr.cw-ml-row')) return true;
+    const pathSearch = `${location.pathname}${location.search}`.toLowerCase();
+    if (/service[_-]?board|srboard|boardlist|serviceboard/.test(pathSearch)) return true;
+    return Array.from(document.querySelectorAll('.navigationEntry.cw_CwLabel, .navigationEntry.mm_label, .navigationEntry.gwt-Label'))
+      .some(el => /service\s+board\s+list/i.test((el.textContent || '').trim()));
+  }
+
+  function getToolkitPageContext() {
+    const url = `${location.pathname}${location.search}`;
+    const ticketId = getTicketId() || '';
+    let kind = 'other';
+
+    if (isTimeEntryPageContext()) kind = 'time';
+    else if (isTicketContextLoose()) kind = 'ticket';
+    else if (isBoardContextLoose()) kind = 'board';
+
+    return { url, ticketId, kind, signature: [url, ticketId, kind].join('|') };
+  }
+
+  function removeToolkitContextGroups() {
+    for (const id of [TICKET_GROUP_ID, LEGACY_TICKET_GROUP_ID, BOARD_GROUP_ID]) {
+      const el = document.getElementById(id);
+      if (el?.parentNode) el.parentNode.removeChild(el);
     }
-    ensureBarPlaced();
-    ensureTimeEntryClipboard();
+    removeTimeEntryClipGroupIfAny();
+  }
+
+  function ensureGroupsForContext(context) {
+    if (context.kind === 'ticket') {
+      ensureBarPlaced();
+      return;
+    }
+    if (context.kind === 'time') {
+      ensureTimeEntryClipboard();
+      return;
+    }
+    if (context.kind === 'board') {
+      // Reserved for board-scoped controls. Keep ticket/time groups unmounted here.
+      return;
+    }
+  }
+
+  let lastToolkitContextSignature = '';
+  let contextRefreshPending = false;
+
+  function refreshToolkitContext(reason = 'manual', mutations = []) {
+    const context = getToolkitPageContext();
+    const contextChanged = context.signature !== lastToolkitContextSignature;
+    if (contextChanged) {
+      log('context changed', { reason, context });
+      lastToolkitContextSignature = context.signature;
+      removeToolkitContextGroups();
+      titleController.handleRouteChange();
+    } else {
+      titleController.handleDomMutation(mutations);
+    }
+    ensureGroupsForContext(context);
+  }
+
+  function scheduleToolkitContextRefresh(reason = 'scheduled', mutations = []) {
+    if (contextRefreshPending) return;
+    contextRefreshPending = true;
+    queueMicrotask(() => {
+      contextRefreshPending = false;
+      refreshToolkitContext(reason, mutations);
+    });
+  }
+
+  const observer = new MutationObserver((mutations) => {
+    scheduleToolkitContextRefresh('mutation', mutations);
   });
   observer.observe(document.documentElement, {
     subtree: true,
@@ -2464,26 +2548,14 @@
     const original = history[key];
     history[key] = function () {
       const result = original.apply(this, arguments);
-      queueMicrotask(() => {
-        ensureBarPlaced();
-        ensureTimeEntryClipboard();
-      });
+      scheduleToolkitContextRefresh(key);
       return result;
     };
   });
 
-  window.addEventListener('popstate', () => {
-    ensureBarPlaced();
-    ensureTimeEntryClipboard();
-  });
-  ensureBarPlaced();
-  ensureTimeEntryClipboard();
-  setTimeout(() => {
-    ensureBarPlaced();
-    ensureTimeEntryClipboard();
-  }, 200);
-  setTimeout(() => {
-    ensureBarPlaced();
-    ensureTimeEntryClipboard();
-  }, 700);
+  window.addEventListener('popstate', () => scheduleToolkitContextRefresh('popstate'));
+  window.addEventListener('hashchange', () => scheduleToolkitContextRefresh('hashchange'));
+  refreshToolkitContext('initial');
+  setTimeout(() => refreshToolkitContext('startup-200ms'), 200);
+  setTimeout(() => refreshToolkitContext('startup-700ms'), 700);
 })();
