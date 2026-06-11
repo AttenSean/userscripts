@@ -56,6 +56,9 @@ Provenance: Human-authored with AI assistance; human-reviewed.
 - [**attentus-cw-time-entry-in-tab.user.js**](https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-time-entry-in-tab.user.js)  
   Forces new *Time Entry* forms to open in their own tab for better multitasking.
   
+- [**attentus-cw-helpdesk-toolkit.user.js**](https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-helpdesk-toolkit.user.js)
+  Unified Helpdesk Toolkit for ConnectWise ticket triage and helper actions. The toolkit may modify visible ConnectWise ticket UI fields after explicit confirmation, but all API endpoints must remain read-only: it must not call ConnectWise or ITGlue write APIs, and it must not create API POST, PUT, PATCH, or DELETE routes. Clear Contact can clear the visible ticket Contact, Email, and Phone fields after confirmation. Triage can apply fields through the visible ConnectWise browser UI after confirmation. Save and Save & Close are never automatic from the initial confirmation; they require an explicit second user action after fields have been applied. Board shoutouts and Time Entry snippets remain clipboard-only.
+
 - [**attentus-cw-ticket-quick-triage.user.js**](https://raw.githubusercontent.com/AttenSean/userscripts/main/attentus-cw-ticket-quick-triage.user.js)
   Adds a “Quick Triage:” bar with Junk and Spam/Phishing actions. Spam/Phishing sets Help Desk (if not already), MUST ASSIGN → Email → Spam/Phishing, Tier 1, SLA Low/Low → Priority 4, and Summary “Spam/Phishing (Contact)”. Shift+Click (opt-in) applies and Save & Close; Cancel fully reverts (incl. SLA). Hides on Project tickets
 
@@ -63,6 +66,18 @@ Provenance: Human-authored with AI assistance; human-reviewed.
   Ticket-only contact insight under Company pod Email. No-flash stealth scrape. Uses cache when throttled, and never overwrites shown data with a hint. Should only re-run on contact change.
 
 > If a script isn’t listed above but lives in this repo, it’s likely WIP or internal and may not include auto-update headers yet.
+
+
+---
+
+## Consolidation assessment
+
+| Script | Assessment |
+| --- | --- |
+| `attentus-cw-clear-contact-button.user.js` | Clear Contact is eligible for consolidation into `attentus-cw-helpdesk-toolkit.user.js` as a confirmation-gated visible-UI field clear for ticket Contact, Email, and Phone fields. It must not use ConnectWise or ITGlue write APIs. |
+| `attentus-cw-ticket-quick-triage.user.js` | Quick Triage is eligible for consolidation into `attentus-cw-helpdesk-toolkit.user.js` as a confirmation-gated visible-UI field workflow. Save and Save & Close must remain separate follow-up actions after field application. |
+| Board shoutout workflows | Eligible for consolidation only as clipboard-only helpers; they must not post shoutouts or create/update records through APIs. |
+| Time Entry snippet workflows | Eligible for consolidation only as clipboard-only helpers; they must not create or update time entries through APIs. |
 
 ---
 
@@ -125,6 +140,23 @@ Provenance: Human-authored with AI assistance; human-reviewed.
 
 ### Local testing
 - You can install directly from a local file during development, then switch to the GitHub **Raw** link for updates once pushed.
+- Keep syntax checking separate from safety scanning:
+
+  ```sh
+  node --check attentus-cw-helpdesk-toolkit.user.js
+  ```
+
+### Testing and safety
+
+The Helpdesk Toolkit may automate visible ConnectWise ticket UI fields after explicit confirmation. That UI field automation is allowed. Direct write calls to ConnectWise or ITGlue APIs are not allowed: do not add API behavior that creates, updates, patches, deletes, or otherwise modifies records. Do not add API POST, PUT, PATCH, or DELETE routes. Save and Save & Close must require an explicit second user action after any confirmed field application.
+
+Run this static scan separately from `node --check` when reviewing `attentus-cw-helpdesk-toolkit.user.js` for direct network/API write behavior:
+
+```sh
+! rg -n "fetch\(|XMLHttpRequest|GM_xmlhttpRequest|method\s*:\s*['\"](POST|PUT|PATCH|DELETE)" attentus-cw-helpdesk-toolkit.user.js
+```
+
+The leading `!` makes the check pass when no matches are found. This check is intended to catch direct network/API write behavior, especially ConnectWise or ITGlue API writes. It is not intended to block user-confirmed UI field automation that only changes fields in the ConnectWise browser page after explicit user action. Any matches from this scan need human review before release. Expected behavior is no direct ConnectWise or ITGlue write APIs; UI-only field setting in the ConnectWise page remains acceptable.
 
 ---
 
