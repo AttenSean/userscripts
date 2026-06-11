@@ -21,6 +21,8 @@
 
   const TICKET_GROUP_ID = 'att-hd-toolkit-ticket-group';
   const BOARD_GROUP_ID = 'att-hd-toolkit-board-group';
+  const BOARD_MAPPING_STORAGE_KEY = 'att_cw_shoutout_settings_exact_views_json';
+  const BOARD_ROW_SELECTOR = 'table.srboard-grid tr.cw-ml-row';
   const TIME_GROUP_ID = 'att-hd-toolkit-time-group';
   const LEGACY_TICKET_GROUP_ID = 'att-cw-helpdesk-toolkit-bar';
   const LEGACY_TIME_GROUP_ID = 'cw-notes-inline-copy-group';
@@ -1200,6 +1202,329 @@
     else if (settings.clipboard.signatureName) lines.push('', settings.clipboard.signatureName);
 
     return lines.join('\n');
+  }
+
+
+
+  function stripBoardInvisibleText(value) {
+    return String(value || '')
+      .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
+      .replace(/\u00A0/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function getBoardViewInput() {
+    return $('.cw-toolbar-view-dropdown input.cw_CwComboBox')
+      || $('.cw-toolbar-view-dropdown [id$="-input"].cw_CwComboBox')
+      || $('.cw-toolbar-view-dropdown input[type="text"]');
+  }
+
+  function getBoardViewExact() {
+    const input = getBoardViewInput();
+    const value = input && typeof input.value === 'string' ? input.value.trim() : '';
+    return value || '(No View)';
+  }
+
+  function getBoardViewCanonical() {
+    return stripBoardInvisibleText(getBoardViewExact());
+  }
+
+  function getBoardMappingKeys() {
+    const host = location.host.toLowerCase();
+    return [
+      `${host}::${getBoardViewExact()}`,
+      `${host}::${getBoardViewCanonical()}`
+    ];
+  }
+
+  function parseBoardMappingsStore(raw) {
+    if (!raw) return {};
+    if (typeof raw === 'string') {
+      try { return JSON.parse(raw || '{}') || {}; } catch { return {}; }
+    }
+    return raw && typeof raw === 'object' ? raw : {};
+  }
+
+  async function getBoardColumnMappings() {
+    try {
+      const raw = await gmGet(BOARD_MAPPING_STORAGE_KEY, '{}');
+      return parseBoardMappingsStore(raw);
+    } catch {}
+    return parseBoardMappingsStore(storageGet(BOARD_MAPPING_STORAGE_KEY, '{}'));
+  }
+
+  async function setBoardColumnMappings(mappings) {
+    const json = JSON.stringify(mappings || {});
+    try {
+      if (typeof GM_setValue === 'function') {
+        GM_setValue(BOARD_MAPPING_STORAGE_KEY, json);
+        return;
+      }
+    } catch {}
+    try {
+      if (typeof GM !== 'undefined' && GM.setValue) {
+        await GM.setValue(BOARD_MAPPING_STORAGE_KEY, json);
+        return;
+      }
+    } catch {}
+    storageSet(BOARD_MAPPING_STORAGE_KEY, json);
+  }
+
+  function isUsableBoardColumnMapping(mapping) {
+    return !!mapping && ['ticket', 'priority', 'summary', 'company', 'contact'].every(key => Number.isInteger(Number(mapping[key])));
+  }
+
+  async function getCurrentBoardColumnMapping() {
+    const mappings = await getBoardColumnMappings();
+    const [exactKey, canonicalKey] = getBoardMappingKeys();
+    return mappings[exactKey] || mappings[canonicalKey] || null;
+  }
+
+  function getVisibleBoardRows() {
+    return $$(BOARD_ROW_SELECTOR).filter(row => visible(row));
+  }
+
+  function getBoardCell(row, index) {
+    return Number.isInteger(Number(index)) ? row.querySelector(`td[cellindex="${Number(index)}"]`) : null;
+  }
+
+  function getBoardCellText(row, index) {
+    const cell = getBoardCell(row, index);
+    if (!cell) return '';
+    const target = cell.querySelector('a') || cell.querySelector('div') || cell;
+    return stripBoardInvisibleText(target.textContent || '');
+  }
+
+  function getBoardHeaderCells() {
+    const headers = new Map();
+    $$('.cw-ml-header *[cellindex], .x-grid3-hd-row *[cellindex], .x-grid3-header *[cellindex]').forEach(cell => {
+      const index = Number(cell.getAttribute('cellindex'));
+      if (!Number.isInteger(index)) return;
+      const label = stripBoardInvisibleText(cell.textContent || '').toLowerCase();
+      if (label) headers.set(index, label);
+    });
+    return headers;
+  }
+
+  function getBoardSampleCells() {
+    const row = getVisibleBoardRows()[0];
+    const samples = new Map();
+    if (!row) return samples;
+    $$('td[cellindex]', row).forEach(cell => {
+      const index = Number(cell.getAttribute('cellindex'));
+      if (!Number.isInteger(index)) return;
+      const target = cell.querySelector('a') || cell.querySelector('div') || cell;
+      samples.set(index, stripBoardInvisibleText(target.textContent || ''));
+    });
+    return samples;
+  }
+
+  function guessBoardColumn(pattern, fallback = null) {
+    let found = fallback;
+    getBoardHeaderCells().forEach((label, index) => {
+      if (found == null && pattern.test(label)) found = index;
+    });
+    return found;
+  }
+
+  function buildBoardColumnOptions(select, selectedIndex) {
+    const headers = getBoardHeaderCells();
+    const samples = getBoardSampleCells();
+    const indexes = new Set([...headers.keys(), ...samples.keys()]);
+    select.textContent = '';
+    [...indexes].sort((a, b) => a - b).forEach(index => {
+      const option = document.createElement('option');
+      const header = headers.get(index) || '(no header)';
+      const sample = samples.get(index) || '';
+      option.value = String(index);
+      option.textContent = `#${index} - ${header}${sample ? ` • ${sample.slice(0, 60)}` : ''}`;
+      option.selected = Number(selectedIndex) === index;
+      select.appendChild(option);
+    });
+  }
+
+  function guessBoardMapping(existing = {}) {
+    return {
+      ticket: Number.isInteger(Number(existing.ticket)) ? Number(existing.ticket) : guessBoardColumn(/ticket|#/i, 0),
+      priority: Number.isInteger(Number(existing.priority)) ? Number(existing.priority) : guessBoardColumn(/priority|prio/i, 1),
+      summary: Number.isInteger(Number(existing.summary)) ? Number(existing.summary) : guessBoardColumn(/summary|description/i, 2),
+      company: Number.isInteger(Number(existing.company)) ? Number(existing.company) : guessBoardColumn(/company/i, 3),
+      contact: Number.isInteger(Number(existing.contact)) ? Number(existing.contact) : guessBoardColumn(/contact/i, 4)
+    };
+  }
+
+  async function showBoardMappingSetup() {
+    const mappings = await getBoardColumnMappings();
+    const [exactKey, canonicalKey] = getBoardMappingKeys();
+    const existing = mappings[exactKey] || mappings[canonicalKey] || {};
+    const guessed = guessBoardMapping(existing);
+
+    $(`#att-hd-toolkit-board-mapping-overlay`)?.remove();
+    const overlay = document.createElement('div');
+    overlay.id = 'att-hd-toolkit-board-mapping-overlay';
+    Object.assign(overlay.style, {
+      position: 'fixed', inset: '0', zIndex: 2147483645, background: 'rgba(17,24,39,.35)',
+      display: 'flex', alignItems: 'flex-start', justifyContent: 'flex-end', padding: '72px 16px 16px'
+    });
+
+    const card = document.createElement('div');
+    Object.assign(card.style, {
+      width: '460px', background: '#fff', color: '#111827', border: '1px solid #D1D5DB', borderRadius: '12px',
+      boxShadow: '0 18px 45px rgba(0,0,0,.25)', padding: '14px', font: '13px system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif'
+    });
+
+    const title = document.createElement('h2');
+    title.textContent = 'Service Board Column Mapping';
+    Object.assign(title.style, { margin: '0 0 4px', fontSize: '16px' });
+    const help = document.createElement('p');
+    help.textContent = `Map columns for the current Service Board view: ${getBoardViewExact()}. These settings are local and copying is clipboard-only.`;
+    Object.assign(help.style, { margin: '0 0 12px', color: '#4B5563' });
+
+    const form = document.createElement('div');
+    Object.assign(form.style, { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' });
+    const fields = [
+      ['ticket', 'Ticket # column'],
+      ['priority', 'Priority column'],
+      ['summary', 'Summary column'],
+      ['company', 'Company column'],
+      ['contact', 'Contact column']
+    ];
+    fields.forEach(([key, labelText]) => {
+      const label = document.createElement('label');
+      label.textContent = labelText;
+      Object.assign(label.style, { display: 'grid', gap: '4px', fontWeight: 600 });
+      const select = document.createElement('select');
+      select.id = `att-hd-board-map-${key}`;
+      Object.assign(select.style, { padding: '6px', border: '1px solid #D1D5DB', borderRadius: '8px' });
+      buildBoardColumnOptions(select, guessed[key]);
+      label.appendChild(select);
+      form.appendChild(label);
+    });
+
+    const actions = document.createElement('div');
+    Object.assign(actions.style, { display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '14px' });
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.textContent = 'Close';
+    const save = document.createElement('button');
+    save.type = 'button';
+    save.textContent = 'Save Mapping';
+    [close, save].forEach(button => Object.assign(button.style, { borderRadius: '8px', border: '1px solid #D1D5DB', padding: '7px 12px', cursor: 'pointer' }));
+    Object.assign(save.style, { background: '#111827', color: '#fff', borderColor: '#111827' });
+    close.addEventListener('click', () => overlay.remove());
+    save.addEventListener('click', async () => {
+      const mapping = {};
+      fields.forEach(([key]) => { mapping[key] = Number($(`#att-hd-board-map-${key}`, card)?.value); });
+      mappings[exactKey] = mapping;
+      if (canonicalKey !== exactKey) mappings[canonicalKey] = mapping;
+      await setBoardColumnMappings(mappings);
+      overlay.remove();
+      toast('Board column mapping saved');
+      refreshToolkitContext('board-mapping-saved');
+    });
+    actions.append(close, save);
+    card.append(title, help, form, actions);
+    overlay.appendChild(card);
+    document.body.appendChild(overlay);
+  }
+
+  function boardPriorityDot(priority) {
+    const normalized = String(priority || '').toUpperCase().match(/P[0-4]/)?.[0] || 'P4';
+    return ({ P0: '🔴', P1: '🟠', P2: '🟡', P3: '🟢', P4: '⚪' })[normalized] || '⚪';
+  }
+
+  async function copyBoardShoutout(mapping) {
+    if (!isUsableBoardColumnMapping(mapping)) {
+      await showBoardMappingSetup();
+      toast('No mapping for this View; opened setup');
+      return false;
+    }
+    const rows = getVisibleBoardRows();
+    const items = rows.map(row => {
+      const ticket = getBoardCellText(row, mapping.ticket);
+      if (!/^\d{5,}$/.test(ticket)) return null;
+      const priority = getBoardCellText(row, mapping.priority);
+      const summary = getBoardCellText(row, mapping.summary).replace(/\b(?:Respond by|Plan by|Waiting|Scheduled|SLA)[^|-]*$/i, '').trim();
+      const company = getBoardCellText(row, mapping.company);
+      const contact = getBoardCellText(row, mapping.contact);
+      const url = `${location.origin}/v4_6_release/services/system_io/Service/fv_sr100_request.rails?service_recid=${encodeURIComponent(ticket)}`;
+      return { ticket, priority, summary, company, contact, url };
+    }).filter(Boolean);
+
+    const lines = [`Tickets needing attention (${items.length})`, ''];
+    items.forEach((item, index) => {
+      lines.push(`${boardPriorityDot(item.priority)} #${item.ticket} ${item.summary} (${item.url})`);
+      const meta = [item.company, item.contact].filter(Boolean).join(' - ');
+      if (meta) lines.push(`ㅤ ${meta}`);
+      if (index !== items.length - 1) lines.push('');
+    });
+    const ok = await copyText(lines.join('\n'));
+    toast(ok ? `Copied ${items.length} board ${items.length === 1 ? 'entry' : 'entries'}` : 'Board copy failed');
+    return ok;
+  }
+
+  function findBoardToolbarCanvas() {
+    return $('.x-panel-toolbar .GMDB3DUBHYI .GMDB3DUBALJ')
+      || $('.GMDB3DUBHYI .GMDB3DUBALJ')
+      || $('.x-panel-toolbar')
+      || $('.cw-toolbar-view-dropdown')?.parentElement
+      || null;
+  }
+
+  function positionBoardGroup(group) {
+    const canvas = findBoardToolbarCanvas();
+    if (!canvas || !group) return;
+    const anchor = canvas.querySelector('.cw-toolbar-search') || canvas.querySelector('.cw-toolbar-actions') || canvas.querySelector('.cw-toolbar-clear');
+    let left = 8;
+    if (anchor) {
+      const anchorLeft = parseInt(anchor.style.left || '0', 10) || 0;
+      const anchorWidth = anchor.getBoundingClientRect?.().width || 64;
+      left = Math.max(0, anchorLeft + anchorWidth + 8);
+    }
+    Object.assign(group.style, { position: 'absolute', top: '3px', left: `${left}px`, zIndex: '2' });
+  }
+
+  async function mountBoardTools() {
+    if (!isBoard()) {
+      document.getElementById(BOARD_GROUP_ID)?.remove();
+      return false;
+    }
+
+    const mapping = await getCurrentBoardColumnMapping();
+    if (!isBoard()) {
+      document.getElementById(BOARD_GROUP_ID)?.remove();
+      return false;
+    }
+    const hasMapping = isUsableBoardColumnMapping(mapping);
+    const desiredMode = hasMapping ? 'copy' : 'setup';
+    const existing = document.getElementById(BOARD_GROUP_ID);
+    if (existing && existing.dataset.mode === desiredMode) {
+      positionBoardGroup(existing);
+      return true;
+    }
+    existing?.remove();
+
+    const canvas = findBoardToolbarCanvas();
+    if (!canvas) return false;
+    const group = document.createElement('div');
+    group.id = BOARD_GROUP_ID;
+    group.dataset.mode = desiredMode;
+    Object.assign(group.style, { display: 'inline-flex', gap: '6px', alignItems: 'center' });
+
+    if (hasMapping) {
+      group.appendChild(makeActionButton('att-hd-toolkit-board-copy-btn', 'Teams Shoutout', 'Copy a Service Board shoutout to the clipboard. Shift+Click opens mapping setup.', async (event) => {
+        if (event?.shiftKey) return showBoardMappingSetup();
+        const currentMapping = await getCurrentBoardColumnMapping();
+        return copyBoardShoutout(currentMapping);
+      }));
+    } else {
+      group.appendChild(makeActionButton('att-hd-toolkit-board-setup-btn', 'Setup Mapping', 'Map Service Board columns before copying.', () => showBoardMappingSetup()));
+    }
+
+    canvas.appendChild(group);
+    positionBoardGroup(group);
+    return true;
   }
 
   const fieldSnapshotsByTicket = new Map();
@@ -2454,7 +2779,10 @@
     signatureHTML,
     signatureText,
     showTimeEntryClipboardSettings,
-    ensureTimeEntryClipboard
+    ensureTimeEntryClipboard,
+    isBoard,
+    mountBoardTools,
+    showBoardMappingSetup
   };
 
   function isTimeEntryPageContext() {
@@ -2466,12 +2794,15 @@
       .some(el => visible(el) && /time\s+entry/i.test(el.textContent || ''));
   }
 
+  function isBoard() {
+    if (isTimeEntryPageContext() || isTicketContextLoose()) return false;
+    if (!document.querySelector('table.srboard-grid')) return false;
+    if (!getVisibleBoardRows().length) return false;
+    return visible(getBoardViewInput());
+  }
+
   function isBoardContextLoose() {
-    if (document.querySelector('table.srboard-grid tr.cw-ml-row')) return true;
-    const pathSearch = `${location.pathname}${location.search}`.toLowerCase();
-    if (/service[_-]?board|srboard|boardlist|serviceboard/.test(pathSearch)) return true;
-    return Array.from(document.querySelectorAll('.navigationEntry.cw_CwLabel, .navigationEntry.mm_label, .navigationEntry.gwt-Label'))
-      .some(el => /service\s+board\s+list/i.test((el.textContent || '').trim()));
+    return isBoard();
   }
 
   function getToolkitPageContext() {
@@ -2506,9 +2837,10 @@
     }
     removeTimeEntryClipGroupIfAny();
     if (context.kind === 'board') {
-      // Reserved for board-scoped controls. Keep ticket/time groups unmounted here.
+      mountBoardTools();
       return;
     }
+    document.getElementById(BOARD_GROUP_ID)?.remove();
   }
 
   let lastToolkitContextSignature = '';
