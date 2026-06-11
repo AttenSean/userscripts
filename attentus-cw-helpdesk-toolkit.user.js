@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         attentus-cw-helpdesk-toolkit
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.1.2
+// @version      1.1.3
 // @description  Helpdesk toolkit for ConnectWise ticket triage. Confirms before DOM-only field changes and keeps clipboard draft fallback mode.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
@@ -1230,12 +1230,22 @@
     return stripBoardInvisibleText(getBoardViewExact());
   }
 
-  function getBoardMappingKeys() {
+  function getBoardMappingContext() {
     const host = location.host.toLowerCase();
-    return [
-      `${host}::${getBoardViewExact()}`,
-      `${host}::${getBoardViewCanonical()}`
-    ];
+    const exactView = getBoardViewExact();
+    const canonicalView = getBoardViewCanonical();
+    return {
+      host,
+      exactView,
+      canonicalView,
+      exactKey: `${host}::${exactView}`,
+      canonicalKey: `${host}::${canonicalView}`
+    };
+  }
+
+  function getBoardMappingKeys() {
+    const context = getBoardMappingContext();
+    return [context.exactKey, context.canonicalKey];
   }
 
   function parseBoardMappingsStore(raw) {
@@ -1277,8 +1287,12 @@
 
   async function getCurrentBoardColumnMapping() {
     const mappings = await getBoardColumnMappings();
-    const [exactKey, canonicalKey] = getBoardMappingKeys();
+    const { exactKey, canonicalKey } = getBoardMappingContext();
     return mappings[exactKey] || mappings[canonicalKey] || null;
+  }
+
+  function firstSavedBoardMapping(mappings) {
+    return Object.keys(mappings || {}).map(key => mappings[key]).find(mapping => isUsableBoardColumnMapping(mapping)) || null;
   }
 
   function getVisibleBoardRows() {
@@ -1328,6 +1342,27 @@
     return found;
   }
 
+  function detectBoardTicketColumnIndex() {
+    const headerGuess = guessBoardColumn(/ticket/i, null);
+    if (headerGuess != null) return headerGuess;
+
+    const counts = {};
+    getVisibleBoardRows().slice(0, 8).forEach(row => {
+      $$('td[cellindex]', row).forEach(cell => {
+        const linkText = stripBoardInvisibleText(cell.querySelector('a')?.textContent || '');
+        if (!/^\d{5,}$/.test(linkText)) return;
+        const index = Number(cell.getAttribute('cellindex'));
+        if (Number.isInteger(index)) counts[index] = (counts[index] || 0) + 1;
+      });
+    });
+
+    return Object.entries(counts).reduce((best, [index, count]) => {
+      if (count < 2) return best;
+      if (!best || count > best.count) return { index: Number(index), count };
+      return best;
+    }, null)?.index ?? null;
+  }
+
   function buildBoardColumnOptions(select, selectedIndex) {
     const headers = getBoardHeaderCells();
     const samples = getBoardSampleCells();
@@ -1346,7 +1381,7 @@
 
   function guessBoardMapping(existing = {}) {
     return {
-      ticket: Number.isInteger(Number(existing.ticket)) ? Number(existing.ticket) : guessBoardColumn(/ticket|#/i, 0),
+      ticket: Number.isInteger(Number(existing.ticket)) ? Number(existing.ticket) : detectBoardTicketColumnIndex() ?? guessBoardColumn(/ticket|#/i, 0),
       priority: Number.isInteger(Number(existing.priority)) ? Number(existing.priority) : guessBoardColumn(/priority|prio/i, 1),
       summary: Number.isInteger(Number(existing.summary)) ? Number(existing.summary) : guessBoardColumn(/summary|description/i, 2),
       company: Number.isInteger(Number(existing.company)) ? Number(existing.company) : guessBoardColumn(/company/i, 3),
@@ -1354,13 +1389,44 @@
     };
   }
 
-  async function showBoardMappingSetup() {
+  function getSmartBoardMappingSeed(mappings, context) {
+    const existing = mappings[context.exactKey] || mappings[context.canonicalKey];
+    if (existing) return existing;
+
+    const ticketIndex = detectBoardTicketColumnIndex();
+    const candidate = firstSavedBoardMapping(mappings);
+    if (candidate && ticketIndex != null && Number(candidate.ticket) === Number(ticketIndex)) return candidate;
+    return {};
+  }
+
+  function readBoardMappingFromForm(card, fields) {
+    const mapping = {};
+    fields.forEach(([key]) => { mapping[key] = Number($(`#att-hd-board-map-${key}`, card)?.value); });
+    return mapping;
+  }
+
+  function buildBoardShoutoutPreview(mapping) {
+    const row = getVisibleBoardRows()[0];
+    if (!row) return 'No rows to preview.';
+    const ticket = getBoardCellText(row, mapping.ticket);
+    const priority = getBoardCellText(row, mapping.priority);
+    const summary = getBoardCellText(row, mapping.summary).replace(/\b(?:Respond by|Plan by|Waiting|Scheduled|SLA)[^|-]*$/i, '').trim();
+    const company = getBoardCellText(row, mapping.company);
+    const contact = getBoardCellText(row, mapping.contact);
+    const meta = [company, contact].filter(Boolean).join(' - ');
+    const url = ticket ? `${location.origin}/v4_6_release/services/system_io/Service/fv_sr100_request.rails?service_recid=${encodeURIComponent(ticket)}` : '';
+    return `${boardPriorityDot(priority)} #${ticket || '(ticket?)'} ${summary || '(summary?)'}${meta ? `\nㅤ ${meta}` : ''}${url ? `\n${url}` : ''}`;
+  }
+
+  async function showBoardMappingSetup({ requireConfirmation = false, message = '' } = {}) {
     const mappings = await getBoardColumnMappings();
-    const [exactKey, canonicalKey] = getBoardMappingKeys();
-    const existing = mappings[exactKey] || mappings[canonicalKey] || {};
+    const context = getBoardMappingContext();
+    const { exactKey, canonicalKey } = context;
+    const existing = getSmartBoardMappingSeed(mappings, context);
     const guessed = guessBoardMapping(existing);
 
-    $(`#att-hd-toolkit-board-mapping-overlay`)?.remove();
+    return new Promise(resolve => {
+      $(`#att-hd-toolkit-board-mapping-overlay`)?.remove();
     const overlay = document.createElement('div');
     overlay.id = 'att-hd-toolkit-board-mapping-overlay';
     Object.assign(overlay.style, {
@@ -1375,10 +1441,10 @@
     });
 
     const title = document.createElement('h2');
-    title.textContent = 'Service Board Column Mapping';
+    title.textContent = requireConfirmation ? 'Confirm Service Board Column Mapping' : 'Service Board Column Mapping';
     Object.assign(title.style, { margin: '0 0 4px', fontSize: '16px' });
     const help = document.createElement('p');
-    help.textContent = `Map columns for the current Service Board view: ${getBoardViewExact()}. These settings are local and copying is clipboard-only.`;
+    help.textContent = message || `Map columns for the current Service Board view: ${context.exactView}. These settings are local and copying is clipboard-only.`;
     Object.assign(help.style, { margin: '0 0 12px', color: '#4B5563' });
 
     const form = document.createElement('div');
@@ -1402,6 +1468,19 @@
       form.appendChild(label);
     });
 
+    const previewLabel = document.createElement('label');
+    previewLabel.textContent = 'Preview';
+    Object.assign(previewLabel.style, { display: 'grid', gap: '4px', fontWeight: 600, marginTop: '12px' });
+    const preview = document.createElement('textarea');
+    preview.readOnly = true;
+    Object.assign(preview.style, { minHeight: '86px', resize: 'vertical', padding: '8px', border: '1px solid #D1D5DB', borderRadius: '8px', font: '12px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace' });
+    previewLabel.appendChild(preview);
+
+    const refreshPreview = () => {
+      preview.value = buildBoardShoutoutPreview(readBoardMappingFromForm(card, fields));
+    };
+    fields.forEach(([key]) => $(`#att-hd-board-map-${key}`, card)?.addEventListener('change', refreshPreview));
+
     const actions = document.createElement('div');
     Object.assign(actions.style, { display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '14px' });
     const close = document.createElement('button');
@@ -1409,24 +1488,36 @@
     close.textContent = 'Close';
     const save = document.createElement('button');
     save.type = 'button';
-    save.textContent = 'Save Mapping';
-    [close, save].forEach(button => Object.assign(button.style, { borderRadius: '8px', border: '1px solid #D1D5DB', padding: '7px 12px', cursor: 'pointer' }));
+    save.textContent = requireConfirmation ? 'Save & Copy' : 'Save Mapping';
+    const confirm = document.createElement('button');
+    confirm.type = 'button';
+    confirm.textContent = 'Use Once';
+    [close, confirm, save].forEach(button => Object.assign(button.style, { borderRadius: '8px', border: '1px solid #D1D5DB', padding: '7px 12px', cursor: 'pointer' }));
     Object.assign(save.style, { background: '#111827', color: '#fff', borderColor: '#111827' });
-    close.addEventListener('click', () => overlay.remove());
+    close.addEventListener('click', () => { overlay.remove(); resolve(null); });
+    confirm.addEventListener('click', () => {
+      const mapping = readBoardMappingFromForm(card, fields);
+      overlay.remove();
+      resolve(isUsableBoardColumnMapping(mapping) ? mapping : null);
+    });
     save.addEventListener('click', async () => {
-      const mapping = {};
-      fields.forEach(([key]) => { mapping[key] = Number($(`#att-hd-board-map-${key}`, card)?.value); });
+      const mapping = readBoardMappingFromForm(card, fields);
       mappings[exactKey] = mapping;
       if (canonicalKey !== exactKey) mappings[canonicalKey] = mapping;
       await setBoardColumnMappings(mappings);
       overlay.remove();
       toast('Board column mapping saved');
       refreshToolkitContext('board-mapping-saved');
+      resolve(isUsableBoardColumnMapping(mapping) ? mapping : null);
     });
-    actions.append(close, save);
-    card.append(title, help, form, actions);
+    actions.append(close);
+    if (requireConfirmation) actions.append(confirm);
+    actions.append(save);
+    card.append(title, help, form, previewLabel, actions);
     overlay.appendChild(card);
     document.body.appendChild(overlay);
+      refreshPreview();
+    });
   }
 
   function boardPriorityDot(priority) {
@@ -1434,10 +1525,22 @@
     return ({ P0: '🔴', P1: '🟠', P2: '🟡', P3: '🟢', P4: '⚪' })[normalized] || '⚪';
   }
 
+  async function prepareBoardShoutoutMapping() {
+    const context = getBoardMappingContext();
+    const mappings = await getBoardColumnMappings();
+    const mapping = mappings[context.exactKey] || mappings[context.canonicalKey] || null;
+    if (isUsableBoardColumnMapping(mapping)) return mapping;
+
+    toast('Confirm column mapping before copying', 1800);
+    return showBoardMappingSetup({
+      requireConfirmation: true,
+      message: `No saved mapping was found for ${context.host} / ${context.exactView}. Review the smart-detected columns below, then use once or save before copying.`
+    });
+  }
+
   async function copyBoardShoutout(mapping) {
     if (!isUsableBoardColumnMapping(mapping)) {
-      await showBoardMappingSetup();
-      toast('No mapping for this View; opened setup');
+      toast('Board copy canceled; no confirmed mapping');
       return false;
     }
     const rows = getVisibleBoardRows();
@@ -1490,14 +1593,7 @@
       document.getElementById(BOARD_GROUP_ID)?.remove();
       return false;
     }
-
-    const mapping = await getCurrentBoardColumnMapping();
-    if (!isBoard()) {
-      document.getElementById(BOARD_GROUP_ID)?.remove();
-      return false;
-    }
-    const hasMapping = isUsableBoardColumnMapping(mapping);
-    const desiredMode = hasMapping ? 'copy' : 'setup';
+    const desiredMode = 'copy-with-mapping-gate';
     const existing = document.getElementById(BOARD_GROUP_ID);
     if (existing && existing.dataset.mode === desiredMode) {
       positionBoardGroup(existing);
@@ -1512,15 +1608,11 @@
     group.dataset.mode = desiredMode;
     Object.assign(group.style, { display: 'inline-flex', gap: '6px', alignItems: 'center' });
 
-    if (hasMapping) {
-      group.appendChild(makeActionButton('att-hd-toolkit-board-copy-btn', 'Teams Shoutout', 'Copy a Service Board shoutout to the clipboard. Shift+Click opens mapping setup.', async (event) => {
-        if (event?.shiftKey) return showBoardMappingSetup();
-        const currentMapping = await getCurrentBoardColumnMapping();
-        return copyBoardShoutout(currentMapping);
-      }));
-    } else {
-      group.appendChild(makeActionButton('att-hd-toolkit-board-setup-btn', 'Setup Mapping', 'Map Service Board columns before copying.', () => showBoardMappingSetup()));
-    }
+    group.appendChild(makeActionButton('att-hd-toolkit-board-copy-btn', 'Teams Shoutout', 'Copy a Service Board shoutout to the clipboard. Shift+Click opens mapping setup.', async (event) => {
+      if (event?.shiftKey) return showBoardMappingSetup();
+      const currentMapping = await prepareBoardShoutoutMapping();
+      return currentMapping ? copyBoardShoutout(currentMapping) : false;
+    }));
 
     canvas.appendChild(group);
     positionBoardGroup(group);
