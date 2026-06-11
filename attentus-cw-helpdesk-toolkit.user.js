@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         attentus-cw-helpdesk-toolkit
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.1.3
+// @version      1.1.4
 // @description  Helpdesk toolkit for ConnectWise ticket triage. Confirms before DOM-only field changes and keeps clipboard draft fallback mode.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
@@ -765,8 +765,15 @@
       selectors: [
         'input.cw_contact',
         'input[aria-label="Contact"]',
-        'input[id*="Contact"][role="combobox"]',
-        'input[name="ContactRecID"]'
+        'input[id*="Contact"][role="combobox"]'
+      ]
+    },
+    {
+      label: 'Contact RecID',
+      selectors: [
+        'input[name="ContactRecID"]',
+        'input[id="ContactRecID"]',
+        'input[id$="ContactRecID"]'
       ]
     },
     {
@@ -778,13 +785,24 @@
       ]
     },
     {
-      label: 'Phone / Extension',
+      label: 'Phone',
       selectors: [
         'input[aria-label="Phone"]',
         'input[name="PhoneNumber"]',
+        'input[name*="Phone" i]'
+      ]
+    },
+    {
+      label: 'Extension',
+      selectors: [
         'input[aria-label*="Ext"]',
-        'input[name*="Ext"]'
-      ],
+        'input[name*="Ext" i]',
+        'input[id*="Ext" i]'
+      ]
+    },
+    {
+      label: 'Contact phone communications input',
+      selectors: [],
       roots: ['.cw_contactPhoneCommunications'],
       rootInputSelector: 'input'
     }
@@ -890,7 +908,7 @@
 
   function showPostClearContactDialog(plan, snapshot) {
     showActionDialog('Contact fields cleared', {
-      message: 'Contact, email, phone, and extension fields were cleared in the visible ConnectWise UI only. The changes are not saved unless you choose Save or Save & Close.',
+      message: 'Contact, Contact RecID, email, phone, extension, and contact-phone communication fields were cleared in the visible ConnectWise UI only. Nothing has been saved and no ConnectWise or ITGlue APIs were called.',
       fields: plan,
       actions: [
         {
@@ -901,21 +919,7 @@
             toast(ok ? 'Contact values reverted' : 'Contact revert stopped');
           }
         },
-        { label: 'Leave Unsaved', onClick: () => toast('Cleared values left unsaved') },
-        {
-          label: 'Save',
-          onClick: async () => {
-            await sleep(120);
-            if (!clickSave()) toast('Save button not found');
-          }
-        },
-        {
-          label: 'Save & Close',
-          onClick: async () => {
-            await sleep(120);
-            if (!clickSaveAndClose()) toast('Save & Close button not found');
-          }
-        }
+        { label: 'Leave Unsaved', onClick: () => toast('Cleared values left unsaved') }
       ]
     });
   }
@@ -934,18 +938,19 @@
 
     const plan = buildContactClearPlan(entries);
     showActionDialog('Confirm Clear Contact', {
-      message: 'This clears only visible ConnectWise contact, email, phone, and extension fields through DOM events. No ConnectWise or ITGlue APIs are called, and nothing is saved until you use ConnectWise Save controls.',
+      message: 'Review the target field values below. No fields will be cleared until you click Clear Fields. This uses only visible UI/DOM events; no ConnectWise or ITGlue APIs are called, and nothing is saved automatically.',
       fields: plan,
       actions: [
         { label: 'Cancel', onClick: () => toast('Clear Contact cancelled') },
         {
-          label: 'Clear Contact',
+          label: 'Clear Fields',
           primary: true,
           onClick: () => {
             const snapshot = snapshotContactInfo(entries);
+            const clearPlan = buildContactClearPlan(snapshot.entries || entries);
             clearContactInfo(snapshot);
             toast('Contact fields cleared');
-            showPostClearContactDialog(plan, snapshot);
+            showPostClearContactDialog(clearPlan, snapshot);
           }
         }
       ]
