@@ -106,9 +106,9 @@
     normalized.clipboard.reviewChecklist = String(normalized.clipboard.reviewChecklist || '');
     normalized.boardShoutouts.mappingsText = String(normalized.boardShoutouts.mappingsText || '');
     normalized.safety.requireClearContactConfirmation = normalized.safety.requireClearContactConfirmation !== false;
-    normalized.safety.requireTriageApplyConfirmation = normalized.safety.requireTriageApplyConfirmation !== false;
-    normalized.safety.showPostApplySave = normalized.safety.showPostApplySave !== false;
-    normalized.safety.showPostApplySaveAndClose = normalized.safety.showPostApplySaveAndClose !== false;
+    normalized.safety.requireTriageApplyConfirmation = true;
+    normalized.safety.showPostApplySave = true;
+    normalized.safety.showPostApplySaveAndClose = true;
     return normalized;
   }
 
@@ -1143,9 +1143,7 @@
       toast('Apply triage is available only on canonical Service Ticket pages');
       return false;
     }
-    return getToolkitSettings().safety.requireTriageApplyConfirmation
-      ? confirmAndApplyTriage(kind)
-      : applyTriageWithoutConfirmation(kind);
+    return confirmAndApplyTriage(kind);
   }
 
   function resolveMutationValue(workflow, mutation) {
@@ -1173,8 +1171,17 @@
     });
   }
 
+  function displayFieldValue(value) {
+    const text = String(value || '').trim();
+    return text || '(blank)';
+  }
+
+  function fieldValueChanged(before, after) {
+    return displayFieldValue(before) !== displayFieldValue(after);
+  }
+
   function describePlan(plan) {
-    return plan.map(item => `${item.label}: ${item.currentValue || '(blank)'} → ${item.value}`).join('\n');
+    return plan.map(item => `${item.label}: ${displayFieldValue(item.currentValue)} → ${displayFieldValue(item.value)}`).join('\n');
   }
 
   function parseBoardShoutoutMappings(mappingsText) {
@@ -1728,7 +1735,11 @@
         return { ok: false, snapshot, plan };
       }
     }
-    return { ok: true, snapshot, plan };
+    return {
+      ok: true,
+      snapshot,
+      plan: plan.filter(item => fieldValueChanged(item.currentValue, item.value))
+    };
   }
 
   function clickLikeUser(el) {
@@ -1794,8 +1805,12 @@
     return true;
   }
 
+  function eventHasModifier(event) {
+    return !!(event?.shiftKey || event?.ctrlKey || event?.metaKey || event?.altKey);
+  }
+
   function showPostApplyDialog(workflow, plan, snapshot) {
-    const safety = getToolkitSettings().safety;
+    const changedFields = plan.length ? plan : [{ label: 'No field values changed', currentValue: '', value: '', found: true, unchanged: true }];
     const actions = [
       {
         label: 'Revert',
@@ -1807,30 +1822,30 @@
       { label: 'Leave Unsaved', onClick: () => toast('Changes left unsaved') }
     ];
 
-    if (safety.showPostApplySave) {
-      actions.push({
-        label: 'Save',
-        primary: true,
-        onClick: async () => {
-          await sleep(120);
-          if (!clickSave()) toast('Save button not found');
-        }
-      });
-    }
+    actions.push({
+      label: 'Save',
+      primary: true,
+      onClick: async () => {
+        await sleep(120);
+        if (!clickSave()) toast('Save button not found');
+      }
+    });
 
-    if (safety.showPostApplySaveAndClose) {
-      actions.push({
-        label: 'Save & Close',
-        onClick: async () => {
-          await sleep(120);
-          if (!clickSaveAndClose()) toast('Save & Close button not found');
+    actions.push({
+      label: 'Save & Close',
+      onClick: async (event) => {
+        if (eventHasModifier(event)) {
+          toast('Use a plain Save & Close button click; modifier-key Save & Close is not supported');
+          return;
         }
-      });
-    }
+        await sleep(120);
+        if (!clickSaveAndClose()) toast('Save & Close button not found');
+      }
+    });
 
     showActionDialog(workflow.postApplyMessage || `${workflow.buttonLabel} fields applied`, {
-      message: 'The requested fields have been changed in the browser UI only. They are not saved in ConnectWise until you choose Save or Save & Close here; otherwise you can leave them unsaved or revert them.',
-      fields: plan,
+      message: 'The changed fields below are currently unsaved in the browser UI. Choose Revert to restore the captured pre-triage values, Leave Unsaved to keep editing without saving, or explicitly choose Save or Save & Close.',
+      fields: changedFields,
       actions
     });
   }
@@ -1871,9 +1886,11 @@
     Object.assign(list.style, { margin: '0 0 14px 20px', padding: 0, lineHeight: 1.5 });
     for (const field of fields) {
       const item = document.createElement('li');
-      item.textContent = field.found
-        ? `${field.label}: ${field.currentValue || '(blank)'} → ${field.value}`
-        : `${field.label}: field not found; intended value → ${field.value}`;
+      item.textContent = field.unchanged
+        ? field.label
+        : field.found
+          ? `${field.label}: ${displayFieldValue(field.currentValue)} → ${displayFieldValue(field.value)}`
+          : `${field.label}: field not found; intended value → ${displayFieldValue(field.value)}`;
       list.appendChild(item);
     }
 
@@ -1893,10 +1910,10 @@
         color: primary ? '#fff' : '#111827',
         borderColor: primary ? '#111827' : '#D1D5DB'
       });
-      button.addEventListener('click', async () => {
+      button.addEventListener('click', async (event) => {
         button.disabled = true;
         try {
-          await action?.();
+          await action?.(event);
         } finally {
           overlay.remove();
         }
@@ -1924,11 +1941,9 @@
 
     const plan = buildFieldPlan(workflow);
     showActionDialog(workflow.confirmationTitle, {
-      message: `${workflow.fieldSummary} No ConnectWise fields will change until you choose Apply Fields. This uses only visible UI/DOM automation; Copy Draft only copies this field plan to the clipboard.`,
+      message: `${workflow.fieldSummary} Review the exact field changes below. No ConnectWise fields will change until you choose Apply Fields. This uses only visible UI/DOM automation; Copy Draft Only copies this field plan to the clipboard.`,
       fields: plan,
       actions: [
-        { label: 'Cancel', onClick: () => toast('Triage cancelled') },
-        { label: workflow.draftLabel || 'Copy Draft', onClick: () => copyTriage(kind) },
         {
           label: 'Apply Fields',
           primary: true,
@@ -1942,34 +1957,12 @@
               toast(`${workflow.buttonLabel} apply stopped`);
             }
           }
-        }
+        },
+        { label: 'Copy Draft Only', onClick: () => copyTriage(kind) },
+        { label: 'Cancel', onClick: () => toast('Triage cancelled') }
       ]
     });
     return true;
-  }
-
-
-  async function applyTriageWithoutConfirmation(kind) {
-    if (isProjectTicket()) {
-      toast('Field-mutating triage is not available on Project Tickets');
-      return false;
-    }
-
-    const workflow = getTriageWorkflow(kind);
-    if (!workflow) {
-      toast(`Unknown triage kind: ${kind}`);
-      return false;
-    }
-
-    const ticketInfo = {};
-    const result = await applyFieldChanges(workflow, ticketInfo);
-    if (result.ok) {
-      toast(workflow.postApplyMessage || `${workflow.buttonLabel} fields applied`);
-      showPostApplyDialog(workflow, result.plan, result.snapshot);
-      return true;
-    }
-    toast(`${workflow.buttonLabel} apply stopped`);
-    return false;
   }
 
 
@@ -2277,13 +2270,10 @@
 
     const safetySection = makeSection(
       'Safety settings',
-      'Controls for confirmation prompts and post-apply save options. API endpoints remain read-only; no ConnectWise or ITGlue data is modified through APIs.'
+      'Triage always uses a two-stage confirmation flow: Apply Fields / Copy Draft Only / Cancel before mutation, then Revert / Leave Unsaved / Save / Save & Close after mutation. API endpoints remain read-only; no ConnectWise or ITGlue data is modified through APIs.'
     );
     safetySection.append(
-      makeCheckbox('att-cw-settings-confirm-clear-contact', 'Require confirmation before Clear Contact', settings.safety.requireClearContactConfirmation, 'Stored for Clear Contact actions; no Clear Contact button is added by this settings dialog.'),
-      makeCheckbox('att-cw-settings-confirm-triage-apply', 'Require confirmation before triage field apply', settings.safety.requireTriageApplyConfirmation, 'When disabled, Apply Fields After Confirmation mode applies visible UI fields immediately.'),
-      makeCheckbox('att-cw-settings-show-save', 'Enable Save button in post-apply modal', settings.safety.showPostApplySave),
-      makeCheckbox('att-cw-settings-show-save-close', 'Enable Save & Close button in post-apply modal', settings.safety.showPostApplySaveAndClose)
+      makeCheckbox('att-cw-settings-confirm-clear-contact', 'Require confirmation before Clear Contact', settings.safety.requireClearContactConfirmation, 'Stored for Clear Contact actions; no Clear Contact button is added by this settings dialog.')
     );
 
     form.append(clipboardSection, triageSection, boardSection, safetySection);
@@ -2304,10 +2294,10 @@
         color: primary ? '#fff' : '#111827',
         borderColor: primary ? '#111827' : '#D1D5DB'
       });
-      button.addEventListener('click', async () => {
+      button.addEventListener('click', async (event) => {
         button.disabled = true;
         try {
-          await action?.();
+          await action?.(event);
         } finally {
           overlay.remove();
         }
@@ -2333,9 +2323,9 @@
           },
           safety: {
             requireClearContactConfirmation: $('#att-cw-settings-confirm-clear-contact', form)?.checked,
-            requireTriageApplyConfirmation: $('#att-cw-settings-confirm-triage-apply', form)?.checked,
-            showPostApplySave: $('#att-cw-settings-show-save', form)?.checked,
-            showPostApplySaveAndClose: $('#att-cw-settings-show-save-close', form)?.checked
+            requireTriageApplyConfirmation: true,
+            showPostApplySave: true,
+            showPostApplySaveAndClose: true
           }
         });
         toast(`Toolkit settings saved; triage mode is ${saved.triage.defaultMode}`);
@@ -2871,8 +2861,6 @@
     openPopupAndGetContainer,
     findInputByLabel,
     showActionDialog,
-    clickSave,
-    clickSaveAndClose,
     signatureHTML,
     signatureText,
     showTimeEntryClipboardSettings,
