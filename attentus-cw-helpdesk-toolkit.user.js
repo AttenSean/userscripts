@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         attentus-cw-helpdesk-toolkit
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.1.1
+// @version      1.1.2
 // @description  Helpdesk toolkit for ConnectWise ticket triage. Confirms before DOM-only field changes and keeps clipboard draft fallback mode.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
@@ -347,9 +347,14 @@
     return null;
   }
 
+  function isTimeEntryDiscussionPodElement(el) {
+    return !!el?.closest?.('.pod_service_ticket_discussion, .pod_hosted_15');
+  }
+
   function findNotesTimestampButton() {
     const stamps = document.querySelectorAll('.cw_ToolbarButton_TimeStamp');
     for (const stamp of stamps) {
+      if (isTimeEntryDiscussionPodElement(stamp)) continue;
       const row = stamp.closest('tr');
       const label = row && row.querySelector('.gwt-Label, .mm_label, .cw_CwLabel');
       if (label && /notes$/i.test((label.textContent || '').trim())) return stamp;
@@ -512,8 +517,7 @@
   }
 
   async function mountTimeEntryClipGroupUnderThread(targetEl) {
-    const pod = targetEl.closest?.('.pod_service_ticket_discussion, .pod_hosted_15');
-    if (pod) return false;
+    if (isTimeEntryDiscussionPodElement(targetEl)) return false;
 
     const existing = document.getElementById(TIME_ENTRY_CLIP_GROUP_ID) || document.getElementById(LEGACY_TIME_GROUP_ID);
     if (existing && (existing.previousElementSibling === targetEl || existing.nextElementSibling === targetEl)) return true;
@@ -624,19 +628,16 @@
     ensureTimeEntryClipStyles();
     if (isTimeEntryTimesheetContext()) {
       removeTimeEntryClipGroupIfAny();
-      return;
+      return false;
     }
     const stamp = findNotesTimestampButton();
-    if (stamp) {
-      mountTimeEntryClipGroup(stamp);
-      return;
-    }
+    if (stamp) return mountTimeEntryClipGroup(stamp);
     if (isTimeEntryTicketContext()) {
       const target = threadTimeEntryMountTarget();
-      if (target) await mountTimeEntryClipGroupUnderThread(target);
-      return;
+      if (target && await mountTimeEntryClipGroupUnderThread(target)) return true;
     }
     removeTimeEntryClipGroupIfAny();
+    return false;
   }
 
   async function until(fn, { tries = 60, delay = 60 } = {}) {
@@ -2496,12 +2497,14 @@
   function ensureGroupsForContext(context) {
     if (context.kind === 'ticket') {
       ensureBarPlaced();
+      ensureTimeEntryClipboard();
       return;
     }
     if (context.kind === 'time') {
       ensureTimeEntryClipboard();
       return;
     }
+    removeTimeEntryClipGroupIfAny();
     if (context.kind === 'board') {
       // Reserved for board-scoped controls. Keep ticket/time groups unmounted here.
       return;
