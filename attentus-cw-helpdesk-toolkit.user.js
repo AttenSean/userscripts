@@ -626,20 +626,25 @@
     }
   }
 
-  async function ensureTimeEntryClipboard() {
+  async function ensureTimeEntryTools() {
     ensureTimeEntryClipStyles();
     if (isTimeEntryTimesheetContext()) {
       removeTimeEntryClipGroupIfAny();
       return false;
     }
+
     const stamp = findNotesTimestampButton();
     if (stamp) return mountTimeEntryClipGroup(stamp);
-    if (isTimeEntryTicketContext()) {
-      const target = threadTimeEntryMountTarget();
-      if (target && await mountTimeEntryClipGroupUnderThread(target)) return true;
-    }
+
+    const target = isTimeEntryTicketContext() ? threadTimeEntryMountTarget() : null;
+    if (target) return mountTimeEntryClipGroupUnderThread(target);
+
     removeTimeEntryClipGroupIfAny();
     return false;
+  }
+
+  async function ensureTimeEntryClipboard() {
+    return ensureTimeEntryTools();
   }
 
   async function until(fn, { tries = 60, delay = 60 } = {}) {
@@ -1600,21 +1605,15 @@
     Object.assign(group.style, { position: 'absolute', top: '3px', left: `${left}px`, zIndex: '2' });
   }
 
-  async function mountBoardTools() {
-    if (!isBoard()) {
-      document.getElementById(BOARD_GROUP_ID)?.remove();
+  async function mountBoardTools(canvas = findBoardToolbarCanvas()) {
+    const existing = document.getElementById(BOARD_GROUP_ID);
+    if (!isBoard() || !canvas) {
+      existing?.remove();
       return false;
     }
-    const desiredMode = 'copy-with-mapping-gate';
-    const existing = document.getElementById(BOARD_GROUP_ID);
-    if (existing && existing.dataset.mode === desiredMode) {
-      positionBoardGroup(existing);
-      return true;
-    }
-    existing?.remove();
 
-    const canvas = findBoardToolbarCanvas();
-    if (!canvas) return false;
+    existing?.remove();
+    const desiredMode = 'copy-with-mapping-gate';
     const group = document.createElement('div');
     group.id = BOARD_GROUP_ID;
     group.dataset.mode = desiredMode;
@@ -1629,6 +1628,25 @@
     canvas.appendChild(group);
     positionBoardGroup(group);
     return true;
+  }
+
+  async function ensureBoardTools() {
+    const existing = document.getElementById(BOARD_GROUP_ID);
+    const desiredMode = 'copy-with-mapping-gate';
+    const canvas = isBoard() ? findBoardToolbarCanvas() : null;
+
+    if (!canvas) {
+      existing?.remove();
+      return false;
+    }
+
+    if (existing && existing.dataset.mode === desiredMode && existing.parentElement === canvas) {
+      positionBoardGroup(existing);
+      return true;
+    }
+
+    existing?.remove();
+    return mountBoardTools(canvas);
   }
 
   const fieldSnapshotsByTicket = new Map();
@@ -2386,37 +2404,48 @@
     return bar;
   }
 
-  function ensureBarPlaced() {
+  function removeTicketTools() {
+    for (const id of [TICKET_GROUP_ID, LEGACY_TICKET_GROUP_ID]) {
+      const el = document.getElementById(id);
+      if (el) {
+        removeFieldMutatingControls(el);
+        el.remove();
+      }
+    }
+  }
+
+  function ensureTicketTools() {
     const existingBar = $(`#${BAR_ID}`);
 
-    if (isProjectTicket()) {
-      if (existingBar) {
-        removeFieldMutatingControls(existingBar);
-        existingBar.remove();
-      }
+    if (isProjectTicket() || !isTicketContextLoose()) {
+      removeTicketTools();
       return false;
     }
 
-    if (!isTicketContextLoose()) {
-      existingBar?.remove();
+    const pod = findTicketPodRoot();
+    const header = pod && findHeaderBlock(pod);
+    if (!header) {
+      removeTicketTools();
       return false;
     }
 
     const showFieldMutatingControls = canShowFieldMutatingControls();
     const existingSlot = $(`#${SLOT_ID}`);
-    if (existingSlot) {
-      if (existingSlot.dataset.fieldMutatingControls === (showFieldMutatingControls ? 'true' : 'false')) {
-        if (!showFieldMutatingControls) removeFieldMutatingControls(existingSlot);
-        return true;
-      }
-      existingBar?.remove();
+    const isCorrectLocation = existingBar?.parentElement === header.parentElement && existingBar.previousElementSibling === header;
+    const isCorrectMode = existingSlot?.dataset.fieldMutatingControls === (showFieldMutatingControls ? 'true' : 'false');
+
+    if (existingBar && isCorrectLocation && isCorrectMode) {
+      if (!showFieldMutatingControls) removeFieldMutatingControls(existingBar);
+      return true;
     }
 
-    const pod = findTicketPodRoot();
-    const header = pod && findHeaderBlock(pod);
-    if (!header) return false;
+    removeTicketTools();
     header.insertAdjacentElement('afterend', mountTicketTools());
     return true;
+  }
+
+  function ensureBarPlaced() {
+    return ensureTicketTools();
   }
 
 
@@ -2865,8 +2894,11 @@
     signatureText,
     showTimeEntryClipboardSettings,
     ensureTimeEntryClipboard,
+    ensureTimeEntryTools,
+    ensureTicketTools,
     isBoard,
     mountBoardTools,
+    ensureBoardTools,
     showBoardMappingSetup
   };
 
@@ -2903,29 +2935,15 @@
   }
 
   function removeToolkitContextGroups() {
-    for (const id of [TICKET_GROUP_ID, LEGACY_TICKET_GROUP_ID, BOARD_GROUP_ID]) {
-      const el = document.getElementById(id);
-      if (el?.parentNode) el.parentNode.removeChild(el);
-    }
+    removeTicketTools();
+    document.getElementById(BOARD_GROUP_ID)?.remove();
     removeTimeEntryClipGroupIfAny();
   }
 
-  function ensureGroupsForContext(context) {
-    if (context.kind === 'ticket') {
-      ensureBarPlaced();
-      ensureTimeEntryClipboard();
-      return;
-    }
-    if (context.kind === 'time') {
-      ensureTimeEntryClipboard();
-      return;
-    }
-    removeTimeEntryClipGroupIfAny();
-    if (context.kind === 'board') {
-      mountBoardTools();
-      return;
-    }
-    document.getElementById(BOARD_GROUP_ID)?.remove();
+  function ensureGroupsForContext() {
+    ensureTicketTools();
+    ensureTimeEntryTools();
+    ensureBoardTools();
   }
 
   let lastToolkitContextSignature = '';
@@ -2942,7 +2960,7 @@
     } else {
       titleController.handleDomMutation(mutations);
     }
-    ensureGroupsForContext(context);
+    ensureGroupsForContext();
   }
 
   function scheduleToolkitContextRefresh(reason = 'scheduled', mutations = []) {
