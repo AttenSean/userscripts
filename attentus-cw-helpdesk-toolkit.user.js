@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         attentus-cw-helpdesk-toolkit
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.1.6
+// @version      1.1.7
 // @description  Helpdesk toolkit for ConnectWise ticket triage, ticket copy, board shoutouts, time-entry clipboard helpers, and tab title cleanup. Confirms before DOM-only field changes and keeps clipboard draft fallback mode; no ConnectWise/ITGlue API writes.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
@@ -307,8 +307,8 @@
 
   function isTimeSheetContext() {
     if (/timesheet/i.test(location.href)) return true;
-    if ($('.mytimesheetlist,.TimeSheet')) return true;
-    return $$('.cw-main-banner .navigationEntry,.cw-main-banner .cw_CwLabel').some(el => /open time sheets|time sheet/i.test(txt(el)));
+    if ($('.mytimesheetlist,.TimeSheet,#mytimesheetdaygrid-listview-scroller')) return true;
+    return $$('.cw-main-banner .navigationEntry,.cw-main-banner .cw_CwLabel,.cw-main-banner .gwt-Label,.navigationEntry').some(el => /open time sheets|time sheet|daily\s+time\s+entries/i.test(txt(el)));
   }
 
   function isTimeEntryContext() {
@@ -366,15 +366,38 @@
     return { id, url, company, contact, summary, email, phone };
   }
 
-  async function copyTicketLink(compact = false) {
+  function ticketLinkLabel(info) {
+    const id = info.id || '????';
+    const summary = norm(info.summary || '').replace(/^[-–—\s]+/, '');
+    if (summary) return `#${id} - ${summary}`;
+    const title = (document.title || '').replace(/\s*[|\-]\s*ConnectWise.*$/i, '').trim();
+    if (/^#\d+/.test(title)) return title;
+    return info.id ? `#${id}` : 'ConnectWise ticket';
+  }
+
+  async function copyTicketLink(mode = 'formatted') {
     const info = currentTicketInfo();
-    const label = info.id ? `Ticket #${info.id}` : 'ConnectWise ticket';
+    const compact = mode === true || mode === 'url';
+    const withContact = mode === 'details';
+    const label = ticketLinkLabel(info);
     const detail = [info.company, info.contact].filter(Boolean).join(', ');
-    const html = compact
-      ? `<a href="${esc(info.url)}">${esc(info.url)}</a>`
-      : `<a href="${esc(info.url)}"><strong>${esc(label)}</strong></a>${detail ? ` - ${esc(detail)}` : ''}${info.summary ? `<br>${esc(info.summary)}` : ''}`;
-    const text = compact ? info.url : [label, detail, info.summary, info.url].filter(Boolean).join('\n');
-    toast(await writeClipboard(html, text) ? 'Copied ticket link' : 'Copy failed');
+    let html;
+    let text;
+    let successMsg = 'Copied ticket link';
+
+    if (compact) {
+      html = `<a href="${esc(info.url)}">${esc(info.url)}</a>`;
+      text = info.url;
+      successMsg = 'Copied ticket URL';
+    } else if (withContact) {
+      html = `<a href="${esc(info.url)}">${esc(label)}</a>${detail ? `<br>${esc(detail)}` : ''}`;
+      text = [label, detail].filter(Boolean).join('\n');
+    } else {
+      html = `<a href="${esc(info.url)}">${esc(label)}</a>`;
+      text = label;
+    }
+
+    toast(await writeClipboard(html, text) ? successMsg : 'Copy failed');
   }
 
   async function copyContact() {
@@ -650,6 +673,7 @@
   }
 
   function ensureTicketTools() {
+    if (isTimeSheetContext() || isTimeEntryContext()) { removeEl(`${APP}-ticket-group`); return; }
     const loose = isTicketContextLoose();
     const canonical = isCanonicalServiceTicketPage() && !isProjectTicket();
     if (!loose) { removeEl(`${APP}-ticket-group`); return; }
@@ -660,9 +684,26 @@
     if (!mount) return;
     const g = makeGroup(`${APP}-ticket-group`, 'Helpdesk:');
     g.dataset.canonical = String(canonical);
+    const copyBtn = button(
+      `${APP}-copy-ticket`,
+      'Copy Ticket',
+      'Click: formatted link. Shift+Click: URL-only. Right-click or Space: formatted link + Company/Contact.',
+      e => copyTicketLink(e?.shiftKey ? 'url' : 'formatted')
+    );
+    copyBtn.addEventListener('contextmenu', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      copyTicketLink('details');
+    });
+    copyBtn.addEventListener('keydown', e => {
+      if (e.key !== ' ') return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      copyTicketLink('details');
+    }, true);
     g.append(
-      button(`${APP}-copy-ticket`, 'Copy Ticket', 'Copy a formatted ticket link', () => copyTicketLink(false)),
-      button(`${APP}-copy-url`, 'URL', 'Copy only the ticket URL', () => copyTicketLink(true), 'secondary'),
+      copyBtn,
+      button(`${APP}-copy-url`, 'URL', 'Copy only the ticket URL', () => copyTicketLink('url'), 'secondary'),
       button(`${APP}-copy-contact`, 'Copy Contact', 'Copy detected contact details', copyContact, 'secondary')
     );
     if (canonical) {
