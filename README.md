@@ -150,6 +150,8 @@ Provenance: Human-authored with AI assistance; human-reviewed.
 
 The Helpdesk Toolkit may automate visible ConnectWise ticket UI fields after explicit confirmation. That UI field automation is allowed. Direct write calls to ConnectWise or ITGlue APIs are not allowed: do not add API behavior that creates, updates, patches, deletes, or otherwise modifies records. Do not add API POST, PUT, PATCH, or DELETE routes. Save and Save & Close must require an explicit second user action after any confirmed field application.
 
+Use the [Helpdesk Toolkit manual pilot checklist](docs/helpdesk-toolkit-manual-pilot-checklist.md) for browser validation against Service Tickets, Project Tickets, Time Entry, Time Sheets, Service Board mapping, and SPA navigation. It includes a failed-selector log for patching `fieldElement(key)`, board mapping, and mount gates.
+
 Run this static scan separately from `node --check` when reviewing `attentus-cw-helpdesk-toolkit.user.js` for direct network/API write behavior:
 
 ```sh
