@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         attentus-cw-helpdesk-toolkit
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      1.1.5
+// @version      1.1.6
 // @description  Helpdesk toolkit for ConnectWise ticket triage, ticket copy, board shoutouts, time-entry clipboard helpers, and tab title cleanup. Confirms before DOM-only field changes and keeps clipboard draft fallback mode; no ConnectWise/ITGlue API writes.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
@@ -56,6 +56,8 @@
     bellevue: 'https://www.attentus.tech/bellevue_reviews',
     renton: 'https://www.attentus.tech/renton_reviews'
   };
+
+  const MAINT_DATA_PREFIX = 'data:image/gif;base64,R0lGODlhEAAQAJECAAAAAAD49P///wAAACH5BAEAAAIALAAAAAAQABAAAAImlI+pm+APoQGh2lvBxDxoQXXXF4rZZp5gqpYmyXpoSka2w+T6vhcAOw==';
 
   const PRIORITY_LABELS = {
     P0: 'P0 - Critical',
@@ -133,6 +135,7 @@
   const txt = el => (el && el.textContent || '').replace(/\s+/g, ' ').trim();
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
   const norm = s => String(s || '').replace(/[\u200B-\u200D\u2060\uFEFF]/g, '').replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim();
+  const stripSLA = s => String(s || '').replace(/\b(?:Respond by|Plan by|Waiting|Scheduled|SLA)[^|-\u2014]*$/i, '').replace(/[|\u2014-]\s*$/, '').trim();
   const visible = el => !!(el && el.getClientRects && el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden');
 
   function ensureStyles() {
@@ -836,7 +839,10 @@
     const cells = $$('td[cellindex]', row);
     const set = (key, pred) => { if (map[key] != null) return; const c = cells.find(pred); if (c) map[key] = Number(c.getAttribute('cellindex')); };
     set('ticket', c => /^\d{5,}$/.test(txt(c)) || !!c.querySelector('a[href*="service_recid"]'));
-    set('priority', c => /\bP[0-4]\b|maintenance/i.test(txt(c)) || !!c.querySelector('img'));
+    set('priority', c => {
+      const node = c.querySelector('img') || c.firstElementChild || c;
+      return priorityFromText(txt(c)) !== 'Unknown' || !!c.querySelector('img') || !!extractDataUrlFromNode(node) || !!priorityFromRgb(parseRgb(getComputedStyle(node).color));
+    });
     set('status', c => STATUS_ORDER.some(st => norm(txt(c)).toLowerCase() === st.toLowerCase()));
     return map;
   }
@@ -891,7 +897,89 @@
     return 'Unknown';
   }
 
-  function ticketFromRow(row, map) {
+  function parseRgb(s) {
+    const match = /rgba?\s*\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)/.exec(s || '');
+    return match ? { r: Number(match[1]), g: Number(match[2]), b: Number(match[3]) } : null;
+  }
+
+  function isBlack(r, g, b) { return r < 40 && g < 40 && b < 40; }
+  function isRed(r, g, b) { return r > 150 && g < 110 && b < 110; }
+  function isOrange(r, g, b) { return r > 200 && g > 110 && g < 200 && b < 90; }
+  function isYellow(r, g, b) { return r > 200 && g > 200 && b < 140; }
+  function isBlue(r, g, b) { return b > 140 && r < 120 && g < 190; }
+
+  function priorityFromRgb(rgb) {
+    if (!rgb) return '';
+    const { r, g, b } = rgb;
+    if (isBlack(r, g, b)) return 'P0';
+    if (isRed(r, g, b)) return 'P1';
+    if (isOrange(r, g, b)) return 'P2';
+    if (isYellow(r, g, b)) return 'P3';
+    if (isBlue(r, g, b)) return 'P4';
+    return '';
+  }
+
+  function extractDataUrlFromNode(node) {
+    if (!node) return '';
+    if (node.tagName === 'IMG' && /^data:image/i.test(node.getAttribute('src') || '')) return node.getAttribute('src');
+    const pick = s => String(s || '').replace(/^.*url\(["']?/, '').replace(/["']?\).*$/, '');
+    const inline = (node.style && (node.style.background || node.style.backgroundImage)) || '';
+    let url = /url\(/.test(inline) ? pick(inline) : '';
+    if (!url) {
+      const bg = getComputedStyle(node).backgroundImage || '';
+      if (/url\(/.test(bg)) url = pick(bg);
+    }
+    return /^data:image/i.test(url) ? url : '';
+  }
+
+  function sampleDataUrl(url) {
+    return new Promise(resolve => {
+      if (!url) { resolve(null); return; }
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = img.naturalWidth || 16;
+          canvas.height = img.naturalHeight || 16;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0);
+          const data = ctx.getImageData(Math.floor(canvas.width / 2), Math.floor(canvas.height / 2), 1, 1).data;
+          resolve({ r: data[0], g: data[1], b: data[2] });
+        } catch (e) {
+          resolve(null);
+        }
+      };
+      img.onerror = () => resolve(null);
+      img.src = url;
+    });
+  }
+
+  async function readPriorityFromCell(td) {
+    if (!td) return 'Unknown';
+    const node = td.querySelector('img') || td.firstElementChild || td;
+    const hint = [td.title, node?.title, node?.alt, node?.getAttribute?.('aria-label'), txt(td)].filter(Boolean).join(' ');
+    const hinted = priorityFromText(hint);
+    if (hinted !== 'Unknown') return hinted;
+
+    const url = extractDataUrlFromNode(node);
+    if (url && url.indexOf(MAINT_DATA_PREFIX) === 0) return 'PM';
+    if (url) {
+      const sampled = priorityFromRgb(await sampleDataUrl(url));
+      if (sampled) return sampled;
+    }
+
+    const nodeColor = priorityFromRgb(parseRgb(getComputedStyle(node).color));
+    if (nodeColor) return nodeColor;
+    const tdColor = node !== td ? priorityFromRgb(parseRgb(getComputedStyle(td).color)) : '';
+    if (tdColor) return tdColor;
+    return 'Unknown';
+  }
+
+  function cellByIndex(row, index) {
+    return index == null || index < 0 ? null : row.querySelector(`td[cellindex="${index}"]`);
+  }
+
+  async function ticketFromRow(row, map) {
     const direct = cellText(row, map.ticket).match(/\d{5,}/);
     const link = row.querySelector('a[href*="service_recid="]');
     const hrefId = link && link.href.match(/[?&]service_recid=(\d+)/i);
@@ -899,12 +987,12 @@
     return {
       id,
       url: id ? `${location.origin}/v4_6_release/services/system_io/Service/fv_sr100_request.rails?service_recid=${encodeURIComponent(id)}` : '',
-      summary: cellText(row, map.summary),
-      company: cellText(row, map.company),
-      contact: cellText(row, map.contact),
+      summary: stripSLA(cellText(row, map.summary)),
+      company: stripSLA(cellText(row, map.company)),
+      contact: stripSLA(cellText(row, map.contact)),
       status: cellText(row, map.status),
       resource: cellText(row, map.resource),
-      priority: priorityFromText(cellText(row, map.priority))
+      priority: await readPriorityFromCell(cellByIndex(row, map.priority))
     };
   }
 
@@ -921,7 +1009,7 @@
     const map = await requireBoardMap();
     if (!map) return;
     const rows = boardRows();
-    const tickets = rows.map(r => ticketFromRow(r, map));
+    const tickets = await Promise.all(rows.map(r => ticketFromRow(r, map)));
     const unassigned = tickets.filter(t => !norm(t.resource));
     const responses = tickets.filter(t => /client has responded/i.test(t.status));
     const buckets = {};
