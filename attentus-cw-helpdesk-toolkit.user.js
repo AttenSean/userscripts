@@ -482,35 +482,54 @@
     return norm(input.value) === norm(desiredValue);
   }
 
-  function findInputNearLabel(labelText) {
-    const needle = norm(String(labelText).replace(/[:?]\s*$/, '')).toLowerCase();
+  const FIELD_SELECTORS = {
+    board: ['input.cw_serviceBoard', 'input[aria-label="Board"]', 'input[id*="Board"][role="combobox"]'],
+    status: ['input.cw_status', 'input[aria-label="Status"]', 'input[id*="Status"][role="combobox"]'],
+    type: ['input.cw_type', 'input[aria-label="Type"]', 'input[id*="Type"][role="combobox"]'],
+    subtype: ['input.cw_subType', 'input.cw_subtype', 'input[aria-label="Subtype"]', 'input[aria-label="Sub Type"]', 'input[id*="SubType"][role="combobox"]'],
+    priority: ['input.cw_priority', 'input[aria-label="Priority"]', 'input[id*="Priority"][role="combobox"]'],
+    summary: ['input.cw_summary', 'input[aria-label="Summary"]', 'input[placeholder*="summary" i]'],
+    tier: []
+  };
+
+  function findInputNearLabelResult(labelText) {
+    const rawLabel = String(labelText);
+    const needle = norm(rawLabel.replace(/[:?]\s*$/, '')).toLowerCase();
     const rows = $$('tr,.pod-element-row,.mm_field,.cw_Container,.gwt-HTMLPanel,div');
     for (const row of rows) {
       const label = $('.mm_label,.cw_CwLabel,.gwt-Label,label,[id$="-label"]', row);
-      const text = norm(txt(label).replace(/[:?]\s*$/, '')).toLowerCase();
+      const matchedLabel = norm(txt(label).replace(/[:?]\s*$/, ''));
+      const text = matchedLabel.toLowerCase();
       if (!text || text !== needle) continue;
       const input = $('input,textarea', row);
-      if (input) return input;
+      if (input) return { el: input, path: `label lookup "${rawLabel}" matched "${matchedLabel}"` };
     }
-    return null;
+    return { el: null, path: `label lookup "${rawLabel}" (not found)` };
+  }
+
+  function findInputNearLabel(labelText) {
+    return findInputNearLabelResult(labelText).el;
+  }
+
+  function resolveFieldElement(key) {
+    const selectors = FIELD_SELECTORS[key] || [];
+    const attempted = [];
+    for (const sel of selectors) {
+      attempted.push(`selector ${sel}`);
+      const el = $(sel);
+      if (el && visible(el)) return { el, path: `selector ${sel}` };
+    }
+    const labels = key === 'tier' ? ['Ticket Tier?', 'Tier', 'Item'] : [key];
+    for (const label of labels) {
+      const result = findInputNearLabelResult(label);
+      attempted.push(result.path);
+      if (result.el) return result;
+    }
+    return { el: null, path: attempted.join(' -> ') || `no lookup configured for ${key}` };
   }
 
   function fieldElement(key) {
-    const selectors = {
-      board: ['input.cw_serviceBoard', 'input[aria-label="Board"]', 'input[id*="Board"][role="combobox"]'],
-      status: ['input.cw_status', 'input[aria-label="Status"]', 'input[id*="Status"][role="combobox"]'],
-      type: ['input.cw_type', 'input[aria-label="Type"]', 'input[id*="Type"][role="combobox"]'],
-      subtype: ['input.cw_subType', 'input.cw_subtype', 'input[aria-label="Subtype"]', 'input[aria-label="Sub Type"]', 'input[id*="SubType"][role="combobox"]'],
-      priority: ['input.cw_priority', 'input[aria-label="Priority"]', 'input[id*="Priority"][role="combobox"]'],
-      summary: ['input.cw_summary', 'input[aria-label="Summary"]', 'input[placeholder*="summary" i]'],
-      tier: []
-    };
-    for (const sel of selectors[key] || []) {
-      const el = $(sel);
-      if (el && visible(el)) return el;
-    }
-    if (key === 'tier') return findInputNearLabel('Ticket Tier?') || findInputNearLabel('Tier') || findInputNearLabel('Item');
-    return findInputNearLabel(key);
+    return resolveFieldElement(key).el;
   }
 
   function readFieldValue(key) {
@@ -519,17 +538,25 @@
   }
 
   async function setFieldValue(key, value) {
-    const el = await until(() => fieldElement(key), { tries: 35, delay: 70 });
-    if (!el) return { ok: false, reason: `Field not found: ${key}` };
+    const found = await until(() => {
+      const result = resolveFieldElement(key);
+      return result.el ? result : null;
+    }, { tries: 35, delay: 70 });
+    const lookupPath = found ? found.path : resolveFieldElement(key).path;
+    const el = found && found.el;
+    if (!el) return { ok: false, reason: `Field not found: ${key}`, lookupPath, previousValue: '', targetValue: value, actualValue: '' };
+    const previousValue = 'value' in el ? el.value || '' : '';
     if (key === 'summary') {
       el.focus();
       el.value = String(value);
       dispatchAll(el);
       await sleep(80);
-      return { ok: norm(el.value) === norm(value), reason: `Could not set ${key}` };
+      const actualValue = el.value || '';
+      return { ok: norm(actualValue) === norm(value), reason: `Could not set ${key}`, lookupPath, previousValue, targetValue: value, actualValue };
     }
     const ok = await commitComboOnElement(el, value);
-    return { ok, reason: `Could not set ${key} to ${value}` };
+    const actualValue = el.value || '';
+    return { ok, reason: `Could not set ${key} to ${value}`, lookupPath, previousValue, targetValue: value, actualValue };
   }
 
   function findToolbarButton(cls) {
@@ -606,6 +633,31 @@
     return { wf, info, fields: wf.fields.map(f => ({ ...f, value: typeof f.value === 'function' ? f.value(info) : f.value })) };
   }
 
+  function triageFieldDiagnostic(field, commitResult) {
+    const resolved = resolveFieldElement(field.key);
+    const el = resolved.el;
+    return {
+      key: field.key,
+      label: field.label,
+      lookupPath: commitResult?.lookupPath || resolved.path,
+      previousValue: commitResult?.previousValue ?? (el && 'value' in el ? el.value || '' : ''),
+      targetValue: commitResult?.targetValue ?? field.value,
+      actualValue: commitResult?.actualValue ?? (el && 'value' in el ? el.value || '' : ''),
+      success: commitResult ? !!commitResult.ok : undefined,
+      failureReason: commitResult && !commitResult.ok ? commitResult.reason : undefined
+    };
+  }
+
+  function logTriageDiagnostics(stage, kind, wf, fields, commitResults = []) {
+    if (!DEBUG) return;
+    const byKey = new Map(commitResults.map(result => [result.key, result]));
+    log(`Triage workflow ${stage}`, {
+      workflowKind: kind,
+      workflowLabel: wf.label,
+      fields: fields.map(field => triageFieldDiagnostic(field, byKey.get(field.key)))
+    });
+  }
+
   async function copyTriage(kind) {
     const { wf, info, fields } = resolvedWorkflowFields(kind);
     const lines = [
@@ -627,6 +679,7 @@
   function confirmApplyTriage(kind) {
     if (!isCanonicalServiceTicketPage() || isProjectTicket()) { toast('Triage actions are only available on Service Tickets'); return; }
     const { wf, fields } = resolvedWorkflowFields(kind);
+    logTriageDiagnostics('opened', kind, wf, fields);
     modal({
       id: `${APP}-triage-confirm`,
       title: wf.title,
@@ -643,10 +696,13 @@
     const { wf, fields } = resolvedWorkflowFields(kind);
     const snapshot = fields.map(f => ({ key: f.key, label: f.label, value: readFieldValue(f.key), el: fieldElement(f.key) })).filter(s => s.el);
     const failures = [];
+    const commitResults = [];
     for (const f of fields) {
       const ret = await setFieldValue(f.key, f.value);
+      commitResults.push({ key: f.key, ...ret });
       if (!ret.ok) failures.push(ret.reason);
     }
+    logTriageDiagnostics('applied', kind, wf, fields, commitResults);
     if (failures.length) {
       toast(`Triage incomplete: ${failures[0]}`, 2600);
       modal({
