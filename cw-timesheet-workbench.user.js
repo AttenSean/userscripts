@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CW Timesheet Workbench
 // @namespace    https://github.com/AttentusTechnologies/userscripts
-// @version      0.1.0
+// @version      0.1.1
 // @description  Read-only ConnectWise Manage Daily Time Entries gap finder and JSON preview. Does not click ConnectWise Save, Copy, Submit, Delete, or modify ConnectWise data.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.myconnectwise.com/*
@@ -24,7 +24,7 @@
   const SCROLLER_SEL = '#mytimesheetdaygrid-listview-scroller';
   const START_CELL_SEL = 'td[cellindex="4"]';
   const END_CELL_SEL = 'td[cellindex="5"]';
-  const DEFAULT_SETTINGS = { minGapMinutes: 3, debug: false };
+  const DEFAULT_SETTINGS = { minGapMinutes: 3, debug: false, useWorkdayBoundary: false, workdayStart: '7:00 AM', workdayEnd: '4:00 PM' };
   const SAFE_ACTION_TEXT = new Set(['save', 'save and close', 'copy', 'new', 'submit', 'ok', 'delete']);
 
   const state = { observer: null, injectTimer: 0 };
@@ -40,7 +40,10 @@
   function saveSettings(settings) {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify({
       minGapMinutes: clampNumber(settings.minGapMinutes, 1, 240, DEFAULT_SETTINGS.minGapMinutes),
-      debug: !!settings.debug
+      debug: !!settings.debug,
+      useWorkdayBoundary: !!settings.useWorkdayBoundary,
+      workdayStart: normalizeTimeSetting(settings.workdayStart, DEFAULT_SETTINGS.workdayStart),
+      workdayEnd: normalizeTimeSetting(settings.workdayEnd, DEFAULT_SETTINGS.workdayEnd)
     }));
   }
 
@@ -61,14 +64,12 @@
     return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
   }
 
-  function isDailyTimeEntriesPage() {
-    const bodyText = textOf(document.body);
-    return !!document.querySelector(SCROLLER_SEL) || bodyText.includes('Daily Time Entries');
+  function hasDailyTimeEntriesGrid() {
+    return !!document.querySelector(SCROLLER_SEL);
   }
 
-  function findOpenCalendarButton() {
-    return Array.from(document.querySelectorAll('button, div, span, a'))
-      .find(el => textOf(el) === 'Open Calendar View' && isVisible(el));
+  function isDailyTimeEntriesPage() {
+    return hasDailyTimeEntriesGrid();
   }
 
   function isVisible(el) {
@@ -82,14 +83,14 @@
     const style = document.createElement('style');
     style.id = STYLE_ID;
     style.textContent = `
-      #${BUTTON_ID}{margin-left:8px;padding:5px 10px;border:1px solid #2271b1;border-radius:4px;background:#f0f6fc;color:#135e96;font:12px/1.2 Arial,sans-serif;cursor:pointer;z-index:9999}
-      #${BUTTON_ID}.cwtw-fixed-button{position:fixed;top:12px;right:12px;margin-left:0;box-shadow:0 3px 12px rgba(0,0,0,.2)}
+      #${BUTTON_ID}{padding:7px 11px;border:1px solid #2271b1;border-radius:999px;background:#f0f6fc;color:#135e96;font:12px/1.2 Arial,sans-serif;cursor:pointer}
+      #${BUTTON_ID}.cwtw-fixed-button{position:fixed;right:20px;bottom:20px;top:auto;z-index:2147483645;box-shadow:0 4px 14px rgba(0,0,0,.35)}
       #${BUTTON_ID}:hover{background:#dbeffd}
       #${MODAL_ID}{position:fixed;inset:0;z-index:2147483646;background:rgba(0,0,0,.35);font:13px/1.4 Arial,sans-serif;color:#1f2933}
       #${MODAL_ID} .cwtw-dialog{box-sizing:border-box;width:min(900px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow:auto;margin:16px auto;background:#fff;border-radius:8px;box-shadow:0 12px 40px rgba(0,0,0,.35);padding:16px}
       #${MODAL_ID} h2{margin:0 0 8px;font-size:18px} #${MODAL_ID} h3{margin:16px 0 6px;font-size:14px}
       #${MODAL_ID} .cwtw-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0}
-      #${MODAL_ID} input[type=number]{width:70px} #${MODAL_ID} textarea{width:100%;min-height:120px;box-sizing:border-box;font-family:Consolas,monospace;font-size:12px}
+      #${MODAL_ID} input[type=number]{width:70px} #${MODAL_ID} input[type=text]{width:90px} #${MODAL_ID} textarea{width:100%;min-height:120px;box-sizing:border-box;font-family:Consolas,monospace;font-size:12px}
       #${MODAL_ID} table{width:100%;border-collapse:collapse;margin:6px 0} #${MODAL_ID} th,#${MODAL_ID} td{border:1px solid #d0d7de;padding:4px 6px;text-align:left;vertical-align:top}
       #${MODAL_ID} th{background:#f6f8fa} #${MODAL_ID} .cwtw-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px;position:sticky;bottom:0;background:#fff;padding-top:8px}
       #${MODAL_ID} button{padding:5px 10px;cursor:pointer} #${MODAL_ID} .cwtw-status{padding:8px;border-radius:4px;background:#f6f8fa;border:1px solid #d0d7de}.cwtw-error{background:#fff5f5!important;border-color:#f2a6a6!important;color:#8a1f11}.cwtw-note{color:#57606a;font-size:12px}`;
@@ -98,23 +99,21 @@
 
   function injectButton() {
     logStartupState();
-    if (!isDailyTimeEntriesPage() || document.getElementById(BUTTON_ID)) return;
-    const anchor = findOpenCalendarButton();
+    if (!isDailyTimeEntriesPage()) {
+      document.getElementById(BUTTON_ID)?.remove();
+      return;
+    }
+    if (document.getElementById(BUTTON_ID)) return;
     ensureStyles();
     const button = document.createElement('button');
     button.id = BUTTON_ID;
     button.type = 'button';
     button.textContent = 'Timesheet Workbench';
     button.addEventListener('click', (event) => { event.preventDefault(); event.stopPropagation(); showWorkbench(); });
-    if (anchor) {
-      anchor.insertAdjacentElement('afterend', button);
-      log('Injected workbench button near Open Calendar View.');
-    } else {
-      button.classList.add('cwtw-fixed-button');
-      button.setAttribute('aria-label', 'Open Timesheet Workbench');
-      document.body.appendChild(button);
-      log('Injected fixed workbench button because Open Calendar View was not found.');
-    }
+    button.classList.add('cwtw-fixed-button');
+    button.setAttribute('aria-label', 'Open Timesheet Workbench');
+    document.body.appendChild(button);
+    log('Injected fixed workbench button.');
   }
 
   function scheduleInject() {
@@ -130,7 +129,7 @@
 
 
   function getTimesheetScroller() {
-    return document.querySelector(SCROLLER_SEL) || document;
+    return document.querySelector(SCROLLER_SEL);
   }
 
   function logStartupState() {
@@ -155,6 +154,8 @@
     const candidates = [];
     const intervals = [];
 
+    if (!scroller) return { intervals, candidates, scrollerFound: false };
+
     scroller.querySelectorAll(START_CELL_SEL).forEach((startCell, rowIndex) => {
       if (!isVisible(startCell) || isExcludedFromGridParsing(startCell)) return;
       const row = startCell.closest('tr');
@@ -174,7 +175,7 @@
     });
 
     log('Primary cellindex Start/End candidates:', candidates);
-    return { intervals, candidates, scrollerFound: scroller !== document };
+    return { intervals, candidates, scrollerFound: true };
   }
 
   function isExcludedFromGridParsing(el) {
@@ -312,9 +313,10 @@
   function getIntervals() {
     const primary = getAllIntervalsFromTimesheetGrid();
     if (primary.intervals.length) return { intervals: primary.intervals, error: '' };
-    log('Primary cellindex extraction found no valid intervals; falling back to generic parser.', primary);
-    const grid = discoverGrid();
-    if (!grid) return { intervals: [], error: primary.scrollerFound ? 'Found the Daily Time Entries grid, but no valid Start Time / End Time intervals were detected.' : 'Could not find a visible Daily Time Entries grid.' };
+    if (!primary.scrollerFound) return { intervals: [], error: 'Open Daily Time Entries to scan for gaps.' };
+    log('Primary cellindex extraction found no valid intervals; checking generic parser within the Daily Time Entries grid only.', primary);
+    const grid = document.querySelector(SCROLLER_SEL);
+    if (!grid) return { intervals: [], error: 'Open Daily Time Entries to scan for gaps.' };
     const { columns } = detectColumns(grid);
     if (columns['Start Time'] == null || columns['End Time'] == null) return { intervals: [], error: 'Could not detect Start Time and End Time columns.' };
     const rows = extractRows(grid, columns);
@@ -341,13 +343,33 @@
     return merged;
   }
 
-  function calculateGaps(merged, minGapMinutes) {
+  function calculateGaps(merged, minGapMinutes, boundary) {
+    const bounded = applyWorkdayBoundary(merged, boundary);
     const gaps = [];
-    for (let i = 0; i < merged.length - 1; i += 1) {
-      const gap = { start: merged[i].end, end: merged[i + 1].start };
+    for (let i = 0; i < bounded.length - 1; i += 1) {
+      const gap = { start: bounded[i].end, end: bounded[i + 1].start };
       if (gap.end - gap.start >= minGapMinutes) gaps.push(gap);
     }
     return gaps;
+  }
+
+  function getWorkdayBoundary(settings) {
+    if (!settings.useWorkdayBoundary) return null;
+    const start = parseTimeToMinutes(settings.workdayStart);
+    const end = parseTimeToMinutes(settings.workdayEnd);
+    if (start == null || end == null || end <= start) return null;
+    return { start, end };
+  }
+
+  function applyWorkdayBoundary(intervals, boundary) {
+    if (!boundary) return intervals;
+    return intervals
+      .map(item => ({ start: Math.max(item.start, boundary.start), end: Math.min(item.end, boundary.end) }))
+      .filter(item => item.end > item.start);
+  }
+
+  function normalizeTimeSetting(value, fallback) {
+    return parseTimeToMinutes(value) == null ? fallback : String(value).trim().toUpperCase();
   }
 
   function sumMinutes(items) {
@@ -364,7 +386,7 @@
 
   function gapText(gaps) {
     if (!gaps.length) return 'No gaps detected.';
-    return gaps.map(g => `${formatMinutes(g.start)} - ${formatMinutes(g.end)}\n${g.end - g.start} minutes`).join('\n\n');
+    return gaps.map(g => `${formatMinutes(g.start)} - ${formatMinutes(g.end)} (${g.end - g.start} min)`).join('\n');
   }
 
   async function copyText(text) {
@@ -375,10 +397,15 @@
 
   function showWorkbench() {
     ensureStyles();
+    if (!hasDailyTimeEntriesGrid()) {
+      showGridMissingMessage();
+      return;
+    }
     const settings = loadSettings();
     const { intervals, error } = getIntervals();
     const merged = mergeIntervals(intervals);
-    const gaps = calculateGaps(merged, settings.minGapMinutes);
+    const boundary = getWorkdayBoundary(settings);
+    const gaps = calculateGaps(merged, settings.minGapMinutes, boundary);
     const existing = document.getElementById(MODAL_ID);
     if (existing) existing.remove();
 
@@ -388,8 +415,8 @@
       <div class="cwtw-dialog" role="dialog" aria-modal="true" aria-label="Timesheet Workbench">
         <h2>Timesheet Workbench <span class="cwtw-note">read-only v0.1</span></h2>
         <div class="cwtw-status ${error ? 'cwtw-error' : ''}">${escapeHtml(error || `Detected ${intervals.length} valid visible interval(s), merged into ${merged.length} block(s).`)}</div>
-        <div class="cwtw-row"><label>Minimum gap minutes <input id="cwtw-min-gap" type="number" min="1" max="240" step="1" value="${settings.minGapMinutes}"></label><label><input id="cwtw-debug" type="checkbox" ${settings.debug ? 'checked' : ''}> Debug logging</label><button id="cwtw-refresh" type="button">Refresh Preview</button></div>
-        <div class="cwtw-note">Milestone 2 write actions would hook in after a user selects one of these gaps from an open Time Entry window. This v0.1 script never clicks ConnectWise Save, Copy, New, Submit, OK, Delete, or other action buttons.</div>
+        <div class="cwtw-row"><label>Minimum gap minutes <input id="cwtw-min-gap" type="number" min="1" max="240" step="1" value="${settings.minGapMinutes}"></label><label><input id="cwtw-boundary-enabled" type="checkbox" ${settings.useWorkdayBoundary ? 'checked' : ''}> Limit to workday</label><label>Start <input id="cwtw-boundary-start" type="text" value="${escapeHtml(settings.workdayStart)}"></label><label>End <input id="cwtw-boundary-end" type="text" value="${escapeHtml(settings.workdayEnd)}"></label><label><input id="cwtw-debug" type="checkbox" ${settings.debug ? 'checked' : ''}> Debug logging</label><button id="cwtw-refresh" type="button">Refresh Preview</button></div>
+        <div class="cwtw-note">This v0.1 script is read-only: it never clicks ConnectWise Save, Copy, New, Submit, OK, Delete, or other action buttons, and it never modifies ConnectWise fields. Workday limits are optional and disabled by default; when disabled, gaps are calculated only between existing visible entries.</div>
         <h3>Summary</h3><table><tbody><tr><th>Total logged from merged intervals</th><td>${minutesLabel(sumMinutes(merged))}</td></tr><tr><th>Total detected gap time</th><td>${minutesLabel(sumMinutes(gaps))}</td></tr></tbody></table>
         <h3>Existing intervals</h3>${renderIntervalTable(merged)}
         <h3>Detected gaps</h3>${renderIntervalTable(gaps)}
@@ -401,7 +428,7 @@
     modal.addEventListener('click', event => { if (event.target === modal) modal.remove(); });
     modal.querySelector('#cwtw-close').addEventListener('click', () => modal.remove());
     modal.querySelector('#cwtw-refresh').addEventListener('click', () => {
-      saveSettings({ minGapMinutes: modal.querySelector('#cwtw-min-gap').value, debug: modal.querySelector('#cwtw-debug').checked });
+      saveSettings({ minGapMinutes: modal.querySelector('#cwtw-min-gap').value, debug: modal.querySelector('#cwtw-debug').checked, useWorkdayBoundary: modal.querySelector('#cwtw-boundary-enabled').checked, workdayStart: modal.querySelector('#cwtw-boundary-start').value, workdayEnd: modal.querySelector('#cwtw-boundary-end').value });
       showWorkbench();
     });
     modal.querySelector('#cwtw-copy-readable').addEventListener('click', async () => {
@@ -414,6 +441,22 @@
       try { await copyText(modal.querySelector('#cwtw-json').value); status.textContent = 'JSON copied.'; }
       catch (copyError) { status.textContent = `Copy failed: ${copyError.message || copyError}`; }
     });
+  }
+
+  function showGridMissingMessage() {
+    const existing = document.getElementById(MODAL_ID);
+    if (existing) existing.remove();
+    const modal = document.createElement('div');
+    modal.id = MODAL_ID;
+    modal.innerHTML = `
+      <div class="cwtw-dialog" role="dialog" aria-modal="true" aria-label="Timesheet Workbench">
+        <h2>Timesheet Workbench <span class="cwtw-note">read-only v0.1</span></h2>
+        <div class="cwtw-status">Open Daily Time Entries to scan for gaps.</div>
+        <div class="cwtw-actions"><button id="cwtw-close" type="button">Close</button></div>
+      </div>`;
+    document.body.appendChild(modal);
+    modal.addEventListener('click', event => { if (event.target === modal) modal.remove(); });
+    modal.querySelector('#cwtw-close').addEventListener('click', () => modal.remove());
   }
 
   function renderIntervalTable(items) {
