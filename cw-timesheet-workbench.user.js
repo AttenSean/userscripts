@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         CW Timesheet Workbench
-// @namespace    https://github.com/AttenSean/userscripts
+// @namespace    https://github.com/AttentusTechnologies/userscripts
 // @version      0.1.0
 // @description  Read-only ConnectWise Manage Daily Time Entries gap finder and JSON preview. Does not save, copy, submit, delete, or modify ConnectWise data.
 // @match        https://*.myconnectwise.net/*
@@ -9,8 +9,8 @@
 // @grant        GM_setClipboard
 // @grant        GM.setClipboard
 // @noframes
-// @downloadURL  https://raw.githubusercontent.com/AttenSean/userscripts/main/cw-timesheet-workbench.user.js
-// @updateURL    https://raw.githubusercontent.com/AttenSean/userscripts/main/cw-timesheet-workbench.user.js
+// @downloadURL  https://raw.githubusercontent.com/AttentusTechnologies/userscripts/main/cw-timesheet-workbench.user.js
+// @updateURL    https://raw.githubusercontent.com/AttentusTechnologies/userscripts/main/cw-timesheet-workbench.user.js
 // ==/UserScript==
 
 (function () {
@@ -117,43 +117,115 @@
     state.observer.observe(document.body, { childList: true, subtree: true });
   }
 
+  function isExcludedFromGridParsing(el) {
+    return !!el.closest(`#${MODAL_ID}, #${BUTTON_ID}, [role="dialog"], [aria-modal="true"], .modal, .popup, .popover, .dropdown-menu, .sidebar, .side-bar, .toolbar, [role="toolbar"], nav, header, footer`);
+  }
+
+  function isGridCellLike(el) {
+    if (!isVisible(el) || isExcludedFromGridParsing(el)) return false;
+    const text = textOf(el);
+    if (!text) return false;
+    const tag = el.tagName.toLowerCase();
+    const role = (el.getAttribute('role') || '').toLowerCase();
+    const className = String(el.className || '').toLowerCase();
+    return tag === 'td' || tag === 'th' || role === 'gridcell' || role === 'columnheader' ||
+      el.hasAttribute('cellindex') || el.hasAttribute('aria-colindex') || el.hasAttribute('__gwt_cell') ||
+      /(^|\s)(x-grid-cell|x-grid3-cell|grid-cell|cell|cw-ml-clickable-cell)(\s|$)/.test(className);
+  }
+
   function discoverGrid() {
     const required = ['Company Name', 'Description', 'Date', 'Start Time', 'End Time', 'Hours'];
-    const candidates = Array.from(document.querySelectorAll('table, [role="grid"], [class*="mm_grid"], div'));
-    return candidates
-      .filter(isVisible)
-      .map(el => ({ el, text: textOf(el) }))
-      .filter(item => required.every(header => item.text.includes(header)))
-      .sort((a, b) => a.el.getBoundingClientRect().height - b.el.getBoundingClientRect().height)[0]?.el || null;
+    const selectors = [
+      'table', '[role="grid"]', '[role="table"]', '[class*="mm_grid"]', '[class*="grid"]', '[class*="Grid"]',
+      '[class*="x-grid"]', '[class*="gwt"]', '[class*="data-grid"]', '[class*="datatable"]'
+    ];
+    const candidates = Array.from(document.querySelectorAll(selectors.join(',')))
+      .filter(el => isVisible(el) && !isExcludedFromGridParsing(el))
+      .map(el => {
+        const text = textOf(el);
+        const rect = el.getBoundingClientRect();
+        const headerScore = required.reduce((score, header) => score + (text.includes(header) ? 1 : 0), 0);
+        const cellScore = el.querySelectorAll('tr, td[cellindex], td[aria-colindex], [role="row"], [role="gridcell"], [cellindex], .cw-ml-clickable-cell').length;
+        return { el, text, headerScore, cellScore, area: rect.width * rect.height };
+      })
+      .filter(item => item.headerScore >= required.length - 1 && item.cellScore > 0)
+      .sort((a, b) => b.headerScore - a.headerScore || b.cellScore - a.cellScore || a.area - b.area);
+    const chosen = candidates[0]?.el || null;
+    log('Chosen grid element:', chosen, candidates.map(item => ({ tag: item.el.tagName, className: item.el.className, headerScore: item.headerScore, cellScore: item.cellScore })));
+    return chosen;
   }
 
   function detectColumns(grid) {
     const headerNames = ['Company Name', 'Description', 'Date', 'Start Time', 'End Time', 'Hours', 'Billable', 'Work Type', 'Work Role', 'Status', 'Agreement', 'Agreement Type', 'Invoice #'];
-    const cells = Array.from(grid.querySelectorAll('th, [role="columnheader"], td, div, span')).filter(isVisible);
+    const cells = Array.from(grid.querySelectorAll('th, td, [role="columnheader"], [role="gridcell"], [cellindex], [aria-colindex], div, span'))
+      .filter(el => isVisible(el) && !isExcludedFromGridParsing(el));
     const found = [];
     for (const name of headerNames) {
       const cell = cells.find(el => textOf(el) === name);
-      if (cell) found.push({ name, left: cell.getBoundingClientRect().left, top: cell.getBoundingClientRect().top });
+      if (cell) {
+        const rect = cell.getBoundingClientRect();
+        const explicitIndex = Number(cell.getAttribute('cellindex') || cell.getAttribute('aria-colindex'));
+        found.push({ name, left: rect.left, top: rect.top, index: Number.isFinite(explicitIndex) ? explicitIndex : null });
+      }
     }
-    found.sort((a, b) => a.left - b.left);
+    found.sort((a, b) => (a.index ?? a.left) - (b.index ?? b.left));
     const columns = {};
-    found.forEach((h, index) => { columns[h.name] = index; });
+    found.forEach((h, index) => { columns[h.name] = h.index != null ? h.index : index; });
+    log('Detected headers:', found, columns);
     return { headers: found, columns };
   }
 
   function extractRows(grid, columns) {
-    const tableRows = Array.from(grid.querySelectorAll('tr')).filter(row => textOf(row) && !textOf(row).includes('Company Name'));
-    if (tableRows.length) return tableRows.map(row => Array.from(row.children).map(textOf));
+    const headerLabels = new Set(Object.keys(columns));
+    const tableRows = Array.from(grid.querySelectorAll('tr')).filter(row => isVisible(row) && !isExcludedFromGridParsing(row));
+    const dataTableRows = tableRows
+      .map(row => Array.from(row.querySelectorAll('td, th')).filter(isVisible).map(textOf))
+      .filter(cells => cells.length && !cells.some(cell => headerLabels.has(cell)));
+    if (dataTableRows.length) {
+      log('Extracted raw rows:', dataTableRows);
+      return dataTableRows;
+    }
 
-    const clickable = Array.from(grid.querySelectorAll('.multilineClickable.cw-ml-clickable-cell, .cw-ml-clickable-cell')).filter(isVisible);
+    const rowElements = Array.from(grid.querySelectorAll('[role="row"]')).filter(row => isVisible(row) && !isExcludedFromGridParsing(row));
+    const roleRows = rowElements.map(row => Array.from(row.querySelectorAll('[role="gridcell"], td, [cellindex], [aria-colindex]')).filter(isGridCellLike));
+    const normalizedRoleRows = roleRows.map(rowCells => normalizeCells(rowCells)).filter(cells => cells.length && !cells.some(cell => headerLabels.has(cell)));
+    if (normalizedRoleRows.length) {
+      log('Extracted raw rows:', normalizedRoleRows);
+      return normalizedRoleRows;
+    }
+
+    const cellLike = Array.from(grid.querySelectorAll('td[cellindex], td[aria-colindex], td, [role="gridcell"], [cellindex], [aria-colindex], [__gwt_cell], .x-grid-cell, .x-grid3-cell, .grid-cell, .cw-ml-clickable-cell'))
+      .filter(isGridCellLike)
+      .filter(cell => !headerLabels.has(textOf(cell)));
     const rowMap = new Map();
-    clickable.forEach(cell => {
+    cellLike.forEach(cell => {
       const rect = cell.getBoundingClientRect();
       const key = Math.round(rect.top / 4) * 4;
       if (!rowMap.has(key)) rowMap.set(key, []);
-      rowMap.get(key).push({ left: rect.left, text: textOf(cell) });
+      rowMap.get(key).push(cell);
     });
-    return Array.from(rowMap.values()).map(cells => cells.sort((a, b) => a.left - b.left).map(c => c.text));
+    const rows = Array.from(rowMap.values()).map(normalizeCells).filter(cells => cells.length);
+    log('Extracted raw rows:', rows);
+    return rows;
+  }
+
+  function normalizeCells(cellElements) {
+    const maxExplicitIndex = cellElements.reduce((max, cell) => {
+      const value = Number(cell.getAttribute('cellindex') || cell.getAttribute('aria-colindex'));
+      return Number.isFinite(value) ? Math.max(max, value) : max;
+    }, -1);
+    if (maxExplicitIndex >= 0) {
+      const cells = [];
+      cellElements.forEach(cell => {
+        const explicitIndex = Number(cell.getAttribute('cellindex') || cell.getAttribute('aria-colindex'));
+        if (Number.isFinite(explicitIndex)) cells[explicitIndex] = textOf(cell);
+      });
+      return cells.map(value => value || '');
+    }
+    return cellElements
+      .map(cell => ({ left: cell.getBoundingClientRect().left, text: textOf(cell) }))
+      .sort((a, b) => a.left - b.left)
+      .map(cell => cell.text);
   }
 
   function parseTimeToMinutes(value) {
@@ -183,13 +255,15 @@
     const { columns } = detectColumns(grid);
     if (columns['Start Time'] == null || columns['End Time'] == null) return { intervals: [], error: 'Could not detect Start Time and End Time columns.' };
     const rows = extractRows(grid, columns);
-    const intervals = rows.map((cells, rowIndex) => {
+    const candidates = rows.map((cells, rowIndex) => {
       const startText = cells[columns['Start Time']];
       const endText = cells[columns['End Time']];
       const start = parseTimeToMinutes(startText);
       const end = parseTimeToMinutes(endText);
       return { rowIndex: rowIndex + 1, startText, endText, start, end };
-    }).filter(item => item.start != null && item.end != null && item.end > item.start);
+    });
+    log('Candidate Start/End values per row:', candidates);
+    const intervals = candidates.filter(item => item.start != null && item.end != null && item.end > item.start);
     return { intervals, error: intervals.length ? '' : 'No valid Start Time / End Time intervals were detected in visible rows.' };
   }
 
