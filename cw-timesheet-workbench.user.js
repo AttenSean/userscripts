@@ -2,7 +2,7 @@
 // @name         CW Timesheet Workbench
 // @namespace    https://github.com/AttentusTechnologies/userscripts
 // @version      0.1.0
-// @description  Read-only ConnectWise Manage Daily Time Entries gap finder and JSON preview. Does not save, copy, submit, delete, or modify ConnectWise data.
+// @description  Read-only ConnectWise Manage Daily Time Entries gap finder and JSON preview. Does not click ConnectWise Save, Copy, Submit, Delete, or modify ConnectWise data.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.myconnectwise.com/*
 // @run-at       document-idle
@@ -21,6 +21,9 @@
   const MODAL_ID = `${APP}-modal`;
   const STYLE_ID = `${APP}-style`;
   const SETTINGS_KEY = `${APP}:settings:v1`;
+  const SCROLLER_SEL = '#mytimesheetdaygrid-listview-scroller';
+  const START_CELL_SEL = 'td[cellindex="4"]';
+  const END_CELL_SEL = 'td[cellindex="5"]';
   const DEFAULT_SETTINGS = { minGapMinutes: 3, debug: false };
   const SAFE_ACTION_TEXT = new Set(['save', 'save and close', 'copy', 'new', 'submit', 'ok', 'delete']);
 
@@ -60,7 +63,7 @@
 
   function isDailyTimeEntriesPage() {
     const bodyText = textOf(document.body);
-    return bodyText.includes('Daily Time Entries') && bodyText.includes('Open Calendar View');
+    return !!document.querySelector(SCROLLER_SEL) || bodyText.includes('Daily Time Entries');
   }
 
   function findOpenCalendarButton() {
@@ -80,6 +83,7 @@
     style.id = STYLE_ID;
     style.textContent = `
       #${BUTTON_ID}{margin-left:8px;padding:5px 10px;border:1px solid #2271b1;border-radius:4px;background:#f0f6fc;color:#135e96;font:12px/1.2 Arial,sans-serif;cursor:pointer;z-index:9999}
+      #${BUTTON_ID}.cwtw-fixed-button{position:fixed;top:12px;right:12px;margin-left:0;box-shadow:0 3px 12px rgba(0,0,0,.2)}
       #${BUTTON_ID}:hover{background:#dbeffd}
       #${MODAL_ID}{position:fixed;inset:0;z-index:2147483646;background:rgba(0,0,0,.35);font:13px/1.4 Arial,sans-serif;color:#1f2933}
       #${MODAL_ID} .cwtw-dialog{box-sizing:border-box;width:min(900px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow:auto;margin:16px auto;background:#fff;border-radius:8px;box-shadow:0 12px 40px rgba(0,0,0,.35);padding:16px}
@@ -93,17 +97,24 @@
   }
 
   function injectButton() {
+    logStartupState();
     if (!isDailyTimeEntriesPage() || document.getElementById(BUTTON_ID)) return;
     const anchor = findOpenCalendarButton();
-    if (!anchor) return log('Open Calendar View anchor not found.');
     ensureStyles();
     const button = document.createElement('button');
     button.id = BUTTON_ID;
     button.type = 'button';
     button.textContent = 'Timesheet Workbench';
     button.addEventListener('click', (event) => { event.preventDefault(); event.stopPropagation(); showWorkbench(); });
-    anchor.insertAdjacentElement('afterend', button);
-    log('Injected workbench button.');
+    if (anchor) {
+      anchor.insertAdjacentElement('afterend', button);
+      log('Injected workbench button near Open Calendar View.');
+    } else {
+      button.classList.add('cwtw-fixed-button');
+      button.setAttribute('aria-label', 'Open Timesheet Workbench');
+      document.body.appendChild(button);
+      log('Injected fixed workbench button because Open Calendar View was not found.');
+    }
   }
 
   function scheduleInject() {
@@ -115,6 +126,55 @@
     scheduleInject();
     state.observer = new MutationObserver(scheduleInject);
     state.observer.observe(document.body, { childList: true, subtree: true });
+  }
+
+
+  function getTimesheetScroller() {
+    return document.querySelector(SCROLLER_SEL) || document;
+  }
+
+  function logStartupState() {
+    const scroller = document.querySelector(SCROLLER_SEL);
+    const scope = scroller || document;
+    const rawPairs = Array.from(scope.querySelectorAll(START_CELL_SEL)).slice(0, 5).map(startCell => {
+      const row = startCell.closest('tr');
+      const endCell = row?.querySelector(END_CELL_SEL);
+      return { startText: textOf(startCell), endText: textOf(endCell) };
+    });
+    log('Startup state:', {
+      url: location.href,
+      scrollerFound: !!scroller,
+      startCellCount: scope.querySelectorAll(START_CELL_SEL).length,
+      endCellCount: scope.querySelectorAll(END_CELL_SEL).length,
+      rawStartEndSamples: rawPairs
+    });
+  }
+
+  function getAllIntervalsFromTimesheetGrid() {
+    const scroller = getTimesheetScroller();
+    const candidates = [];
+    const intervals = [];
+
+    scroller.querySelectorAll(START_CELL_SEL).forEach((startCell, rowIndex) => {
+      if (!isVisible(startCell) || isExcludedFromGridParsing(startCell)) return;
+      const row = startCell.closest('tr');
+      if (!row || !isVisible(row) || isExcludedFromGridParsing(row)) return;
+      const endCell = row.querySelector(END_CELL_SEL);
+      if (!endCell || !isVisible(endCell) || isExcludedFromGridParsing(endCell)) return;
+
+      const startText = textOf(startCell);
+      const endText = textOf(endCell);
+      const start = parseTimeToMinutes(startText);
+      const end = parseTimeToMinutes(endText);
+      const candidate = { rowIndex: rowIndex + 1, startText, endText, start, end };
+      candidates.push(candidate);
+
+      if (start == null || end == null || end <= start) return;
+      intervals.push(candidate);
+    });
+
+    log('Primary cellindex Start/End candidates:', candidates);
+    return { intervals, candidates, scrollerFound: scroller !== document };
   }
 
   function isExcludedFromGridParsing(el) {
@@ -250,8 +310,11 @@
   }
 
   function getIntervals() {
+    const primary = getAllIntervalsFromTimesheetGrid();
+    if (primary.intervals.length) return { intervals: primary.intervals, error: '' };
+    log('Primary cellindex extraction found no valid intervals; falling back to generic parser.', primary);
     const grid = discoverGrid();
-    if (!grid) return { intervals: [], error: 'Could not find a visible Daily Time Entries grid with the expected headers.' };
+    if (!grid) return { intervals: [], error: primary.scrollerFound ? 'Found the Daily Time Entries grid, but no valid Start Time / End Time intervals were detected.' : 'Could not find a visible Daily Time Entries grid.' };
     const { columns } = detectColumns(grid);
     if (columns['Start Time'] == null || columns['End Time'] == null) return { intervals: [], error: 'Could not detect Start Time and End Time columns.' };
     const rows = extractRows(grid, columns);
@@ -299,6 +362,11 @@
     return JSON.stringify(gaps.map(g => ({ start: formatMinutes(g.start), end: formatMinutes(g.end) })), null, 2);
   }
 
+  function gapText(gaps) {
+    if (!gaps.length) return 'No gaps detected.';
+    return gaps.map(g => `${formatMinutes(g.start)} - ${formatMinutes(g.end)}\n${g.end - g.start} minutes`).join('\n\n');
+  }
+
   async function copyText(text) {
     if (typeof GM_setClipboard === 'function') return GM_setClipboard(text, 'text');
     if (typeof GM !== 'undefined' && GM.setClipboard) return GM.setClipboard(text, 'text');
@@ -325,8 +393,9 @@
         <h3>Summary</h3><table><tbody><tr><th>Total logged from merged intervals</th><td>${minutesLabel(sumMinutes(merged))}</td></tr><tr><th>Total detected gap time</th><td>${minutesLabel(sumMinutes(gaps))}</td></tr></tbody></table>
         <h3>Existing intervals</h3>${renderIntervalTable(merged)}
         <h3>Detected gaps</h3>${renderIntervalTable(gaps)}
+        <h3>Human-readable gaps</h3><textarea id="cwtw-readable" readonly>${escapeHtml(gapText(gaps))}</textarea>
         <h3>Copyable gap JSON</h3><textarea id="cwtw-json" readonly>${escapeHtml(gapJson(gaps))}</textarea>
-        <div class="cwtw-actions"><span id="cwtw-copy-status" class="cwtw-note"></span><button id="cwtw-copy-json" type="button">Copy JSON</button><button id="cwtw-close" type="button">Close</button></div>
+        <div class="cwtw-actions"><span id="cwtw-copy-status" class="cwtw-note"></span><button id="cwtw-copy-readable" type="button">Copy Gap Text</button><button id="cwtw-copy-json" type="button">Copy JSON</button><button id="cwtw-close" type="button">Close</button></div>
       </div>`;
     document.body.appendChild(modal);
     modal.addEventListener('click', event => { if (event.target === modal) modal.remove(); });
@@ -335,9 +404,14 @@
       saveSettings({ minGapMinutes: modal.querySelector('#cwtw-min-gap').value, debug: modal.querySelector('#cwtw-debug').checked });
       showWorkbench();
     });
+    modal.querySelector('#cwtw-copy-readable').addEventListener('click', async () => {
+      const status = modal.querySelector('#cwtw-copy-status');
+      try { await copyText(modal.querySelector('#cwtw-readable').value); status.textContent = 'Gap text copied.'; }
+      catch (copyError) { status.textContent = `Copy failed: ${copyError.message || copyError}`; }
+    });
     modal.querySelector('#cwtw-copy-json').addEventListener('click', async () => {
       const status = modal.querySelector('#cwtw-copy-status');
-      try { await copyText(modal.querySelector('#cwtw-json').value); status.textContent = 'Copied.'; }
+      try { await copyText(modal.querySelector('#cwtw-json').value); status.textContent = 'JSON copied.'; }
       catch (copyError) { status.textContent = `Copy failed: ${copyError.message || copyError}`; }
     });
   }
