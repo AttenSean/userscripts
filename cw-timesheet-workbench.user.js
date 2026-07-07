@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CW Timesheet Workbench
 // @namespace    https://github.com/AttentusTechnologies/userscripts
-// @version      0.2.4
+// @version      0.2.5
 // @description  ConnectWise Manage Daily Time Entries gap finder with confirmed Time Entry time fill and note clipboard. Does not click ConnectWise Save, Copy, Submit, Delete, or modify ConnectWise data via API.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.myconnectwise.com/*
@@ -29,13 +29,15 @@
   const END_CELL_SEL = 'td[cellindex="5"]';
   const DEFAULT_SETTINGS = { minGapMinutes: 3, debug: false, useWorkdayBoundary: false, workdayStart: '7:00 AM', workdayEnd: '4:00 PM', noteTemplate: 'service-desk-triage' };
   const DEFAULT_TEMPLATES = {
-    'service-desk-triage': { label: 'Service Desk Dispatch / Triage', template: 'Worked active service desk dispatch and triage from {start} to {end} ({hours} hrs), including reviewing inbound tickets, monitoring board flow, routing issues, identifying SLA or escalation needs, and updating ticket context for technician follow-up.' },
-    'queue-review': { label: 'Queue Review / Board Cleanup', template: 'Reviewed service board activity from {start} to {end} ({hours} hrs), cleaned up ticket context, checked routing and ownership, identified stale or misrouted items, and updated next steps where needed.' },
-    'ai-automation': { label: 'AI Prompt / Automation Work', template: 'Worked on AI and automation improvements from {start} to {end} ({hours} hrs), including reviewing behavior, testing outputs, refining prompts or scripts, validating results, and documenting follow-up changes.' },
-    documentation: { label: 'Documentation / SOP / KB Updates', template: 'Reviewed and updated internal documentation from {start} to {end} ({hours} hrs), including support process notes, system context, SOP details, and operational reference material for future technician use.' },
-    training: { label: 'Training / Shadowing / Coverage Handoff', template: 'Provided training, shadowing, or coverage support from {start} to {end} ({hours} hrs), including reviewing workflow expectations, answering process questions, and helping transfer operational knowledge.' },
-    meeting: { label: 'Internal Meeting / Review', template: 'Attended internal review meeting from {start} to {end} ({hours} hrs) and discussed service desk operations, current priorities, process updates, coverage needs, and follow-up action items.' },
-    admin: { label: 'End-of-Day / Timesheet / Admin Review', template: 'Completed administrative review from {start} to {end} ({hours} hrs), including checking open items, updating time or ticket context, reviewing end-of-day status, and preparing follow-up items as needed.' }
+    'service-desk-triage': { label: 'Service Desk Dispatch / Triage', category: 'Service Desk Dispatch / Triage', chargeCode: 'Morning/Evening Dispatch', chargeCodePath: 'Attentus Technologies / Morning/Evening Dispatch', template: 'Worked active service desk dispatch and triage from {start} to {end} ({hours} hrs), including reviewing inbound tickets, monitoring board flow, routing issues, identifying SLA or escalation needs, and updating ticket context for technician follow-up.' },
+    'queue-review': { label: 'Queue Review / Board Cleanup', category: 'Queue Review / Board Cleanup', chargeCode: 'Morning/Evening Dispatch', chargeCodePath: 'Attentus Technologies / Morning/Evening Dispatch', template: 'Reviewed service board activity from {start} to {end} ({hours} hrs), cleaned up ticket context, checked routing and ownership, identified stale or misrouted items, and updated next steps where needed.' },
+    'ai-automation': { label: 'AI Prompt / Automation Work', category: 'AI Prompt / Automation Work', chargeCode: 'Internal Technical', chargeCodePath: 'Attentus Technologies / Internal Technical', template: 'Worked on AI and automation improvements from {start} to {end} ({hours} hrs), including reviewing behavior, testing outputs, refining prompts or scripts, validating results, and documenting follow-up changes.' },
+    documentation: { label: 'Documentation / SOP / KB Updates', category: 'Documentation / SOP / KB Updates', chargeCode: 'Internal Technical', chargeCodePath: 'Attentus Technologies / Internal Technical', template: 'Reviewed and updated internal documentation from {start} to {end} ({hours} hrs), including support process notes, system context, SOP details, and operational reference material for future technician use.' },
+    training: { label: 'Training / Shadowing / Coverage Handoff', category: 'Training / Shadowing / Coverage Handoff', chargeCode: 'Training', chargeCodePath: 'Attentus Technologies / Training', template: 'Provided training, shadowing, or coverage support from {start} to {end} ({hours} hrs), including reviewing workflow expectations, answering process questions, and helping transfer operational knowledge.' },
+    meeting: { label: 'Internal Meeting / Review', category: 'Internal Meeting / Review', chargeCode: 'Internal Meeting', chargeCodePath: 'Attentus Technologies / Internal Meeting', template: 'Attended internal review meeting from {start} to {end} ({hours} hrs) and discussed service desk operations, current priorities, process updates, coverage needs, and follow-up action items.' },
+    'time-sheet-review': { label: 'Time Sheet Review', category: 'Time Sheet Review', chargeCode: 'Time Sheet Review', chargeCodePath: 'Attentus Technologies / Time Sheet Review', template: 'Reviewed, corrected, audited, or updated timesheet entries from {start} to {end} ({hours} hrs), including validating time coverage, entry accuracy, and required follow-up.' },
+    break: { label: 'Break', category: 'Break', chargeCode: 'Break', chargeCodePath: 'Attentus Technologies / Break', template: 'Break from {start} to {end} ({hours} hrs).' },
+    'eod-eow-review': { label: 'EOD Review / EOW Review', category: 'EOD Review / EOW Review', chargeCode: 'Internal Meeting', chargeCodePath: 'Attentus Technologies / Internal Meeting', template: 'Completed daily or weekly operational review from {start} to {end} ({hours} hrs), including reviewing priorities, planning follow-up, and assessing service desk coverage or process needs.' }
   };
   const SAFE_ACTION_TEXT = new Set(['save', 'save and close', 'copy', 'new', 'submit', 'ok', 'delete']);
 
@@ -364,6 +366,21 @@
     return gaps.map(g => `${formatMinutes(g.start)} - ${formatMinutes(g.end)} (${g.end - g.start} min)`).join('\n');
   }
 
+  function chargeCodeForCategory(category) {
+    const mappings = {
+      'Service Desk Dispatch / Triage': { chargeCode: 'Morning/Evening Dispatch', chargeCodePath: 'Attentus Technologies / Morning/Evening Dispatch' },
+      'Queue Review / Board Cleanup': { chargeCode: 'Morning/Evening Dispatch', chargeCodePath: 'Attentus Technologies / Morning/Evening Dispatch' },
+      'AI Prompt / Automation Work': { chargeCode: 'Internal Technical', chargeCodePath: 'Attentus Technologies / Internal Technical' },
+      'Documentation / SOP / KB Updates': { chargeCode: 'Internal Technical', chargeCodePath: 'Attentus Technologies / Internal Technical' },
+      'Training / Shadowing / Coverage Handoff': { chargeCode: 'Training', chargeCodePath: 'Attentus Technologies / Training' },
+      'Internal Meeting / Review': { chargeCode: 'Internal Meeting', chargeCodePath: 'Attentus Technologies / Internal Meeting' },
+      'Time Sheet Review': { chargeCode: 'Time Sheet Review', chargeCodePath: 'Attentus Technologies / Time Sheet Review' },
+      Break: { chargeCode: 'Break', chargeCodePath: 'Attentus Technologies / Break' },
+      'EOD Review / EOW Review': { chargeCode: 'Internal Meeting', chargeCodePath: 'Attentus Technologies / Internal Meeting' }
+    };
+    return mappings[category] || { chargeCode: '', chargeCodePath: '' };
+  }
+
   function cloneDefaultTemplates() {
     return JSON.parse(JSON.stringify(DEFAULT_TEMPLATES));
   }
@@ -373,9 +390,13 @@
     const templates = {};
     Object.entries(value).forEach(([id, template]) => {
       if (!id || !template || typeof template !== 'object') return;
-      const label = String(template.label || id).trim();
+      const label = String(template.label || template.category || id).trim();
+      const category = String(template.category || label).trim();
+      const mapping = chargeCodeForCategory(category);
+      const chargeCode = String(template.chargeCode || mapping.chargeCode || '').trim();
+      const chargeCodePath = String(template.chargeCodePath || mapping.chargeCodePath || '').trim();
       const body = String(template.template || '').trim();
-      if (label && body) templates[id] = { label, template: body };
+      if (label && body) templates[id] = { label, category, chargeCode, chargeCodePath, template: body };
     });
     return Object.keys(templates).length ? templates : null;
   }
@@ -401,7 +422,7 @@
     const templates = getTemplateMap(modal);
     const selectedId = modal?.querySelector('#cwtw-note-template')?.value || loadSettings().noteTemplate;
     const fallbackId = templates[selectedId] ? selectedId : Object.keys(templates)[0];
-    const selected = templates[fallbackId] || DEFAULT_TEMPLATES.coverage;
+    const selected = templates[fallbackId] || DEFAULT_TEMPLATES[DEFAULT_SETTINGS.noteTemplate];
     return { id: fallbackId, ...selected };
   }
 
@@ -427,6 +448,9 @@
       durationMinutes: minutes,
       durationHours: Number((minutes / 60).toFixed(2)),
       templateName: template.label || template.id || 'Workbench template',
+      category: template.category || template.label || 'Workbench',
+      chargeCode: template.chargeCode || '',
+      chargeCodePath: template.chargeCodePath || '',
       noteText: generatedNotes([gap], template)
     };
   }
@@ -447,6 +471,16 @@
     const template = getSelectedTemplate(modal);
     modal.querySelector('#cwtw-template-name').value = template.label || '';
     modal.querySelector('#cwtw-template-body').value = template.template || '';
+    modal.querySelector('#cwtw-template-category').value = template.category || template.label || '';
+    modal.querySelector('#cwtw-template-charge-code').value = template.chargeCode || '';
+    modal.querySelector('#cwtw-template-charge-code-path').value = template.chargeCodePath || '';
+  }
+
+  function updateChargeCodePreview(modal) {
+    const preview = modal.querySelector('#cwtw-charge-code-preview');
+    if (!preview) return;
+    const template = getSelectedTemplate(modal);
+    preview.textContent = `Charge Code: ${template.chargeCode || '(none)'}`;
   }
 
   function refreshTemplateDropdown(modal, selectedId) {
@@ -470,6 +504,113 @@
     if (typeof GM_setClipboard === 'function') return GM_setClipboard(text, 'text');
     if (typeof GM !== 'undefined' && GM.setClipboard) return GM.setClipboard(text, 'text');
     return navigator.clipboard.writeText(text);
+  }
+
+  const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+  async function waitUntil(fn, tries = 30, delay = 60) {
+    for (let i = 0; i < tries; i += 1) {
+      const value = fn();
+      if (value) return value;
+      await sleep(delay);
+    }
+    return null;
+  }
+
+  function visibleElements(selector, root = document) {
+    return Array.from(root.querySelectorAll(selector)).filter(isVisible);
+  }
+
+  function normValue(value) {
+    return normalize(value).replace(/\s*\/\s*/g, ' / ');
+  }
+
+  function isChargeCodeValueMatch(actual, fill) {
+    const actualNorm = normValue(actual);
+    const codeNorm = normValue(fill.chargeCode);
+    const pathNorm = normValue(fill.chargeCodePath);
+    return !!actualNorm && (actualNorm === codeNorm || actualNorm === pathNorm || actualNorm.endsWith(` / ${codeNorm}`));
+  }
+
+  function findInputByLabel(labelText) {
+    const needle = normalize(String(labelText).replace(/[:?]\s*$/, ''));
+    const labelSelectors = '.mm_label, .cw_CwLabel, label, [id$="-label"], [class*="label"], [class*="Label"]';
+    for (const label of visibleElements(labelSelectors)) {
+      const labelValue = normalize(textOf(label).replace(/[:?]\s*$/, ''));
+      if (labelValue !== needle) continue;
+      const row = label.closest('.pod-element-row, tr, li, .form-group, .row, div') || label.parentElement;
+      const input = row && visibleElements('input:not([type="hidden"]), textarea, [contenteditable="true"]', row)[0];
+      if (input) return input;
+    }
+    return null;
+  }
+
+  function findChargeCodeInput() {
+    const selectorMatches = visibleElements('input[class*="ChargeCode"], input[id*="ChargeCode"], input[name*="ChargeCode"], input[aria-label="Charge Code"]')
+      .filter(input => !/chargeto/i.test(`${input.className} ${input.id} ${input.name}`));
+    if (selectorMatches.length === 1) return selectorMatches[0];
+    return findInputByLabel('Charge Code');
+  }
+
+  function openComboPopup(input) {
+    const before = new Set(visibleElements('.k-animation-container, .k-popup, .select2-container--open, [data-popup-open="true"], .x-layer, .x-menu-floating, .x-combo-list, .GMDB3DUBPDJ.GMDB3DUBGFJ'));
+    const button = input.closest('div')?.querySelector('.k-select, .k-input-button, button[aria-haspopup="listbox"], .GMDB3DUBHWH');
+    if (button && isVisible(button)) {
+      button.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      button.click();
+      button.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    } else {
+      input.focus();
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', code: 'ArrowDown', bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent('keyup', { key: 'ArrowDown', code: 'ArrowDown', bubbles: true }));
+    }
+    return waitUntil(() => {
+      const after = visibleElements('.k-animation-container, .k-popup, .select2-container--open, [data-popup-open="true"], .x-layer, .x-menu-floating, .x-combo-list, .GMDB3DUBPDJ.GMDB3DUBGFJ');
+      return after.find(el => !before.has(el)) || after.at(-1);
+    }, 15, 50);
+  }
+
+  function exactChargeCodeOptions(container, fill) {
+    const wanted = [fill.chargeCodePath, fill.chargeCode].filter(Boolean).map(normValue);
+    const optionSelector = '[role="option"], .k-list-item, .k-item, .select2-results__option, li, div, span';
+    const matches = visibleElements(optionSelector, container)
+      .filter(el => wanted.includes(normValue(textOf(el))))
+      .map(el => el.closest('[role="option"], .k-list-item, .k-item, .select2-results__option, li') || el);
+    return Array.from(new Set(matches));
+  }
+
+  function setComboSearchValue(input, value) {
+    const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+    if (descriptor?.set) descriptor.set.call(input, value);
+    else input.value = value;
+    input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  async function setChargeCode(fill) {
+    if (!fill.chargeCode) return { ok: false, message: 'No Charge Code was stored with this pending fill.' };
+    const input = findChargeCodeInput();
+    if (!input) return { ok: false, message: 'Charge Code field was not found.' };
+    if (isChargeCodeValueMatch(input.value || textOf(input), fill)) return { ok: true, message: `Charge Code already set to ${fill.chargeCode}.` };
+
+    input.focus();
+    setComboSearchValue(input, fill.chargeCode);
+    const popup = await openComboPopup(input);
+    if (!popup) return { ok: false, message: `Charge Code popup did not open for ${fill.chargeCode}.` };
+
+    const matches = exactChargeCodeOptions(popup, fill);
+    if (matches.length !== 1) return { ok: false, message: `Charge Code not set: expected exactly one match for ${fill.chargeCode}, found ${matches.length}.` };
+
+    matches[0].dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    matches[0].click();
+    matches[0].dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    input.blur();
+    await sleep(250);
+
+    const actual = input.value || textOf(input);
+    if (!isChargeCodeValueMatch(actual, fill)) return { ok: false, message: `Charge Code verification failed. Expected ${fill.chargeCode}; current value is ${actual || '(blank)'}.` };
+    return { ok: true, message: `Charge Code filled: ${fill.chargeCode}.` };
   }
 
   function dispatchTextEvents(input) {
@@ -522,6 +663,7 @@
       <div class="cwtw-panel-title">CW Timesheet Workbench</div>
       <div class="cwtw-panel-note">Pending fill: ${escapeHtml(fill.startText)} - ${escapeHtml(fill.endText)} (${escapeHtml(String(fill.durationHours))} hrs)</div>
       <div class="cwtw-panel-note">Template: ${escapeHtml(fill.templateName)}</div>
+      <div class="cwtw-panel-note">Charge Code: ${escapeHtml(fill.chargeCode || '(none)')}</div>
       <button id="cwtw-fill-current" type="button">Fill Times + Copy Note</button>
       <button id="cwtw-copy-pending-note" type="button">Copy Note</button>
       <button id="cwtw-clear-pending" type="button">Clear Pending Fill</button>
@@ -562,6 +704,8 @@
           <tr><th>End Time</th><td>${escapeHtml(fill.endText)}</td></tr>
           <tr><th>Duration</th><td>${escapeHtml(String(fill.durationHours))} hrs (${escapeHtml(String(fill.durationMinutes))} min)</td></tr>
           <tr><th>Template</th><td>${escapeHtml(fill.templateName)}</td></tr>
+          <tr><th>Category</th><td>${escapeHtml(fill.category || fill.templateName)}</td></tr>
+          <tr><th>Charge Code</th><td>${escapeHtml(fill.chargeCode || '(none)')}</td></tr>
         </tbody></table>
         <h3>Note preview</h3>
         <textarea readonly>${escapeHtml(fill.noteText)}</textarea>
@@ -638,22 +782,23 @@ ConnectWise Actual Hours: ${detectedHours}.`;
     modal.id = MODAL_ID;
     modal.innerHTML = `
       <div class="cwtw-dialog" role="dialog" aria-modal="true" aria-label="Timesheet Workbench">
-        <h2>Timesheet Workbench <span class="cwtw-note">manual-fill v0.2.4</span></h2>
+        <h2>Timesheet Workbench <span class="cwtw-note">manual-fill v0.2.5</span></h2>
         <div class="cwtw-status ${error ? 'cwtw-error' : ''}">${escapeHtml(error || `Total missing time: ${minutesLabel(sumMinutes(gaps))}`)}</div>
         ${pending ? renderPendingFillSummary(pending) : ''}
         <h3>Detected gaps</h3>${renderGapCards(gaps)}
         <h3>Template</h3>
-        <div class="cwtw-row"><select id="cwtw-note-template">${renderTemplateOptions(templates, selectedTemplateId)}</select><button id="cwtw-copy-generated" type="button">Copy Note</button><button id="cwtw-refresh" type="button">Refresh</button><span id="cwtw-copy-status" class="cwtw-note"></span></div>
+        <div class="cwtw-row"><select id="cwtw-note-template">${renderTemplateOptions(templates, selectedTemplateId)}</select><span id="cwtw-charge-code-preview" class="cwtw-note">Charge Code: ${escapeHtml((templates[selectedTemplateId] || {}).chargeCode || '(none)')}</span><button id="cwtw-copy-generated" type="button">Copy Note</button><button id="cwtw-refresh" type="button">Refresh</button><span id="cwtw-copy-status" class="cwtw-note"></span></div>
         <h3>Generated note preview</h3>
         <textarea id="cwtw-generated-notes" readonly>${escapeHtml(generatedNotes(gaps.slice(0, 1), { id: selectedTemplateId, ...templates[selectedTemplateId] }))}</textarea>
         <details class="cwtw-advanced">
           <summary>Advanced / Debug</summary>
           <div class="cwtw-row"><label>Minimum gap minutes <input id="cwtw-min-gap" type="number" min="1" max="240" step="1" value="${settings.minGapMinutes}"></label><label><input id="cwtw-boundary-enabled" type="checkbox" ${settings.useWorkdayBoundary ? 'checked' : ''}> Limit to workday</label><label>Start <input id="cwtw-boundary-start" type="text" value="${escapeHtml(settings.workdayStart)}"></label><label>End <input id="cwtw-boundary-end" type="text" value="${escapeHtml(settings.workdayEnd)}"></label><label><input id="cwtw-debug" type="checkbox" ${settings.debug ? 'checked' : ''}> Debug logging</label></div>
-          <div class="cwtw-note">This v0.2.4 script never clicks ConnectWise Save, Copy, New, Submit, OK, Delete, or other action buttons. It stores a pending fill and, only after confirmation on a Time Entry page, fills Start Time and End Time while copying Notes for manual paste/review.</div>
+          <div class="cwtw-note">This v0.2.5 script never clicks ConnectWise Save, Copy, New, Submit, OK, Delete, or other action buttons. It stores a pending fill and, only after confirmation on a Time Entry page, fills Start Time, End Time, and exactly one verified Charge Code match while copying Notes for manual paste/review.</div>
           <h3>Existing intervals</h3>${renderIntervalTable(merged)}
           <h3>Raw Start/End candidates</h3>${renderCandidateTable(candidates)}
           <h3>Template settings</h3>
-          <div class="cwtw-row"><label>Template name <input id="cwtw-template-name" class="cwtw-template-name" type="text"></label></div>
+          <div class="cwtw-row"><label>Template name <input id="cwtw-template-name" class="cwtw-template-name" type="text"></label><label>Category <input id="cwtw-template-category" class="cwtw-template-name" type="text"></label></div>
+          <div class="cwtw-row"><label>Charge Code <input id="cwtw-template-charge-code" class="cwtw-template-name" type="text"></label><label>Path <input id="cwtw-template-charge-code-path" class="cwtw-template-name" type="text"></label></div>
           <textarea id="cwtw-template-body" class="cwtw-template-body" placeholder="Use {start}, {end}, {minutes}, and {hours} tokens."></textarea>
           <div class="cwtw-row"><button id="cwtw-save-template" type="button">Add / Update Template</button><button id="cwtw-delete-template" type="button">Delete Template</button><button id="cwtw-reset-templates" type="button">Reset Templates to Defaults</button><span id="cwtw-template-status" class="cwtw-note"></span></div>
           <h3>Reference gap text</h3><textarea id="cwtw-readable" readonly>${escapeHtml(gapText(gaps))}</textarea>
@@ -670,6 +815,7 @@ ConnectWise Actual Hours: ${detectedHours}.`;
     modal.querySelector('#cwtw-note-template').addEventListener('change', () => {
       saveSettings({ ...loadSettings(), noteTemplate: modal.querySelector('#cwtw-note-template').value });
       fillTemplateEditor(modal);
+      updateChargeCodePreview(modal);
       updateGapNotes(modal, gaps);
     });
     wireTemplateButtons(modal, gaps);
@@ -703,13 +849,17 @@ ConnectWise Actual Hours: ${detectedHours}.`;
       const status = modal.querySelector('#cwtw-template-status');
       const name = modal.querySelector('#cwtw-template-name').value.trim();
       const body = modal.querySelector('#cwtw-template-body').value.trim();
+      const category = modal.querySelector('#cwtw-template-category').value.trim() || name;
+      const mapping = chargeCodeForCategory(category);
+      const chargeCode = modal.querySelector('#cwtw-template-charge-code').value.trim() || mapping.chargeCode;
+      const chargeCodePath = modal.querySelector('#cwtw-template-charge-code-path').value.trim() || mapping.chargeCodePath;
       if (!name || !body) { status.textContent = 'Template name and body are required.'; return; }
       const currentId = modal.querySelector('#cwtw-note-template').value;
       const templates = getTemplateMap(modal);
       const currentTemplate = templates[currentId];
       const matchingId = Object.keys(templates).find(templateId => templates[templateId].label === name);
       const id = matchingId || (currentTemplate?.label === name ? currentId : templateIdFromName(name, templates));
-      modal._cwtwTemplates = { ...templates, [id]: { label: name, template: body } };
+      modal._cwtwTemplates = { ...templates, [id]: { label: name, category, chargeCode, chargeCodePath, template: body } };
       saveTemplates(modal._cwtwTemplates);
       refreshTemplateDropdown(modal, id);
       saveSettings({ ...loadSettings(), noteTemplate: id });
@@ -727,6 +877,7 @@ ConnectWise Actual Hours: ${detectedHours}.`;
       refreshTemplateDropdown(modal, nextId);
       saveSettings({ ...loadSettings(), noteTemplate: nextId });
       fillTemplateEditor(modal);
+      updateChargeCodePreview(modal);
       updateGapNotes(modal, gaps);
       status.textContent = 'Template deleted.';
     });
@@ -737,6 +888,7 @@ ConnectWise Actual Hours: ${detectedHours}.`;
       refreshTemplateDropdown(modal, nextId);
       saveSettings({ ...loadSettings(), noteTemplate: nextId });
       fillTemplateEditor(modal);
+      updateChargeCodePreview(modal);
       updateGapNotes(modal, gaps);
       modal.querySelector('#cwtw-template-status').textContent = 'Templates reset to defaults.';
     });
@@ -749,7 +901,7 @@ ConnectWise Actual Hours: ${detectedHours}.`;
     modal.id = MODAL_ID;
     modal.innerHTML = `
       <div class="cwtw-dialog" role="dialog" aria-modal="true" aria-label="Timesheet Workbench">
-        <h2>Timesheet Workbench <span class="cwtw-note">manual-fill v0.2.4</span></h2>
+        <h2>Timesheet Workbench <span class="cwtw-note">manual-fill v0.2.5</span></h2>
         <div class="cwtw-status">Open Daily Time Entries to scan for gaps.</div>
         <div class="cwtw-actions"><button id="cwtw-close" type="button">Close</button></div>
       </div>`;
@@ -759,7 +911,7 @@ ConnectWise Actual Hours: ${detectedHours}.`;
   }
 
   function renderPendingFillSummary(fill) {
-    return `<div class="cwtw-status cwtw-success"><strong>Pending fill saved.</strong><br>Open a new Time Entry, then click Fill Times + Copy Note.<br>Pending: ${escapeHtml(fill.startText)} - ${escapeHtml(fill.endText)}<br>Template: ${escapeHtml(fill.templateName)}<br><button id="cwtw-clear-pending" type="button">Clear Pending Fill</button></div>`;
+    return `<div class="cwtw-status cwtw-success"><strong>Pending fill saved.</strong><br>Open a new Time Entry, then click Fill Times + Copy Note.<br>Pending: ${escapeHtml(fill.startText)} - ${escapeHtml(fill.endText)}<br>Template: ${escapeHtml(fill.templateName)}<br>Charge Code: ${escapeHtml(fill.chargeCode || '(none)')}<br><button id="cwtw-clear-pending" type="button">Clear Pending Fill</button></div>`;
   }
 
   function renderGapCards(gaps) {
