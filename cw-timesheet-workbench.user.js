@@ -407,8 +407,18 @@
   }
 
   function gapText(gaps) {
-    if (!gaps.length) return 'No gaps detected.';
+    if (!gaps.length) return 'No gaps selected.';
     return gaps.map(g => `${formatMinutes(g.start)} - ${formatMinutes(g.end)} (${g.end - g.start} min)`).join('\n');
+  }
+
+  function getSelectedGaps(modal, gaps) {
+    return gaps.filter((_, index) => modal.querySelector(`.cwtw-gap-select[data-gap-index="${index}"]`)?.checked);
+  }
+
+  function updateGapNotes(modal, gaps) {
+    const selectedGaps = getSelectedGaps(modal, gaps);
+    modal.querySelector('#cwtw-readable').value = gapText(selectedGaps);
+    modal.querySelector('#cwtw-json').value = gapJson(selectedGaps);
   }
 
   async function copyText(text) {
@@ -441,7 +451,7 @@
         <div class="cwtw-note">This v0.1 script is read-only: it never clicks ConnectWise Save, Copy, New, Submit, OK, Delete, or other action buttons, and it never modifies ConnectWise fields. Workday limits are optional and disabled by default; when disabled, gaps are calculated only between existing visible entries.</div>
         <h3>Summary</h3><table><tbody><tr><th>Total logged from merged intervals</th><td>${minutesLabel(sumMinutes(merged))}</td></tr><tr><th>Total detected gap time</th><td>${minutesLabel(sumMinutes(gaps))}</td></tr></tbody></table>
         <h3>Existing intervals</h3>${renderIntervalTable(merged)}
-        <h3>Detected gaps</h3>${renderIntervalTable(gaps)}
+        <h3>Detected gaps</h3>${renderGapTable(gaps)}
         <h3>Human-readable gaps</h3><textarea id="cwtw-readable" readonly>${escapeHtml(gapText(gaps))}</textarea>
         <h3>Copyable gap JSON</h3><textarea id="cwtw-json" readonly>${escapeHtml(gapJson(gaps))}</textarea>
         <div class="cwtw-actions"><span id="cwtw-copy-status" class="cwtw-note"></span><button id="cwtw-copy-readable" type="button">Copy Gap Text</button><button id="cwtw-copy-json" type="button">Copy JSON</button><button id="cwtw-close" type="button">Close</button></div>
@@ -449,6 +459,9 @@
     document.body.appendChild(modal);
     modal.addEventListener('click', event => { if (event.target === modal) modal.remove(); });
     modal.querySelector('#cwtw-close').addEventListener('click', () => modal.remove());
+    modal.querySelectorAll('.cwtw-gap-select').forEach(checkbox => {
+      checkbox.addEventListener('change', () => updateGapNotes(modal, gaps));
+    });
     modal.querySelector('#cwtw-refresh').addEventListener('click', () => {
       saveSettings({ minGapMinutes: modal.querySelector('#cwtw-min-gap').value, debug: modal.querySelector('#cwtw-debug').checked, useWorkdayBoundary: modal.querySelector('#cwtw-boundary-enabled').checked, workdayStart: modal.querySelector('#cwtw-boundary-start').value, workdayEnd: modal.querySelector('#cwtw-boundary-end').value });
       showWorkbench();
@@ -484,6 +497,14 @@
   function renderIntervalTable(items) {
     if (!items.length) return '<div class="cwtw-status">None detected.</div>';
     return `<table><thead><tr><th>Start</th><th>End</th><th>Duration</th></tr></thead><tbody>${items.map(item => `<tr><td>${formatMinutes(item.start)}</td><td>${formatMinutes(item.end)}</td><td>${item.end - item.start} min</td></tr>`).join('')}</tbody></table>`;
+  }
+
+  function renderGapTable(gaps) {
+    if (!gaps.length) return '<div class="cwtw-status">None detected.</div>';
+    return `<table><thead><tr><th>Select</th><th>Start</th><th>End</th><th>Minutes</th><th>Decimal hours</th></tr></thead><tbody>${gaps.map((gap, index) => {
+      const minutes = gap.end - gap.start;
+      return `<tr><td><input class="cwtw-gap-select" type="checkbox" checked data-gap-index="${index}" aria-label="Include gap ${index + 1}"></td><td>${formatMinutes(gap.start)}</td><td>${formatMinutes(gap.end)}</td><td>${minutes}</td><td>${(minutes / 60).toFixed(2)}</td></tr>`;
+    }).join('')}</tbody></table>`;
   }
 
   function escapeHtml(value) {
