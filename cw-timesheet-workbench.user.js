@@ -344,10 +344,32 @@
   }
 
   function calculateGaps(merged, minGapMinutes, boundary) {
-    const bounded = applyWorkdayBoundary(merged, boundary);
+    if (!boundary) return calculateBetweenIntervalGaps(merged, minGapMinutes);
+
+    const bounded = mergeIntervals(applyWorkdayBoundary(merged, boundary));
     const gaps = [];
-    for (let i = 0; i < bounded.length - 1; i += 1) {
-      const gap = { start: bounded[i].end, end: bounded[i + 1].start };
+
+    if (!bounded.length) {
+      const gap = { start: boundary.start, end: boundary.end };
+      if (gap.end - gap.start >= minGapMinutes) gaps.push(gap);
+      return gaps;
+    }
+
+    const leadingGap = { start: boundary.start, end: bounded[0].start };
+    if (leadingGap.end - leadingGap.start >= minGapMinutes) gaps.push(leadingGap);
+
+    gaps.push(...calculateBetweenIntervalGaps(bounded, minGapMinutes));
+
+    const trailingGap = { start: bounded[bounded.length - 1].end, end: boundary.end };
+    if (trailingGap.end - trailingGap.start >= minGapMinutes) gaps.push(trailingGap);
+
+    return gaps;
+  }
+
+  function calculateBetweenIntervalGaps(intervals, minGapMinutes) {
+    const gaps = [];
+    for (let i = 0; i < intervals.length - 1; i += 1) {
+      const gap = { start: intervals[i].end, end: intervals[i + 1].start };
       if (gap.end - gap.start >= minGapMinutes) gaps.push(gap);
     }
     return gaps;
