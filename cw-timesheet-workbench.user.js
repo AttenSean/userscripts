@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         CW Timesheet Workbench
 // @namespace    https://github.com/AttentusTechnologies/userscripts
-// @version      0.1.1
-// @description  Read-only ConnectWise Manage Daily Time Entries gap finder and JSON preview. Does not click ConnectWise Save, Copy, Submit, Delete, or modify ConnectWise data.
+// @version      0.2.2
+// @description  ConnectWise Manage Daily Time Entries gap finder with confirmed Time Entry time fill and note clipboard. Does not click ConnectWise Save, Copy, Submit, Delete, or modify ConnectWise data via API.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.myconnectwise.com/*
 // @run-at       document-idle
@@ -19,9 +19,11 @@
   const APP = 'cw-timesheet-workbench';
   const BUTTON_ID = `${APP}-button`;
   const MODAL_ID = `${APP}-modal`;
+  const FILL_PANEL_ID = `${APP}-fill-panel`;
   const STYLE_ID = `${APP}-style`;
   const SETTINGS_KEY = `${APP}:settings:v1`;
   const TEMPLATES_KEY = `${APP}:note-templates:v1`;
+  const PENDING_FILL_KEY = `${APP}:pendingFill:v1`;
   const SCROLLER_SEL = '#mytimesheetdaygrid-listview-scroller';
   const START_CELL_SEL = 'td[cellindex="4"]';
   const END_CELL_SEL = 'td[cellindex="5"]';
@@ -54,6 +56,25 @@
     }));
   }
 
+  function getPendingFill() {
+    try {
+      const fill = JSON.parse(localStorage.getItem(PENDING_FILL_KEY) || 'null');
+      if (!fill || typeof fill !== 'object' || fill.source !== 'CW Timesheet Workbench') return null;
+      if (!fill.startText || !fill.endText || !fill.noteText) return null;
+      return fill;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function setPendingFill(fill) {
+    localStorage.setItem(PENDING_FILL_KEY, JSON.stringify(fill));
+  }
+
+  function clearPendingFill() {
+    localStorage.removeItem(PENDING_FILL_KEY);
+  }
+
   function log(...args) {
     if (loadSettings().debug) console.log('[CW Timesheet Workbench]', ...args);
   }
@@ -79,6 +100,35 @@
     return hasDailyTimeEntriesGrid();
   }
 
+  function isTimeEntryPage() {
+    return !!(document.querySelector('.cw_startTime') && document.querySelector('.cw_endTime') && document.querySelector('.cw_hours'));
+  }
+
+  function findSingleVisible(selector, label) {
+    const matches = Array.from(document.querySelectorAll(selector)).filter(isVisible);
+    if (matches.length !== 1) throw new Error(`${label}: expected exactly one visible match, found ${matches.length}.`);
+    return matches[0];
+  }
+
+  function inputFromContainer(container, label) {
+    if (!container) throw new Error(`${label} was not found.`);
+    if (/^(input|textarea)$/i.test(container.tagName)) return container;
+    const inputs = Array.from(container.querySelectorAll('input, textarea')).filter(isVisible);
+    if (inputs.length !== 1) throw new Error(`${label}: expected exactly one visible input, found ${inputs.length}.`);
+    return inputs[0];
+  }
+
+  function findTimeEntryFields() {
+    const startContainer = findSingleVisible('.cw_startTime', 'Start Time field');
+    const endContainer = findSingleVisible('.cw_endTime', 'End Time field');
+    const hoursContainer = findSingleVisible('.cw_hours', 'Actual Hours field');
+    return {
+      startInput: inputFromContainer(startContainer, 'Start Time field'),
+      endInput: inputFromContainer(endContainer, 'End Time field'),
+      hoursContainer
+    };
+  }
+
   function isVisible(el) {
     if (!el || !el.getClientRects().length) return false;
     const style = getComputedStyle(el);
@@ -93,6 +143,11 @@
       #${BUTTON_ID}{padding:7px 11px;border:1px solid #2271b1;border-radius:999px;background:#f0f6fc;color:#135e96;font:12px/1.2 Arial,sans-serif;cursor:pointer}
       #${BUTTON_ID}.cwtw-fixed-button{position:fixed;right:20px;bottom:20px;top:auto;z-index:2147483645;box-shadow:0 4px 14px rgba(0,0,0,.35)}
       #${BUTTON_ID}:hover{background:#dbeffd}
+      #${FILL_PANEL_ID}{position:fixed;right:20px;bottom:20px;z-index:2147483645;box-sizing:border-box;width:260px;padding:10px;border:1px solid #2271b1;border-radius:8px;background:#fff;color:#1f2933;box-shadow:0 4px 14px rgba(0,0,0,.35);font:12px/1.35 Arial,sans-serif}
+      #${FILL_PANEL_ID} .cwtw-panel-title{font-weight:bold;margin-bottom:5px}
+      #${FILL_PANEL_ID} .cwtw-panel-note{color:#57606a;margin:5px 0}
+      #${FILL_PANEL_ID} .cwtw-panel-status{margin-top:6px;padding:6px;border:1px solid #d0d7de;border-radius:4px;background:#f6f8fa;white-space:pre-wrap}
+      #${FILL_PANEL_ID} button{margin:4px 4px 0 0;padding:5px 8px;cursor:pointer}
       #${MODAL_ID}{position:fixed;inset:0;z-index:2147483646;background:rgba(0,0,0,.35);font:13px/1.4 Arial,sans-serif;color:#1f2933}
       #${MODAL_ID} .cwtw-dialog{box-sizing:border-box;width:min(900px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow:auto;margin:16px auto;background:#fff;border-radius:8px;box-shadow:0 12px 40px rgba(0,0,0,.35);padding:16px}
       #${MODAL_ID} h2{margin:0 0 8px;font-size:18px} #${MODAL_ID} h3{margin:16px 0 6px;font-size:14px}
@@ -102,7 +157,7 @@
       #${MODAL_ID} #cwtw-generated-notes{min-height:160px;font-size:13px;border:2px solid #2271b1;background:#f8fbff}
       #${MODAL_ID} table{width:100%;border-collapse:collapse;margin:6px 0} #${MODAL_ID} th,#${MODAL_ID} td{border:1px solid #d0d7de;padding:4px 6px;text-align:left;vertical-align:top}
       #${MODAL_ID} th{background:#f6f8fa} #${MODAL_ID} .cwtw-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px;position:sticky;bottom:0;background:#fff;padding-top:8px}
-      #${MODAL_ID} button{padding:5px 10px;cursor:pointer} #${MODAL_ID} .cwtw-status{padding:8px;border-radius:4px;background:#f6f8fa;border:1px solid #d0d7de}.cwtw-error{background:#fff5f5!important;border-color:#f2a6a6!important;color:#8a1f11}.cwtw-note{color:#57606a;font-size:12px}`;
+      #${MODAL_ID} button{padding:5px 10px;cursor:pointer} #${MODAL_ID} .cwtw-status{padding:8px;border-radius:4px;background:#f6f8fa;border:1px solid #d0d7de}.cwtw-error{background:#fff5f5!important;border-color:#f2a6a6!important;color:#8a1f11}.cwtw-success{background:#f0fff4!important;border-color:#95d5a6!important;color:#0f5132}.cwtw-note{color:#57606a;font-size:12px}`;
     document.head.appendChild(style);
   }
 
@@ -110,19 +165,21 @@
     logStartupState();
     if (!isDailyTimeEntriesPage()) {
       document.getElementById(BUTTON_ID)?.remove();
-      return;
+    } else if (!document.getElementById(BUTTON_ID)) {
+      ensureStyles();
+      const button = document.createElement('button');
+      button.id = BUTTON_ID;
+      button.type = 'button';
+      button.textContent = 'Timesheet Workbench';
+      button.addEventListener('click', (event) => { event.preventDefault(); event.stopPropagation(); showWorkbench(); });
+      button.classList.add('cwtw-fixed-button');
+      button.setAttribute('aria-label', 'Open Timesheet Workbench');
+      document.body.appendChild(button);
+      log('Injected fixed workbench button.');
     }
-    if (document.getElementById(BUTTON_ID)) return;
-    ensureStyles();
-    const button = document.createElement('button');
-    button.id = BUTTON_ID;
-    button.type = 'button';
-    button.textContent = 'Timesheet Workbench';
-    button.addEventListener('click', (event) => { event.preventDefault(); event.stopPropagation(); showWorkbench(); });
-    button.classList.add('cwtw-fixed-button');
-    button.setAttribute('aria-label', 'Open Timesheet Workbench');
-    document.body.appendChild(button);
-    log('Injected fixed workbench button.');
+
+    if (isTimeEntryPage()) injectTimeEntryFillPanel();
+    else document.getElementById(FILL_PANEL_ID)?.remove();
   }
 
   function scheduleInject() {
@@ -473,6 +530,20 @@
     }).join('\n');
   }
 
+  function buildPendingFill(gap, template) {
+    const minutes = gap.end - gap.start;
+    return {
+      source: 'CW Timesheet Workbench',
+      createdAt: new Date().toISOString(),
+      startText: formatMinutes(gap.start),
+      endText: formatMinutes(gap.end),
+      durationMinutes: minutes,
+      durationHours: Number((minutes / 60).toFixed(2)),
+      templateName: template.label || template.id || 'Workbench template',
+      noteText: generatedNotes([gap], template)
+    };
+  }
+
   function renderTemplateOptions(templates, selectedId) {
     return Object.entries(templates).map(([id, template]) => `<option value="${escapeHtml(id)}" ${id === selectedId ? 'selected' : ''}>${escapeHtml(template.label)}</option>`).join('');
   }
@@ -514,6 +585,145 @@
     return navigator.clipboard.writeText(text);
   }
 
+  function dispatchTextEvents(input) {
+    ['keydown', 'keypress', 'keyup'].forEach(type => input.dispatchEvent(new KeyboardEvent(type, { bubbles: true, cancelable: true, key: 'Tab' })));
+    ['input', 'change'].forEach(type => input.dispatchEvent(new Event(type, { bubbles: true, cancelable: true })));
+    input.blur();
+    input.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
+  }
+
+  function setTextInputValue(inputOrWrapper, value) {
+    const input = /^(input|textarea)$/i.test(inputOrWrapper?.tagName || '') ? inputOrWrapper : inputFromContainer(inputOrWrapper, 'Time field');
+    const prototype = input.tagName.toLowerCase() === 'textarea' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, 'value');
+    input.focus();
+    if (descriptor?.set) descriptor.set.call(input, value);
+    else input.value = value;
+    dispatchTextEvents(input);
+  }
+
+  async function copyPendingNoteText(noteText) {
+    // ConnectWise Notes is a React/Draft.js editor. Live testing showed direct DOM
+    // mutation/execCommand can corrupt Draft.js state and make the editor disappear,
+    // so notes are clipboard-only until a supported ConnectWise editor API is known.
+    await copyText(noteText);
+    const focusMessage = focusNotesEditor();
+    return `Note copied to clipboard. ${focusMessage}`;
+  }
+
+  function findNotesEditor() {
+    return document.querySelector('.public-DraftEditor-content[role="textbox"]') ||
+      document.querySelector('.ManageNoteRichTextEditor-richEditor');
+  }
+
+  function focusNotesEditor() {
+    const editor = findNotesEditor();
+    if (!editor || !isVisible(editor)) return 'Could not find the Notes editor; paste the note manually after opening Notes.';
+    editor.focus();
+    return 'The Notes editor was focused. Press Ctrl+V to paste the note.';
+  }
+
+  function injectTimeEntryFillPanel() {
+    if (!isTimeEntryPage()) return;
+    ensureStyles();
+    const existing = document.getElementById(FILL_PANEL_ID);
+    if (existing) existing.remove();
+    const fill = getPendingFill();
+    const panel = document.createElement('div');
+    panel.id = FILL_PANEL_ID;
+    panel.innerHTML = fill ? `
+      <div class="cwtw-panel-title">CW Timesheet Workbench</div>
+      <div class="cwtw-panel-note">Pending fill: ${escapeHtml(fill.startText)} - ${escapeHtml(fill.endText)} (${escapeHtml(String(fill.durationHours))} hrs)</div>
+      <button id="cwtw-fill-current" type="button">Fill From Workbench</button>
+      <button id="cwtw-clear-pending" type="button">Clear Pending Fill</button>
+      <button id="cwtw-copy-pending-note" type="button">Copy Pending Note</button>
+      <button id="cwtw-focus-notes" type="button">Focus Notes</button>
+      <div id="cwtw-fill-status" class="cwtw-panel-status">Manual review required. This script will not save.</div>` : `
+      <div class="cwtw-panel-title">CW Timesheet Workbench</div>
+      <div class="cwtw-panel-note">No pending Workbench fill</div>
+      <div class="cwtw-panel-note">Open Daily Time Entries and select a gap first.</div>`;
+    document.body.appendChild(panel);
+    if (!fill) return;
+    panel.querySelector('#cwtw-fill-current').addEventListener('click', () => showFillPreview(fill));
+    panel.querySelector('#cwtw-clear-pending').addEventListener('click', () => {
+      clearPendingFill();
+      injectTimeEntryFillPanel();
+    });
+    panel.querySelector('#cwtw-copy-pending-note').addEventListener('click', async () => {
+      const status = panel.querySelector('#cwtw-fill-status');
+      try { status.textContent = await copyPendingNoteText(fill.noteText); }
+      catch (copyError) { status.textContent = `Copy failed: ${copyError.message || copyError}`; }
+    });
+    panel.querySelector('#cwtw-focus-notes').addEventListener('click', () => {
+      panel.querySelector('#cwtw-fill-status').textContent = focusNotesEditor();
+    });
+  }
+
+  function showFillPreview(fill) {
+    ensureStyles();
+    const existing = document.getElementById(MODAL_ID);
+    if (existing) existing.remove();
+    const modal = document.createElement('div');
+    modal.id = MODAL_ID;
+    modal.innerHTML = `
+      <div class="cwtw-dialog" role="dialog" aria-modal="true" aria-label="Fill From Workbench Preview">
+        <h2>Fill From Workbench</h2>
+        <div class="cwtw-status">Confirm before changing fields. This fills Start Time and End Time only, then copies the note to your clipboard and focuses Notes for manual paste. It does not save.</div>
+        <table><tbody>
+          <tr><th>Start Time</th><td>${escapeHtml(fill.startText)}</td></tr>
+          <tr><th>End Time</th><td>${escapeHtml(fill.endText)}</td></tr>
+          <tr><th>Duration</th><td>${escapeHtml(String(fill.durationHours))} hrs (${escapeHtml(String(fill.durationMinutes))} min)</td></tr>
+          <tr><th>Template</th><td>${escapeHtml(fill.templateName)}</td></tr>
+        </tbody></table>
+        <h3>Note text</h3>
+        <textarea readonly>${escapeHtml(fill.noteText)}</textarea>
+        <div class="cwtw-status">Notes are not inserted automatically because the ConnectWise Draft.js editor can crash if mutated directly. Paste the copied note manually, then review all fields before saving in ConnectWise.</div>
+        <div id="cwtw-preview-status" class="cwtw-status" style="display:none"></div>
+        <div class="cwtw-actions"><button id="cwtw-confirm-fill" type="button">Confirm Fill Fields</button><button id="cwtw-preview-copy-note" type="button">Copy Pending Note</button><button id="cwtw-preview-focus-notes" type="button">Focus Notes</button><button id="cwtw-close" type="button">Cancel</button></div>
+      </div>`;
+    document.body.appendChild(modal);
+    modal.addEventListener('click', event => { if (event.target === modal) modal.remove(); });
+    modal.querySelector('#cwtw-close').addEventListener('click', () => modal.remove());
+    modal.querySelector('#cwtw-preview-copy-note').addEventListener('click', async () => {
+      try { modal.querySelector('#cwtw-preview-status').style.display = ''; modal.querySelector('#cwtw-preview-status').textContent = await copyPendingNoteText(fill.noteText); }
+      catch (copyError) { modal.querySelector('#cwtw-preview-status').style.display = ''; modal.querySelector('#cwtw-preview-status').textContent = `Copy failed: ${copyError.message || copyError}`; }
+    });
+    modal.querySelector('#cwtw-preview-focus-notes').addEventListener('click', () => {
+      modal.querySelector('#cwtw-preview-status').style.display = '';
+      modal.querySelector('#cwtw-preview-status').textContent = focusNotesEditor();
+    });
+    modal.querySelector('#cwtw-confirm-fill').addEventListener('click', async () => {
+      const status = modal.querySelector('#cwtw-preview-status');
+      status.style.display = '';
+      status.textContent = 'Filling fields...';
+      try {
+        const result = await fillCurrentTimeEntry(fill);
+        modal.remove();
+        injectTimeEntryFillPanel();
+        const panelStatus = document.querySelector(`#${FILL_PANEL_ID} #cwtw-fill-status`);
+        if (panelStatus) panelStatus.textContent = result;
+        focusNotesEditor();
+      } catch (fillError) {
+        status.classList.add('cwtw-error');
+        status.textContent = `Fill failed: ${fillError.message || fillError}\nUse Copy Pending Note if needed.`;
+      }
+    });
+  }
+
+  async function fillCurrentTimeEntry(fill) {
+    // Milestone 2 safety: after explicit confirmation, this only updates Start Time
+    // and End Time. Notes are copied to the clipboard for manual paste because
+    // direct Draft.js DOM mutation caused the ConnectWise Notes editor to crash.
+    // It never clicks Save/Submit/Copy/New/Delete.
+    const fields = findTimeEntryFields();
+    setTextInputValue(fields.startInput, fill.startText);
+    setTextInputValue(fields.endInput, fill.endText);
+    const noteMessage = await copyPendingNoteText(fill.noteText);
+    await new Promise(resolve => setTimeout(resolve, 700));
+    const detectedHours = textOf(fields.hoursContainer) || fields.hoursContainer.value || '(blank)';
+    return `Start and End were filled.\n${noteMessage}\nExpected duration: ${fill.durationHours} hrs (${fill.durationMinutes} min).\nDetected Actual Hours: ${detectedHours}.\nPress Ctrl+V to paste the note, then manually review Start Time, End Time, Notes, and Actual Hours before saving in ConnectWise.`;
+  }
+
   function showWorkbench() {
     ensureStyles();
     if (!hasDailyTimeEntriesGrid()) {
@@ -534,10 +744,10 @@
     modal.id = MODAL_ID;
     modal.innerHTML = `
       <div class="cwtw-dialog" role="dialog" aria-modal="true" aria-label="Timesheet Workbench">
-        <h2>Timesheet Workbench <span class="cwtw-note">read-only v0.1</span></h2>
+        <h2>Timesheet Workbench <span class="cwtw-note">manual-fill v0.2.2</span></h2>
         <div class="cwtw-status ${error ? 'cwtw-error' : ''}">${escapeHtml(error || `Detected ${intervals.length} valid visible interval(s), merged into ${merged.length} block(s).`)}</div>
         <div class="cwtw-row"><label>Minimum gap minutes <input id="cwtw-min-gap" type="number" min="1" max="240" step="1" value="${settings.minGapMinutes}"></label><label><input id="cwtw-boundary-enabled" type="checkbox" ${settings.useWorkdayBoundary ? 'checked' : ''}> Limit to workday</label><label>Start <input id="cwtw-boundary-start" type="text" value="${escapeHtml(settings.workdayStart)}"></label><label>End <input id="cwtw-boundary-end" type="text" value="${escapeHtml(settings.workdayEnd)}"></label><label><input id="cwtw-debug" type="checkbox" ${settings.debug ? 'checked' : ''}> Debug logging</label><button id="cwtw-refresh" type="button">Refresh Preview</button></div>
-        <div class="cwtw-note">This v0.1 script is read-only: it never clicks ConnectWise Save, Copy, New, Submit, OK, Delete, or other action buttons, and it never modifies ConnectWise fields. Workday limits are optional and disabled by default; when disabled, gaps are calculated only between existing visible entries.</div>
+        <div class="cwtw-note">This v0.2.2 script never clicks ConnectWise Save, Copy, New, Submit, OK, Delete, or other action buttons. It can store a pending fill and, only after confirmation on an individual Time Entry page, fills Start Time and End Time while copying Notes for manual paste/review. Workday limits are optional and disabled by default; when disabled, gaps are calculated only between existing visible entries.</div>
         <h3>Summary</h3><table><tbody><tr><th>Total logged from merged intervals</th><td>${minutesLabel(sumMinutes(merged))}</td></tr><tr><th>Total detected gap time</th><td>${minutesLabel(sumMinutes(gaps))}</td></tr></tbody></table>
         <h3>Existing intervals</h3>${renderIntervalTable(merged)}
         <h3>Detected gaps</h3>${renderGapTable(gaps)}
@@ -558,6 +768,18 @@
     modal.querySelector('#cwtw-close').addEventListener('click', () => modal.remove());
     modal.querySelectorAll('.cwtw-gap-select').forEach(checkbox => {
       checkbox.addEventListener('change', () => updateGapNotes(modal, gaps));
+    });
+    modal.querySelectorAll('.cwtw-use-gap').forEach(button => {
+      button.addEventListener('click', () => {
+        const status = modal.querySelector('#cwtw-copy-status');
+        const gap = gaps[Number(button.dataset.gapIndex)];
+        if (!gap) { status.textContent = 'Could not find that gap.'; return; }
+        const fill = buildPendingFill(gap, getSelectedTemplate(modal));
+        setPendingFill(fill);
+        status.textContent = `Pending fill saved for ${fill.startText} - ${fill.endText}. Open a Time Entry and use Fill From Workbench.`;
+        status.classList.add('cwtw-success');
+        injectTimeEntryFillPanel();
+      });
     });
     fillTemplateEditor(modal);
     modal.querySelector('#cwtw-note-template').addEventListener('change', () => {
@@ -634,7 +856,7 @@
     modal.id = MODAL_ID;
     modal.innerHTML = `
       <div class="cwtw-dialog" role="dialog" aria-modal="true" aria-label="Timesheet Workbench">
-        <h2>Timesheet Workbench <span class="cwtw-note">read-only v0.1</span></h2>
+        <h2>Timesheet Workbench <span class="cwtw-note">manual-fill v0.2.2</span></h2>
         <div class="cwtw-status">Open Daily Time Entries to scan for gaps.</div>
         <div class="cwtw-actions"><button id="cwtw-close" type="button">Close</button></div>
       </div>`;
@@ -650,9 +872,9 @@
 
   function renderGapTable(gaps) {
     if (!gaps.length) return '<div class="cwtw-status">None detected.</div>';
-    return `<table><thead><tr><th>Select</th><th>Start</th><th>End</th><th>Minutes</th><th>Decimal hours</th></tr></thead><tbody>${gaps.map((gap, index) => {
+    return `<table><thead><tr><th>Select</th><th>Start</th><th>End</th><th>Minutes</th><th>Decimal hours</th><th>Current Time Entry</th></tr></thead><tbody>${gaps.map((gap, index) => {
       const minutes = gap.end - gap.start;
-      return `<tr><td><input class="cwtw-gap-select" type="checkbox" checked data-gap-index="${index}" aria-label="Include gap ${index + 1}"></td><td>${formatMinutes(gap.start)}</td><td>${formatMinutes(gap.end)}</td><td>${minutes}</td><td>${(minutes / 60).toFixed(2)}</td></tr>`;
+      return `<tr><td><input class="cwtw-gap-select" type="checkbox" checked data-gap-index="${index}" aria-label="Include gap ${index + 1}"></td><td>${formatMinutes(gap.start)}</td><td>${formatMinutes(gap.end)}</td><td>${minutes}</td><td>${(minutes / 60).toFixed(2)}</td><td><button class="cwtw-use-gap" type="button" data-gap-index="${index}">Use for Current Time Entry</button></td></tr>`;
     }).join('')}</tbody></table>`;
   }
 
@@ -660,12 +882,12 @@
     return String(value).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
   }
 
-  // Safety guard for v0.1: this script only reads the grid and writes its own UI/localStorage.
-  // Milestone 2 can add explicitly confirmed field updates near .cw_startTime/.cw_endTime here,
-  // but must remain separate from all ConnectWise toolbar/action buttons listed below.
+  // Safety guard: this script never initiates ConnectWise toolbar/action clicks.
+  // The only ConnectWise form updates are confirmed Start Time and End Time fills
+  // on individual Time Entry pages; notes are clipboard-only and saving remains manual.
   document.addEventListener('click', event => {
     const label = normalize(textOf(event.target));
-    if (SAFE_ACTION_TEXT.has(label)) log('Observed ConnectWise action label; v0.1 did not initiate it:', label);
+    if (SAFE_ACTION_TEXT.has(label)) log('Observed ConnectWise action label; Workbench did not initiate it:', label);
   }, true);
 
   startObserver();
