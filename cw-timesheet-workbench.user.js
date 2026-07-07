@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         CW Timesheet Workbench
 // @namespace    https://github.com/AttentusTechnologies/userscripts
-// @version      0.2.0
-// @description  ConnectWise Manage Daily Time Entries gap finder with confirmed Time Entry field fill. Does not click ConnectWise Save, Copy, Submit, Delete, or modify ConnectWise data via API.
+// @version      0.2.2
+// @description  ConnectWise Manage Daily Time Entries gap finder with confirmed Time Entry time fill and note clipboard. Does not click ConnectWise Save, Copy, Submit, Delete, or modify ConnectWise data via API.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.myconnectwise.com/*
 // @run-at       document-idle
@@ -122,15 +122,10 @@
     const startContainer = findSingleVisible('.cw_startTime', 'Start Time field');
     const endContainer = findSingleVisible('.cw_endTime', 'End Time field');
     const hoursContainer = findSingleVisible('.cw_hours', 'Actual Hours field');
-    const editors = Array.from(document.querySelectorAll('.public-DraftEditor-content[role="textbox"], .ManageNoteRichTextEditor-richEditor .public-DraftEditor-content[role="textbox"], .ManageNoteRichTextEditor-richEditor'))
-      .filter(isVisible)
-      .filter((editor, index, all) => !all.some(other => other !== editor && editor.contains(other)));
-    if (editors.length !== 1) throw new Error(`Notes editor: expected exactly one visible match, found ${editors.length}.`);
     return {
       startInput: inputFromContainer(startContainer, 'Start Time field'),
       endInput: inputFromContainer(endContainer, 'End Time field'),
-      hoursContainer,
-      notesEditor: editors[0]
+      hoursContainer
     };
   }
 
@@ -607,28 +602,25 @@
     dispatchTextEvents(input);
   }
 
-  function insertOrAppendNoteText(noteText) {
-    const { notesEditor } = findTimeEntryFields();
-    const existingText = textOf(notesEditor);
-    const textToInsert = existingText ? `\n\n${noteText}` : noteText;
-    notesEditor.focus();
-    let success = false;
-    try {
-      if (window.getSelection && document.createRange && !existingText) {
-        const range = document.createRange();
-        range.selectNodeContents(notesEditor);
-        const selection = window.getSelection();
-        selection.removeAllRanges();
-        selection.addRange(range);
-      }
-      if (typeof document.execCommand === 'function') {
-        success = document.execCommand('insertText', false, textToInsert);
-      }
-    } catch (error) {
-      log('Draft editor insertText failed:', error);
-    }
-    ['input', 'change'].forEach(type => notesEditor.dispatchEvent(new Event(type, { bubbles: true, cancelable: true })));
-    return { success: success || textOf(notesEditor).includes(noteText.slice(0, Math.min(20, noteText.length))), appended: !!existingText };
+  async function copyPendingNoteText(noteText) {
+    // ConnectWise Notes is a React/Draft.js editor. Live testing showed direct DOM
+    // mutation/execCommand can corrupt Draft.js state and make the editor disappear,
+    // so notes are clipboard-only until a supported ConnectWise editor API is known.
+    await copyText(noteText);
+    const focusMessage = focusNotesEditor();
+    return `Note copied to clipboard. ${focusMessage}`;
+  }
+
+  function findNotesEditor() {
+    return document.querySelector('.public-DraftEditor-content[role="textbox"]') ||
+      document.querySelector('.ManageNoteRichTextEditor-richEditor');
+  }
+
+  function focusNotesEditor() {
+    const editor = findNotesEditor();
+    if (!editor || !isVisible(editor)) return 'Could not find the Notes editor; paste the note manually after opening Notes.';
+    editor.focus();
+    return 'The Notes editor was focused. Press Ctrl+V to paste the note.';
   }
 
   function injectTimeEntryFillPanel() {
@@ -645,6 +637,7 @@
       <button id="cwtw-fill-current" type="button">Fill From Workbench</button>
       <button id="cwtw-clear-pending" type="button">Clear Pending Fill</button>
       <button id="cwtw-copy-pending-note" type="button">Copy Pending Note</button>
+      <button id="cwtw-focus-notes" type="button">Focus Notes</button>
       <div id="cwtw-fill-status" class="cwtw-panel-status">Manual review required. This script will not save.</div>` : `
       <div class="cwtw-panel-title">CW Timesheet Workbench</div>
       <div class="cwtw-panel-note">No pending Workbench fill</div>
@@ -658,8 +651,11 @@
     });
     panel.querySelector('#cwtw-copy-pending-note').addEventListener('click', async () => {
       const status = panel.querySelector('#cwtw-fill-status');
-      try { await copyText(fill.noteText); status.textContent = 'Pending note copied.'; }
+      try { status.textContent = await copyPendingNoteText(fill.noteText); }
       catch (copyError) { status.textContent = `Copy failed: ${copyError.message || copyError}`; }
+    });
+    panel.querySelector('#cwtw-focus-notes').addEventListener('click', () => {
+      panel.querySelector('#cwtw-fill-status').textContent = focusNotesEditor();
     });
   }
 
@@ -672,7 +668,7 @@
     modal.innerHTML = `
       <div class="cwtw-dialog" role="dialog" aria-modal="true" aria-label="Fill From Workbench Preview">
         <h2>Fill From Workbench</h2>
-        <div class="cwtw-status">Confirm before changing fields. This fills Start Time, End Time, and Notes only. It does not save.</div>
+        <div class="cwtw-status">Confirm before changing fields. This fills Start Time and End Time only, then copies the note to your clipboard and focuses Notes for manual paste. It does not save.</div>
         <table><tbody>
           <tr><th>Start Time</th><td>${escapeHtml(fill.startText)}</td></tr>
           <tr><th>End Time</th><td>${escapeHtml(fill.endText)}</td></tr>
@@ -681,16 +677,20 @@
         </tbody></table>
         <h3>Note text</h3>
         <textarea readonly>${escapeHtml(fill.noteText)}</textarea>
-        <div class="cwtw-status">If notes already exist, the pending note will be appended. Manually review all fields before saving in ConnectWise.</div>
+        <div class="cwtw-status">Notes are not inserted automatically because the ConnectWise Draft.js editor can crash if mutated directly. Paste the copied note manually, then review all fields before saving in ConnectWise.</div>
         <div id="cwtw-preview-status" class="cwtw-status" style="display:none"></div>
-        <div class="cwtw-actions"><button id="cwtw-confirm-fill" type="button">Confirm Fill Fields</button><button id="cwtw-preview-copy-note" type="button">Copy Pending Note</button><button id="cwtw-close" type="button">Cancel</button></div>
+        <div class="cwtw-actions"><button id="cwtw-confirm-fill" type="button">Confirm Fill Fields</button><button id="cwtw-preview-copy-note" type="button">Copy Pending Note</button><button id="cwtw-preview-focus-notes" type="button">Focus Notes</button><button id="cwtw-close" type="button">Cancel</button></div>
       </div>`;
     document.body.appendChild(modal);
     modal.addEventListener('click', event => { if (event.target === modal) modal.remove(); });
     modal.querySelector('#cwtw-close').addEventListener('click', () => modal.remove());
     modal.querySelector('#cwtw-preview-copy-note').addEventListener('click', async () => {
-      try { await copyText(fill.noteText); modal.querySelector('#cwtw-preview-status').style.display = ''; modal.querySelector('#cwtw-preview-status').textContent = 'Pending note copied.'; }
+      try { modal.querySelector('#cwtw-preview-status').style.display = ''; modal.querySelector('#cwtw-preview-status').textContent = await copyPendingNoteText(fill.noteText); }
       catch (copyError) { modal.querySelector('#cwtw-preview-status').style.display = ''; modal.querySelector('#cwtw-preview-status').textContent = `Copy failed: ${copyError.message || copyError}`; }
+    });
+    modal.querySelector('#cwtw-preview-focus-notes').addEventListener('click', () => {
+      modal.querySelector('#cwtw-preview-status').style.display = '';
+      modal.querySelector('#cwtw-preview-status').textContent = focusNotesEditor();
     });
     modal.querySelector('#cwtw-confirm-fill').addEventListener('click', async () => {
       const status = modal.querySelector('#cwtw-preview-status');
@@ -698,9 +698,11 @@
       status.textContent = 'Filling fields...';
       try {
         const result = await fillCurrentTimeEntry(fill);
-        status.classList.add('cwtw-success');
-        status.textContent = result;
+        modal.remove();
         injectTimeEntryFillPanel();
+        const panelStatus = document.querySelector(`#${FILL_PANEL_ID} #cwtw-fill-status`);
+        if (panelStatus) panelStatus.textContent = result;
+        focusNotesEditor();
       } catch (fillError) {
         status.classList.add('cwtw-error');
         status.textContent = `Fill failed: ${fillError.message || fillError}\nUse Copy Pending Note if needed.`;
@@ -709,16 +711,17 @@
   }
 
   async function fillCurrentTimeEntry(fill) {
-    // Milestone 2 safety: after explicit confirmation, this only updates Start Time,
-    // End Time, and Notes fields. It never clicks Save/Submit/Copy/New/Delete.
+    // Milestone 2 safety: after explicit confirmation, this only updates Start Time
+    // and End Time. Notes are copied to the clipboard for manual paste because
+    // direct Draft.js DOM mutation caused the ConnectWise Notes editor to crash.
+    // It never clicks Save/Submit/Copy/New/Delete.
     const fields = findTimeEntryFields();
     setTextInputValue(fields.startInput, fill.startText);
     setTextInputValue(fields.endInput, fill.endText);
-    const noteResult = insertOrAppendNoteText(fill.noteText);
+    const noteMessage = await copyPendingNoteText(fill.noteText);
     await new Promise(resolve => setTimeout(resolve, 700));
     const detectedHours = textOf(fields.hoursContainer) || fields.hoursContainer.value || '(blank)';
-    const noteMessage = noteResult.success ? `Notes ${noteResult.appended ? 'appended' : 'inserted'}.` : 'Note insertion may have failed; use Copy Pending Note as a fallback.';
-    return `${noteMessage}\nExpected duration: ${fill.durationHours} hrs (${fill.durationMinutes} min).\nDetected Actual Hours: ${detectedHours}.\nManually review Start Time, End Time, Notes, and Actual Hours, then save in ConnectWise yourself if correct.`;
+    return `Start and End were filled.\n${noteMessage}\nExpected duration: ${fill.durationHours} hrs (${fill.durationMinutes} min).\nDetected Actual Hours: ${detectedHours}.\nPress Ctrl+V to paste the note, then manually review Start Time, End Time, Notes, and Actual Hours before saving in ConnectWise.`;
   }
 
   function showWorkbench() {
@@ -741,10 +744,10 @@
     modal.id = MODAL_ID;
     modal.innerHTML = `
       <div class="cwtw-dialog" role="dialog" aria-modal="true" aria-label="Timesheet Workbench">
-        <h2>Timesheet Workbench <span class="cwtw-note">manual-fill v0.2</span></h2>
+        <h2>Timesheet Workbench <span class="cwtw-note">manual-fill v0.2.2</span></h2>
         <div class="cwtw-status ${error ? 'cwtw-error' : ''}">${escapeHtml(error || `Detected ${intervals.length} valid visible interval(s), merged into ${merged.length} block(s).`)}</div>
         <div class="cwtw-row"><label>Minimum gap minutes <input id="cwtw-min-gap" type="number" min="1" max="240" step="1" value="${settings.minGapMinutes}"></label><label><input id="cwtw-boundary-enabled" type="checkbox" ${settings.useWorkdayBoundary ? 'checked' : ''}> Limit to workday</label><label>Start <input id="cwtw-boundary-start" type="text" value="${escapeHtml(settings.workdayStart)}"></label><label>End <input id="cwtw-boundary-end" type="text" value="${escapeHtml(settings.workdayEnd)}"></label><label><input id="cwtw-debug" type="checkbox" ${settings.debug ? 'checked' : ''}> Debug logging</label><button id="cwtw-refresh" type="button">Refresh Preview</button></div>
-        <div class="cwtw-note">This v0.2 script never clicks ConnectWise Save, Copy, New, Submit, OK, Delete, or other action buttons. It can store a pending fill and, only after confirmation on an individual Time Entry page, fills Start Time, End Time, and Notes for manual review. Workday limits are optional and disabled by default; when disabled, gaps are calculated only between existing visible entries.</div>
+        <div class="cwtw-note">This v0.2.2 script never clicks ConnectWise Save, Copy, New, Submit, OK, Delete, or other action buttons. It can store a pending fill and, only after confirmation on an individual Time Entry page, fills Start Time and End Time while copying Notes for manual paste/review. Workday limits are optional and disabled by default; when disabled, gaps are calculated only between existing visible entries.</div>
         <h3>Summary</h3><table><tbody><tr><th>Total logged from merged intervals</th><td>${minutesLabel(sumMinutes(merged))}</td></tr><tr><th>Total detected gap time</th><td>${minutesLabel(sumMinutes(gaps))}</td></tr></tbody></table>
         <h3>Existing intervals</h3>${renderIntervalTable(merged)}
         <h3>Detected gaps</h3>${renderGapTable(gaps)}
@@ -853,7 +856,7 @@
     modal.id = MODAL_ID;
     modal.innerHTML = `
       <div class="cwtw-dialog" role="dialog" aria-modal="true" aria-label="Timesheet Workbench">
-        <h2>Timesheet Workbench <span class="cwtw-note">manual-fill v0.2</span></h2>
+        <h2>Timesheet Workbench <span class="cwtw-note">manual-fill v0.2.2</span></h2>
         <div class="cwtw-status">Open Daily Time Entries to scan for gaps.</div>
         <div class="cwtw-actions"><button id="cwtw-close" type="button">Close</button></div>
       </div>`;
@@ -880,8 +883,8 @@
   }
 
   // Safety guard: this script never initiates ConnectWise toolbar/action clicks.
-  // The only ConnectWise form updates are confirmed Start Time, End Time, and Notes
-  // fills on individual Time Entry pages; saving remains manual.
+  // The only ConnectWise form updates are confirmed Start Time and End Time fills
+  // on individual Time Entry pages; notes are clipboard-only and saving remains manual.
   document.addEventListener('click', event => {
     const label = normalize(textOf(event.target));
     if (SAFE_ACTION_TEXT.has(label)) log('Observed ConnectWise action label; Workbench did not initiate it:', label);
