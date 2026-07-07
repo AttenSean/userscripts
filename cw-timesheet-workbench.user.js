@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CW Timesheet Workbench
 // @namespace    https://github.com/AttentusTechnologies/userscripts
-// @version      0.2.2
+// @version      0.2.3
 // @description  ConnectWise Manage Daily Time Entries gap finder with confirmed Time Entry time fill and note clipboard. Does not click ConnectWise Save, Copy, Submit, Delete, or modify ConnectWise data via API.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.myconnectwise.com/*
@@ -27,11 +27,15 @@
   const SCROLLER_SEL = '#mytimesheetdaygrid-listview-scroller';
   const START_CELL_SEL = 'td[cellindex="4"]';
   const END_CELL_SEL = 'td[cellindex="5"]';
-  const DEFAULT_SETTINGS = { minGapMinutes: 3, debug: false, useWorkdayBoundary: false, workdayStart: '7:00 AM', workdayEnd: '4:00 PM', noteTemplate: 'coverage' };
+  const DEFAULT_SETTINGS = { minGapMinutes: 3, debug: false, useWorkdayBoundary: false, workdayStart: '7:00 AM', workdayEnd: '4:00 PM', noteTemplate: 'service-desk-triage' };
   const DEFAULT_TEMPLATES = {
-    coverage: { label: 'Gap coverage', template: 'Administrative catch-up / ticket follow-up from {start} to {end} ({hours} hrs).' },
-    review: { label: 'Review / follow-up', template: 'Reviewed and followed up on outstanding service items from {start} to {end} ({minutes} min).' },
-    admin: { label: 'Admin time', template: 'Administrative time from {start} to {end} ({hours} hrs).' }
+    'service-desk-triage': { label: 'Service Desk Dispatch / Triage', template: 'Worked active service desk dispatch and triage from {start} to {end} ({hours} hrs), including reviewing inbound tickets, monitoring board flow, routing issues, identifying SLA or escalation needs, and updating ticket context for technician follow-up.' },
+    'queue-review': { label: 'Queue Review / Board Cleanup', template: 'Reviewed service board activity from {start} to {end} ({hours} hrs), cleaned up ticket context, checked routing and ownership, identified stale or misrouted items, and updated next steps where needed.' },
+    'ai-automation': { label: 'AI Prompt / Automation Work', template: 'Worked on AI and automation improvements from {start} to {end} ({hours} hrs), including reviewing behavior, testing outputs, refining prompts or scripts, validating results, and documenting follow-up changes.' },
+    documentation: { label: 'Documentation / SOP / KB Updates', template: 'Reviewed and updated internal documentation from {start} to {end} ({hours} hrs), including support process notes, system context, SOP details, and operational reference material for future technician use.' },
+    training: { label: 'Training / Shadowing / Coverage Handoff', template: 'Provided training, shadowing, or coverage support from {start} to {end} ({hours} hrs), including reviewing workflow expectations, answering process questions, and helping transfer operational knowledge.' },
+    meeting: { label: 'Internal Meeting / Review', template: 'Attended internal review meeting from {start} to {end} ({hours} hrs) and discussed service desk operations, current priorities, process updates, coverage needs, and follow-up action items.' },
+    admin: { label: 'End-of-Day / Timesheet / Admin Review', template: 'Completed administrative review from {start} to {end} ({hours} hrs), including checking open items, updating time or ticket context, reviewing end-of-day status, and preparing follow-up items as needed.' }
   };
   const SAFE_ACTION_TEXT = new Set(['save', 'save and close', 'copy', 'new', 'submit', 'ok', 'delete']);
 
@@ -744,10 +748,10 @@
     modal.id = MODAL_ID;
     modal.innerHTML = `
       <div class="cwtw-dialog" role="dialog" aria-modal="true" aria-label="Timesheet Workbench">
-        <h2>Timesheet Workbench <span class="cwtw-note">manual-fill v0.2.2</span></h2>
+        <h2>Timesheet Workbench <span class="cwtw-note">manual-fill v0.2.3</span></h2>
         <div class="cwtw-status ${error ? 'cwtw-error' : ''}">${escapeHtml(error || `Detected ${intervals.length} valid visible interval(s), merged into ${merged.length} block(s).`)}</div>
         <div class="cwtw-row"><label>Minimum gap minutes <input id="cwtw-min-gap" type="number" min="1" max="240" step="1" value="${settings.minGapMinutes}"></label><label><input id="cwtw-boundary-enabled" type="checkbox" ${settings.useWorkdayBoundary ? 'checked' : ''}> Limit to workday</label><label>Start <input id="cwtw-boundary-start" type="text" value="${escapeHtml(settings.workdayStart)}"></label><label>End <input id="cwtw-boundary-end" type="text" value="${escapeHtml(settings.workdayEnd)}"></label><label><input id="cwtw-debug" type="checkbox" ${settings.debug ? 'checked' : ''}> Debug logging</label><button id="cwtw-refresh" type="button">Refresh Preview</button></div>
-        <div class="cwtw-note">This v0.2.2 script never clicks ConnectWise Save, Copy, New, Submit, OK, Delete, or other action buttons. It can store a pending fill and, only after confirmation on an individual Time Entry page, fills Start Time and End Time while copying Notes for manual paste/review. Workday limits are optional and disabled by default; when disabled, gaps are calculated only between existing visible entries.</div>
+        <div class="cwtw-note">This v0.2.3 script never clicks ConnectWise Save, Copy, New, Submit, OK, Delete, or other action buttons. It can store a pending fill and, only after confirmation on an individual Time Entry page, fills Start Time and End Time while copying Notes for manual paste/review. Workday limits are optional and disabled by default; when disabled, gaps are calculated only between existing visible entries.</div>
         <h3>Summary</h3><table><tbody><tr><th>Total logged from merged intervals</th><td>${minutesLabel(sumMinutes(merged))}</td></tr><tr><th>Total detected gap time</th><td>${minutesLabel(sumMinutes(gaps))}</td></tr></tbody></table>
         <h3>Existing intervals</h3>${renderIntervalTable(merged)}
         <h3>Detected gaps</h3>${renderGapTable(gaps)}
@@ -856,7 +860,7 @@
     modal.id = MODAL_ID;
     modal.innerHTML = `
       <div class="cwtw-dialog" role="dialog" aria-modal="true" aria-label="Timesheet Workbench">
-        <h2>Timesheet Workbench <span class="cwtw-note">manual-fill v0.2.2</span></h2>
+        <h2>Timesheet Workbench <span class="cwtw-note">manual-fill v0.2.3</span></h2>
         <div class="cwtw-status">Open Daily Time Entries to scan for gaps.</div>
         <div class="cwtw-actions"><button id="cwtw-close" type="button">Close</button></div>
       </div>`;
