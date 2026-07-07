@@ -24,7 +24,12 @@
   const SCROLLER_SEL = '#mytimesheetdaygrid-listview-scroller';
   const START_CELL_SEL = 'td[cellindex="4"]';
   const END_CELL_SEL = 'td[cellindex="5"]';
-  const DEFAULT_SETTINGS = { minGapMinutes: 3, debug: false, useWorkdayBoundary: false, workdayStart: '7:00 AM', workdayEnd: '4:00 PM' };
+  const DEFAULT_SETTINGS = { minGapMinutes: 3, debug: false, useWorkdayBoundary: false, workdayStart: '7:00 AM', workdayEnd: '4:00 PM', noteTemplate: 'coverage' };
+  const NOTE_TEMPLATES = [
+    { id: 'coverage', label: 'Gap coverage', template: 'Administrative catch-up / ticket follow-up from {start} to {end} ({hours} hrs).' },
+    { id: 'review', label: 'Review / follow-up', template: 'Reviewed and followed up on outstanding service items from {start} to {end} ({minutes} min).' },
+    { id: 'admin', label: 'Admin time', template: 'Administrative time from {start} to {end} ({hours} hrs).' }
+  ];
   const SAFE_ACTION_TEXT = new Set(['save', 'save and close', 'copy', 'new', 'submit', 'ok', 'delete']);
 
   const state = { observer: null, injectTimer: 0 };
@@ -43,7 +48,8 @@
       debug: !!settings.debug,
       useWorkdayBoundary: !!settings.useWorkdayBoundary,
       workdayStart: normalizeTimeSetting(settings.workdayStart, DEFAULT_SETTINGS.workdayStart),
-      workdayEnd: normalizeTimeSetting(settings.workdayEnd, DEFAULT_SETTINGS.workdayEnd)
+      workdayEnd: normalizeTimeSetting(settings.workdayEnd, DEFAULT_SETTINGS.workdayEnd),
+      noteTemplate: NOTE_TEMPLATES.some(template => template.id === settings.noteTemplate) ? settings.noteTemplate : DEFAULT_SETTINGS.noteTemplate
     }));
   }
 
@@ -90,7 +96,8 @@
       #${MODAL_ID} .cwtw-dialog{box-sizing:border-box;width:min(900px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow:auto;margin:16px auto;background:#fff;border-radius:8px;box-shadow:0 12px 40px rgba(0,0,0,.35);padding:16px}
       #${MODAL_ID} h2{margin:0 0 8px;font-size:18px} #${MODAL_ID} h3{margin:16px 0 6px;font-size:14px}
       #${MODAL_ID} .cwtw-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0}
-      #${MODAL_ID} input[type=number]{width:70px} #${MODAL_ID} input[type=text]{width:90px} #${MODAL_ID} textarea{width:100%;min-height:120px;box-sizing:border-box;font-family:Consolas,monospace;font-size:12px}
+      #${MODAL_ID} input[type=number]{width:70px} #${MODAL_ID} input[type=text]{width:90px} #${MODAL_ID} select{padding:3px 4px} #${MODAL_ID} textarea{width:100%;min-height:120px;box-sizing:border-box;font-family:Consolas,monospace;font-size:12px}
+      #${MODAL_ID} #cwtw-generated-notes{min-height:160px;font-size:13px;border:2px solid #2271b1;background:#f8fbff}
       #${MODAL_ID} table{width:100%;border-collapse:collapse;margin:6px 0} #${MODAL_ID} th,#${MODAL_ID} td{border:1px solid #d0d7de;padding:4px 6px;text-align:left;vertical-align:top}
       #${MODAL_ID} th{background:#f6f8fa} #${MODAL_ID} .cwtw-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px;position:sticky;bottom:0;background:#fff;padding-top:8px}
       #${MODAL_ID} button{padding:5px 10px;cursor:pointer} #${MODAL_ID} .cwtw-status{padding:8px;border-radius:4px;background:#f6f8fa;border:1px solid #d0d7de}.cwtw-error{background:#fff5f5!important;border-color:#f2a6a6!important;color:#8a1f11}.cwtw-note{color:#57606a;font-size:12px}`;
@@ -411,12 +418,34 @@
     return gaps.map(g => `${formatMinutes(g.start)} - ${formatMinutes(g.end)} (${g.end - g.start} min)`).join('\n');
   }
 
+  function getSelectedTemplate(modal) {
+    const selectedId = modal?.querySelector('#cwtw-note-template')?.value || loadSettings().noteTemplate;
+    return NOTE_TEMPLATES.find(template => template.id === selectedId) || NOTE_TEMPLATES[0];
+  }
+
+  function generatedNotes(gaps, template) {
+    if (!gaps.length) return 'No gaps selected.';
+    return gaps.map(gap => {
+      const minutes = gap.end - gap.start;
+      return template.template
+        .replaceAll('{start}', formatMinutes(gap.start))
+        .replaceAll('{end}', formatMinutes(gap.end))
+        .replaceAll('{minutes}', String(minutes))
+        .replaceAll('{hours}', (minutes / 60).toFixed(2));
+    }).join('\n');
+  }
+
+  function renderTemplateOptions(selectedId) {
+    return NOTE_TEMPLATES.map(template => `<option value="${escapeHtml(template.id)}" ${template.id === selectedId ? 'selected' : ''}>${escapeHtml(template.label)}</option>`).join('');
+  }
+
   function getSelectedGaps(modal, gaps) {
     return gaps.filter((_, index) => modal.querySelector(`.cwtw-gap-select[data-gap-index="${index}"]`)?.checked);
   }
 
   function updateGapNotes(modal, gaps) {
     const selectedGaps = getSelectedGaps(modal, gaps);
+    modal.querySelector('#cwtw-generated-notes').value = generatedNotes(selectedGaps, getSelectedTemplate(modal));
     modal.querySelector('#cwtw-readable').value = gapText(selectedGaps);
     modal.querySelector('#cwtw-json').value = gapJson(selectedGaps);
   }
@@ -452,9 +481,12 @@
         <h3>Summary</h3><table><tbody><tr><th>Total logged from merged intervals</th><td>${minutesLabel(sumMinutes(merged))}</td></tr><tr><th>Total detected gap time</th><td>${minutesLabel(sumMinutes(gaps))}</td></tr></tbody></table>
         <h3>Existing intervals</h3>${renderIntervalTable(merged)}
         <h3>Detected gaps</h3>${renderGapTable(gaps)}
-        <h3>Human-readable gaps</h3><textarea id="cwtw-readable" readonly>${escapeHtml(gapText(gaps))}</textarea>
+        <h3>Generated notes</h3>
+        <div class="cwtw-row"><label>Template <select id="cwtw-note-template">${renderTemplateOptions(settings.noteTemplate)}</select></label><span class="cwtw-note">Generated from selected gaps. Review before pasting into ConnectWise.</span></div>
+        <textarea id="cwtw-generated-notes" readonly>${escapeHtml(generatedNotes(gaps, NOTE_TEMPLATES.find(template => template.id === settings.noteTemplate) || NOTE_TEMPLATES[0]))}</textarea>
+        <h3>Reference gap text</h3><textarea id="cwtw-readable" readonly>${escapeHtml(gapText(gaps))}</textarea>
         <h3>Copyable gap JSON</h3><textarea id="cwtw-json" readonly>${escapeHtml(gapJson(gaps))}</textarea>
-        <div class="cwtw-actions"><span id="cwtw-copy-status" class="cwtw-note"></span><button id="cwtw-copy-readable" type="button">Copy Gap Text</button><button id="cwtw-copy-json" type="button">Copy JSON</button><button id="cwtw-close" type="button">Close</button></div>
+        <div class="cwtw-actions"><span id="cwtw-copy-status" class="cwtw-note"></span><button id="cwtw-copy-generated" type="button">Copy Generated Notes</button><button id="cwtw-copy-readable" type="button">Copy Reference Gap Text</button><button id="cwtw-copy-json" type="button">Copy JSON</button><button id="cwtw-close" type="button">Close</button></div>
       </div>`;
     document.body.appendChild(modal);
     modal.addEventListener('click', event => { if (event.target === modal) modal.remove(); });
@@ -462,13 +494,19 @@
     modal.querySelectorAll('.cwtw-gap-select').forEach(checkbox => {
       checkbox.addEventListener('change', () => updateGapNotes(modal, gaps));
     });
+    modal.querySelector('#cwtw-note-template').addEventListener('change', () => updateGapNotes(modal, gaps));
     modal.querySelector('#cwtw-refresh').addEventListener('click', () => {
-      saveSettings({ minGapMinutes: modal.querySelector('#cwtw-min-gap').value, debug: modal.querySelector('#cwtw-debug').checked, useWorkdayBoundary: modal.querySelector('#cwtw-boundary-enabled').checked, workdayStart: modal.querySelector('#cwtw-boundary-start').value, workdayEnd: modal.querySelector('#cwtw-boundary-end').value });
+      saveSettings({ minGapMinutes: modal.querySelector('#cwtw-min-gap').value, debug: modal.querySelector('#cwtw-debug').checked, useWorkdayBoundary: modal.querySelector('#cwtw-boundary-enabled').checked, workdayStart: modal.querySelector('#cwtw-boundary-start').value, workdayEnd: modal.querySelector('#cwtw-boundary-end').value, noteTemplate: modal.querySelector('#cwtw-note-template').value });
       showWorkbench();
+    });
+    modal.querySelector('#cwtw-copy-generated').addEventListener('click', async () => {
+      const status = modal.querySelector('#cwtw-copy-status');
+      try { await copyText(modal.querySelector('#cwtw-generated-notes').value); status.textContent = 'Generated notes copied.'; }
+      catch (copyError) { status.textContent = `Copy failed: ${copyError.message || copyError}`; }
     });
     modal.querySelector('#cwtw-copy-readable').addEventListener('click', async () => {
       const status = modal.querySelector('#cwtw-copy-status');
-      try { await copyText(modal.querySelector('#cwtw-readable').value); status.textContent = 'Gap text copied.'; }
+      try { await copyText(modal.querySelector('#cwtw-readable').value); status.textContent = 'Reference gap text copied.'; }
       catch (copyError) { status.textContent = `Copy failed: ${copyError.message || copyError}`; }
     });
     modal.querySelector('#cwtw-copy-json').addEventListener('click', async () => {
