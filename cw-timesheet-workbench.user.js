@@ -21,15 +21,16 @@
   const MODAL_ID = `${APP}-modal`;
   const STYLE_ID = `${APP}-style`;
   const SETTINGS_KEY = `${APP}:settings:v1`;
+  const TEMPLATES_KEY = `${APP}:note-templates:v1`;
   const SCROLLER_SEL = '#mytimesheetdaygrid-listview-scroller';
   const START_CELL_SEL = 'td[cellindex="4"]';
   const END_CELL_SEL = 'td[cellindex="5"]';
   const DEFAULT_SETTINGS = { minGapMinutes: 3, debug: false, useWorkdayBoundary: false, workdayStart: '7:00 AM', workdayEnd: '4:00 PM', noteTemplate: 'coverage' };
-  const NOTE_TEMPLATES = [
-    { id: 'coverage', label: 'Gap coverage', template: 'Administrative catch-up / ticket follow-up from {start} to {end} ({hours} hrs).' },
-    { id: 'review', label: 'Review / follow-up', template: 'Reviewed and followed up on outstanding service items from {start} to {end} ({minutes} min).' },
-    { id: 'admin', label: 'Admin time', template: 'Administrative time from {start} to {end} ({hours} hrs).' }
-  ];
+  const DEFAULT_TEMPLATES = {
+    coverage: { label: 'Gap coverage', template: 'Administrative catch-up / ticket follow-up from {start} to {end} ({hours} hrs).' },
+    review: { label: 'Review / follow-up', template: 'Reviewed and followed up on outstanding service items from {start} to {end} ({minutes} min).' },
+    admin: { label: 'Admin time', template: 'Administrative time from {start} to {end} ({hours} hrs).' }
+  };
   const SAFE_ACTION_TEXT = new Set(['save', 'save and close', 'copy', 'new', 'submit', 'ok', 'delete']);
 
   const state = { observer: null, injectTimer: 0 };
@@ -49,7 +50,7 @@
       useWorkdayBoundary: !!settings.useWorkdayBoundary,
       workdayStart: normalizeTimeSetting(settings.workdayStart, DEFAULT_SETTINGS.workdayStart),
       workdayEnd: normalizeTimeSetting(settings.workdayEnd, DEFAULT_SETTINGS.workdayEnd),
-      noteTemplate: NOTE_TEMPLATES.some(template => template.id === settings.noteTemplate) ? settings.noteTemplate : DEFAULT_SETTINGS.noteTemplate
+      noteTemplate: getTemplateMap()[settings.noteTemplate] ? settings.noteTemplate : DEFAULT_SETTINGS.noteTemplate
     }));
   }
 
@@ -96,7 +97,8 @@
       #${MODAL_ID} .cwtw-dialog{box-sizing:border-box;width:min(900px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow:auto;margin:16px auto;background:#fff;border-radius:8px;box-shadow:0 12px 40px rgba(0,0,0,.35);padding:16px}
       #${MODAL_ID} h2{margin:0 0 8px;font-size:18px} #${MODAL_ID} h3{margin:16px 0 6px;font-size:14px}
       #${MODAL_ID} .cwtw-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0}
-      #${MODAL_ID} input[type=number]{width:70px} #${MODAL_ID} input[type=text]{width:90px} #${MODAL_ID} select{padding:3px 4px} #${MODAL_ID} textarea{width:100%;min-height:120px;box-sizing:border-box;font-family:Consolas,monospace;font-size:12px}
+      #${MODAL_ID} input[type=number]{width:70px} #${MODAL_ID} input[type=text]{width:90px} #${MODAL_ID} .cwtw-template-name{width:220px} #${MODAL_ID} select{padding:3px 4px} #${MODAL_ID} textarea{width:100%;min-height:120px;box-sizing:border-box;font-family:Consolas,monospace;font-size:12px}
+      #${MODAL_ID} .cwtw-template-body{min-height:80px}
       #${MODAL_ID} #cwtw-generated-notes{min-height:160px;font-size:13px;border:2px solid #2271b1;background:#f8fbff}
       #${MODAL_ID} table{width:100%;border-collapse:collapse;margin:6px 0} #${MODAL_ID} th,#${MODAL_ID} td{border:1px solid #d0d7de;padding:4px 6px;text-align:left;vertical-align:top}
       #${MODAL_ID} th{background:#f6f8fa} #${MODAL_ID} .cwtw-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px;position:sticky;bottom:0;background:#fff;padding-top:8px}
@@ -418,9 +420,45 @@
     return gaps.map(g => `${formatMinutes(g.start)} - ${formatMinutes(g.end)} (${g.end - g.start} min)`).join('\n');
   }
 
+  function cloneDefaultTemplates() {
+    return JSON.parse(JSON.stringify(DEFAULT_TEMPLATES));
+  }
+
+  function normalizeTemplateMap(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const templates = {};
+    Object.entries(value).forEach(([id, template]) => {
+      if (!id || !template || typeof template !== 'object') return;
+      const label = String(template.label || id).trim();
+      const body = String(template.template || '').trim();
+      if (label && body) templates[id] = { label, template: body };
+    });
+    return Object.keys(templates).length ? templates : null;
+  }
+
+  function loadTemplates() {
+    try {
+      const saved = normalizeTemplateMap(JSON.parse(localStorage.getItem(TEMPLATES_KEY) || 'null'));
+      return saved || cloneDefaultTemplates();
+    } catch (_) {
+      return cloneDefaultTemplates();
+    }
+  }
+
+  function saveTemplates(templates) {
+    localStorage.setItem(TEMPLATES_KEY, JSON.stringify(normalizeTemplateMap(templates) || {}));
+  }
+
+  function getTemplateMap(modal) {
+    return modal?._cwtwTemplates || loadTemplates();
+  }
+
   function getSelectedTemplate(modal) {
+    const templates = getTemplateMap(modal);
     const selectedId = modal?.querySelector('#cwtw-note-template')?.value || loadSettings().noteTemplate;
-    return NOTE_TEMPLATES.find(template => template.id === selectedId) || NOTE_TEMPLATES[0];
+    const fallbackId = templates[selectedId] ? selectedId : Object.keys(templates)[0];
+    const selected = templates[fallbackId] || DEFAULT_TEMPLATES.coverage;
+    return { id: fallbackId, ...selected };
   }
 
   function generatedNotes(gaps, template) {
@@ -435,8 +473,28 @@
     }).join('\n');
   }
 
-  function renderTemplateOptions(selectedId) {
-    return NOTE_TEMPLATES.map(template => `<option value="${escapeHtml(template.id)}" ${template.id === selectedId ? 'selected' : ''}>${escapeHtml(template.label)}</option>`).join('');
+  function renderTemplateOptions(templates, selectedId) {
+    return Object.entries(templates).map(([id, template]) => `<option value="${escapeHtml(id)}" ${id === selectedId ? 'selected' : ''}>${escapeHtml(template.label)}</option>`).join('');
+  }
+
+  function templateIdFromName(name, templates) {
+    const base = String(name || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'template';
+    let id = base;
+    let suffix = 2;
+    while (templates[id] && templates[id].label !== name) id = `${base}-${suffix++}`;
+    return id;
+  }
+
+  function fillTemplateEditor(modal) {
+    const template = getSelectedTemplate(modal);
+    modal.querySelector('#cwtw-template-name').value = template.label || '';
+    modal.querySelector('#cwtw-template-body').value = template.template || '';
+  }
+
+  function refreshTemplateDropdown(modal, selectedId) {
+    const select = modal.querySelector('#cwtw-note-template');
+    select.innerHTML = renderTemplateOptions(getTemplateMap(modal), selectedId);
+    if (selectedId && getTemplateMap(modal)[selectedId]) select.value = selectedId;
   }
 
   function getSelectedGaps(modal, gaps) {
@@ -463,6 +521,8 @@
       return;
     }
     const settings = loadSettings();
+    const templates = loadTemplates();
+    const selectedTemplateId = templates[settings.noteTemplate] ? settings.noteTemplate : Object.keys(templates)[0];
     const { intervals, error } = getIntervals();
     const merged = mergeIntervals(intervals);
     const boundary = getWorkdayBoundary(settings);
@@ -482,19 +542,70 @@
         <h3>Existing intervals</h3>${renderIntervalTable(merged)}
         <h3>Detected gaps</h3>${renderGapTable(gaps)}
         <h3>Generated notes</h3>
-        <div class="cwtw-row"><label>Template <select id="cwtw-note-template">${renderTemplateOptions(settings.noteTemplate)}</select></label><span class="cwtw-note">Generated from selected gaps. Review before pasting into ConnectWise.</span></div>
-        <textarea id="cwtw-generated-notes" readonly>${escapeHtml(generatedNotes(gaps, NOTE_TEMPLATES.find(template => template.id === settings.noteTemplate) || NOTE_TEMPLATES[0]))}</textarea>
+        <div class="cwtw-row"><label>Template <select id="cwtw-note-template">${renderTemplateOptions(templates, selectedTemplateId)}</select></label><span class="cwtw-note">Generated from selected gaps. Review before pasting into ConnectWise.</span></div>
+        <textarea id="cwtw-generated-notes" readonly>${escapeHtml(generatedNotes(gaps, { id: selectedTemplateId, ...templates[selectedTemplateId] }))}</textarea>
+        <h3>Template settings</h3>
+        <div class="cwtw-row"><label>Template name <input id="cwtw-template-name" class="cwtw-template-name" type="text"></label></div>
+        <textarea id="cwtw-template-body" class="cwtw-template-body" placeholder="Use {start}, {end}, {minutes}, and {hours} tokens."></textarea>
+        <div class="cwtw-row"><button id="cwtw-save-template" type="button">Add / Update Template</button><button id="cwtw-delete-template" type="button">Delete Template</button><button id="cwtw-reset-templates" type="button">Reset Templates to Defaults</button><span id="cwtw-template-status" class="cwtw-note"></span></div>
         <h3>Reference gap text</h3><textarea id="cwtw-readable" readonly>${escapeHtml(gapText(gaps))}</textarea>
         <h3>Copyable gap JSON</h3><textarea id="cwtw-json" readonly>${escapeHtml(gapJson(gaps))}</textarea>
         <div class="cwtw-actions"><span id="cwtw-copy-status" class="cwtw-note"></span><button id="cwtw-copy-generated" type="button">Copy Generated Notes</button><button id="cwtw-copy-readable" type="button">Copy Reference Gap Text</button><button id="cwtw-copy-json" type="button">Copy JSON</button><button id="cwtw-close" type="button">Close</button></div>
       </div>`;
+    modal._cwtwTemplates = templates;
     document.body.appendChild(modal);
     modal.addEventListener('click', event => { if (event.target === modal) modal.remove(); });
     modal.querySelector('#cwtw-close').addEventListener('click', () => modal.remove());
     modal.querySelectorAll('.cwtw-gap-select').forEach(checkbox => {
       checkbox.addEventListener('change', () => updateGapNotes(modal, gaps));
     });
-    modal.querySelector('#cwtw-note-template').addEventListener('change', () => updateGapNotes(modal, gaps));
+    fillTemplateEditor(modal);
+    modal.querySelector('#cwtw-note-template').addEventListener('change', () => {
+      saveSettings({ ...loadSettings(), noteTemplate: modal.querySelector('#cwtw-note-template').value });
+      fillTemplateEditor(modal);
+      updateGapNotes(modal, gaps);
+    });
+    modal.querySelector('#cwtw-save-template').addEventListener('click', () => {
+      const status = modal.querySelector('#cwtw-template-status');
+      const name = modal.querySelector('#cwtw-template-name').value.trim();
+      const body = modal.querySelector('#cwtw-template-body').value.trim();
+      if (!name || !body) { status.textContent = 'Template name and body are required.'; return; }
+      const currentId = modal.querySelector('#cwtw-note-template').value;
+      const templates = getTemplateMap(modal);
+      const currentTemplate = templates[currentId];
+      const matchingId = Object.keys(templates).find(templateId => templates[templateId].label === name);
+      const id = matchingId || (currentTemplate?.label === name ? currentId : templateIdFromName(name, templates));
+      modal._cwtwTemplates = { ...templates, [id]: { label: name, template: body } };
+      saveTemplates(modal._cwtwTemplates);
+      refreshTemplateDropdown(modal, id);
+      saveSettings({ ...loadSettings(), noteTemplate: id });
+      updateGapNotes(modal, gaps);
+      status.textContent = 'Template saved.';
+    });
+    modal.querySelector('#cwtw-delete-template').addEventListener('click', () => {
+      const status = modal.querySelector('#cwtw-template-status');
+      const id = modal.querySelector('#cwtw-note-template').value;
+      const nextTemplates = { ...getTemplateMap(modal) };
+      delete nextTemplates[id];
+      modal._cwtwTemplates = normalizeTemplateMap(nextTemplates) || cloneDefaultTemplates();
+      saveTemplates(modal._cwtwTemplates);
+      const nextId = Object.keys(modal._cwtwTemplates)[0];
+      refreshTemplateDropdown(modal, nextId);
+      saveSettings({ ...loadSettings(), noteTemplate: nextId });
+      fillTemplateEditor(modal);
+      updateGapNotes(modal, gaps);
+      status.textContent = 'Template deleted.';
+    });
+    modal.querySelector('#cwtw-reset-templates').addEventListener('click', () => {
+      modal._cwtwTemplates = cloneDefaultTemplates();
+      saveTemplates(modal._cwtwTemplates);
+      const nextId = DEFAULT_SETTINGS.noteTemplate;
+      refreshTemplateDropdown(modal, nextId);
+      saveSettings({ ...loadSettings(), noteTemplate: nextId });
+      fillTemplateEditor(modal);
+      updateGapNotes(modal, gaps);
+      modal.querySelector('#cwtw-template-status').textContent = 'Templates reset to defaults.';
+    });
     modal.querySelector('#cwtw-refresh').addEventListener('click', () => {
       saveSettings({ minGapMinutes: modal.querySelector('#cwtw-min-gap').value, debug: modal.querySelector('#cwtw-debug').checked, useWorkdayBoundary: modal.querySelector('#cwtw-boundary-enabled').checked, workdayStart: modal.querySelector('#cwtw-boundary-start').value, workdayEnd: modal.querySelector('#cwtw-boundary-end').value, noteTemplate: modal.querySelector('#cwtw-note-template').value });
       showWorkbench();
