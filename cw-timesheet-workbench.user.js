@@ -743,23 +743,20 @@
   }
 
   async function fillCurrentTimeEntry(fill) {
-    // Milestone safety: after explicit confirmation, this updates Start Time,
-    // End Time, and Charge Code only. Notes are copied to the clipboard for
-    // manual paste because direct Draft.js DOM mutation caused the ConnectWise
-    // Notes editor to crash. It never clicks Save/Submit/Copy/New/Delete.
+    // Milestone safety: after explicit confirmation, this only updates Start Time
+    // and End Time. Notes are copied to the clipboard for manual paste because
+    // direct Draft.js DOM mutation caused the ConnectWise Notes editor to crash.
+    // It never clicks Save/Submit/Copy/New/Delete.
     const fields = findTimeEntryFields();
     setTextInputValue(fields.startInput, fill.startText);
     setTextInputValue(fields.endInput, fill.endText);
-    const chargeResult = await setChargeCode(fill);
     await copyPendingNoteText(fill.noteText);
-    await sleep(700);
+    await new Promise(resolve => setTimeout(resolve, 700));
     const detectedHours = textOf(fields.hoursContainer) || fields.hoursContainer.value || '(blank)';
-    const chargeLine = chargeResult.ok ? 'Charge Code filled.' : `Charge Code not filled: ${chargeResult.message}`;
-    return `Start Time filled.
-End Time filled.
-${chargeLine}
-Notes copied to clipboard.
-Manual review and save required.
+    return `Start/End filled.
+Note copied.
+Notes field focused.
+Press Ctrl+V, review, then save manually.
 Expected duration: ${fill.durationHours} hrs (${fill.durationMinutes} min).
 ConnectWise Actual Hours: ${detectedHours}.`;
   }
