@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CW Timesheet Workbench
 // @namespace    https://github.com/AttentusTechnologies/userscripts
-// @version      0.2.5
+// @version      0.2.6
 // @description  ConnectWise Manage Daily Time Entries gap finder with confirmed Time Entry time fill and note clipboard. Does not click ConnectWise Save, Copy, Submit, Delete, or modify ConnectWise data via API.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.myconnectwise.com/*
@@ -525,31 +525,58 @@
     return normalize(value).replace(/\s*\/\s*/g, ' / ');
   }
 
-  function isChargeCodeValueMatch(actual, fill) {
+  function isComboValueMatch(actual, allowedValues) {
     const actualNorm = normValue(actual);
-    const codeNorm = normValue(fill.chargeCode);
-    const pathNorm = normValue(fill.chargeCodePath);
-    return !!actualNorm && (actualNorm === codeNorm || actualNorm === pathNorm || actualNorm.endsWith(` / ${codeNorm}`));
+    const wanted = allowedValues.filter(Boolean).map(normValue);
+    return !!actualNorm && wanted.some(value => actualNorm === value || actualNorm.endsWith(` / ${value}`));
+  }
+
+  function isChargeCodeValueMatch(actual, fill) {
+    return isComboValueMatch(actual, [fill.chargeCodePath, fill.chargeCode]);
+  }
+
+  function isWorkbenchElement(el) {
+    return !!el.closest(`#${MODAL_ID}, #${FILL_PANEL_ID}, #${BUTTON_ID}`);
+  }
+
+  function fieldSignature(input) {
+    return `${input.className || ''} ${input.id || ''} ${input.name || ''} ${input.getAttribute('aria-label') || ''}`;
   }
 
   function findInputByLabel(labelText) {
     const needle = normalize(String(labelText).replace(/[:?]\s*$/, ''));
     const labelSelectors = '.mm_label, .cw_CwLabel, label, [id$="-label"], [class*="label"], [class*="Label"]';
-    for (const label of visibleElements(labelSelectors)) {
+    for (const label of visibleElements(labelSelectors).filter(el => !isWorkbenchElement(el))) {
       const labelValue = normalize(textOf(label).replace(/[:?]\s*$/, ''));
       if (labelValue !== needle) continue;
-      const row = label.closest('.pod-element-row, tr, li, .form-group, .row, div') || label.parentElement;
-      const input = row && visibleElements('input:not([type="hidden"]), textarea, [contenteditable="true"]', row)[0];
-      if (input) return input;
+      let scope = label.parentElement;
+      for (let depth = 0; scope && depth < 7; depth += 1, scope = scope.parentElement) {
+        const inputs = visibleElements('input:not([type="hidden"]), textarea, [contenteditable="true"]', scope)
+          .filter(input => !isWorkbenchElement(input));
+        if (inputs.length === 1) return inputs[0];
+        const labelledInput = inputs.find(input => normalize(input.getAttribute('aria-label') || input.getAttribute('title') || '') === needle);
+        if (labelledInput) return labelledInput;
+      }
     }
     return null;
   }
 
+  function findInputBySignature(words, excludedWords = []) {
+    const inputs = visibleElements('input:not([type="hidden"]), textarea, [contenteditable="true"]')
+      .filter(input => !isWorkbenchElement(input));
+    const matches = inputs.filter(input => {
+      const signature = normalize(fieldSignature(input));
+      return words.every(word => signature.includes(normalize(word))) && !excludedWords.some(word => signature.includes(normalize(word)));
+    });
+    return matches.length === 1 ? matches[0] : null;
+  }
+
+  function findCategoryInput() {
+    return findInputByLabel('Category') || findInputBySignature(['category'], ['template', 'workbench']);
+  }
+
   function findChargeCodeInput() {
-    const selectorMatches = visibleElements('input[class*="ChargeCode"], input[id*="ChargeCode"], input[name*="ChargeCode"], input[aria-label="Charge Code"]')
-      .filter(input => !/chargeto/i.test(`${input.className} ${input.id} ${input.name}`));
-    if (selectorMatches.length === 1) return selectorMatches[0];
-    return findInputByLabel('Charge Code');
+    return findInputByLabel('Charge Code') || findInputBySignature(['charge', 'code'], ['chargeto', 'charge to']);
   }
 
   function openComboPopup(input) {
@@ -570,8 +597,8 @@
     }, 15, 50);
   }
 
-  function exactChargeCodeOptions(container, fill) {
-    const wanted = [fill.chargeCodePath, fill.chargeCode].filter(Boolean).map(normValue);
+  function exactComboOptions(container, allowedValues) {
+    const wanted = allowedValues.filter(Boolean).map(normValue);
     const optionSelector = '[role="option"], .k-list-item, .k-item, .select2-results__option, li, div, span';
     const matches = visibleElements(optionSelector, container)
       .filter(el => wanted.includes(normValue(textOf(el))))
@@ -587,19 +614,18 @@
     input.dispatchEvent(new Event('change', { bubbles: true }));
   }
 
-  async function setChargeCode(fill) {
-    if (!fill.chargeCode) return { ok: false, message: 'No Charge Code was stored with this pending fill.' };
-    const input = findChargeCodeInput();
-    if (!input) return { ok: false, message: 'Charge Code field was not found.' };
-    if (isChargeCodeValueMatch(input.value || textOf(input), fill)) return { ok: true, message: `Charge Code already set to ${fill.chargeCode}.` };
+  async function setComboField({ label, input, searchValue, allowedValues }) {
+    if (!searchValue) return { ok: false, message: `No ${label} was stored with this pending fill.` };
+    if (!input) return { ok: false, message: `${label} field was not found.` };
+    if (isComboValueMatch(input.value || textOf(input), allowedValues)) return { ok: true, message: `${label} already set.` };
 
     input.focus();
-    setComboSearchValue(input, fill.chargeCode);
+    setComboSearchValue(input, searchValue);
     const popup = await openComboPopup(input);
-    if (!popup) return { ok: false, message: `Charge Code popup did not open for ${fill.chargeCode}.` };
+    if (!popup) return { ok: false, message: `${label} popup did not open for ${searchValue}.` };
 
-    const matches = exactChargeCodeOptions(popup, fill);
-    if (matches.length !== 1) return { ok: false, message: `Charge Code not set: expected exactly one match for ${fill.chargeCode}, found ${matches.length}.` };
+    const matches = exactComboOptions(popup, allowedValues);
+    if (matches.length !== 1) return { ok: false, message: `${label} not set: expected exactly one match for ${searchValue}, found ${matches.length}.` };
 
     matches[0].dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
     matches[0].click();
@@ -609,8 +635,26 @@
     await sleep(250);
 
     const actual = input.value || textOf(input);
-    if (!isChargeCodeValueMatch(actual, fill)) return { ok: false, message: `Charge Code verification failed. Expected ${fill.chargeCode}; current value is ${actual || '(blank)'}.` };
-    return { ok: true, message: `Charge Code filled: ${fill.chargeCode}.` };
+    if (!isComboValueMatch(actual, allowedValues)) return { ok: false, message: `${label} verification failed. Expected ${searchValue}; current value is ${actual || '(blank)'}.` };
+    return { ok: true, message: `${label} filled: ${searchValue}.` };
+  }
+
+  function setCategory(fill) {
+    return setComboField({
+      label: 'Category',
+      input: findCategoryInput(),
+      searchValue: fill.category,
+      allowedValues: [fill.category]
+    });
+  }
+
+  function setChargeCode(fill) {
+    return setComboField({
+      label: 'Charge Code',
+      input: findChargeCodeInput(),
+      searchValue: fill.chargeCode,
+      allowedValues: [fill.chargeCodePath, fill.chargeCode]
+    });
   }
 
   function dispatchTextEvents(input) {
@@ -663,6 +707,7 @@
       <div class="cwtw-panel-title">CW Timesheet Workbench</div>
       <div class="cwtw-panel-note">Pending fill: ${escapeHtml(fill.startText)} - ${escapeHtml(fill.endText)} (${escapeHtml(String(fill.durationHours))} hrs)</div>
       <div class="cwtw-panel-note">Template: ${escapeHtml(fill.templateName)}</div>
+      <div class="cwtw-panel-note">Category: ${escapeHtml(fill.category || '(none)')}</div>
       <div class="cwtw-panel-note">Charge Code: ${escapeHtml(fill.chargeCode || '(none)')}</div>
       <button id="cwtw-fill-current" type="button">Fill Times + Copy Note</button>
       <button id="cwtw-copy-pending-note" type="button">Copy Note</button>
@@ -743,20 +788,26 @@
   }
 
   async function fillCurrentTimeEntry(fill) {
-    // Milestone safety: after explicit confirmation, this only updates Start Time
-    // and End Time. Notes are copied to the clipboard for manual paste because
-    // direct Draft.js DOM mutation caused the ConnectWise Notes editor to crash.
-    // It never clicks Save/Submit/Copy/New/Delete.
+    // Milestone safety: after explicit confirmation, this updates Start Time,
+    // End Time, Category, and Charge Code only. Notes are copied to the clipboard for
+    // manual paste because direct Draft.js DOM mutation caused the ConnectWise
+    // Notes editor to crash. It never clicks Save/Submit/Copy/New/Delete.
     const fields = findTimeEntryFields();
     setTextInputValue(fields.startInput, fill.startText);
     setTextInputValue(fields.endInput, fill.endText);
+    const categoryResult = await setCategory(fill);
+    const chargeResult = await setChargeCode(fill);
     await copyPendingNoteText(fill.noteText);
-    await new Promise(resolve => setTimeout(resolve, 700));
+    await sleep(700);
     const detectedHours = textOf(fields.hoursContainer) || fields.hoursContainer.value || '(blank)';
-    return `Start/End filled.
-Note copied.
-Notes field focused.
-Press Ctrl+V, review, then save manually.
+    const categoryLine = categoryResult.ok ? 'Category filled.' : `Category not filled: ${categoryResult.message}`;
+    const chargeLine = chargeResult.ok ? 'Charge Code filled.' : `Charge Code not filled: ${chargeResult.message}`;
+    return `Start Time filled.
+End Time filled.
+${categoryLine}
+${chargeLine}
+Notes copied to clipboard.
+Manual review and save required.
 Expected duration: ${fill.durationHours} hrs (${fill.durationMinutes} min).
 ConnectWise Actual Hours: ${detectedHours}.`;
   }
@@ -782,7 +833,7 @@ ConnectWise Actual Hours: ${detectedHours}.`;
     modal.id = MODAL_ID;
     modal.innerHTML = `
       <div class="cwtw-dialog" role="dialog" aria-modal="true" aria-label="Timesheet Workbench">
-        <h2>Timesheet Workbench <span class="cwtw-note">manual-fill v0.2.5</span></h2>
+        <h2>Timesheet Workbench <span class="cwtw-note">manual-fill v0.2.6</span></h2>
         <div class="cwtw-status ${error ? 'cwtw-error' : ''}">${escapeHtml(error || `Total missing time: ${minutesLabel(sumMinutes(gaps))}`)}</div>
         ${pending ? renderPendingFillSummary(pending) : ''}
         <h3>Detected gaps</h3>${renderGapCards(gaps)}
@@ -793,7 +844,7 @@ ConnectWise Actual Hours: ${detectedHours}.`;
         <details class="cwtw-advanced">
           <summary>Advanced / Debug</summary>
           <div class="cwtw-row"><label>Minimum gap minutes <input id="cwtw-min-gap" type="number" min="1" max="240" step="1" value="${settings.minGapMinutes}"></label><label><input id="cwtw-boundary-enabled" type="checkbox" ${settings.useWorkdayBoundary ? 'checked' : ''}> Limit to workday</label><label>Start <input id="cwtw-boundary-start" type="text" value="${escapeHtml(settings.workdayStart)}"></label><label>End <input id="cwtw-boundary-end" type="text" value="${escapeHtml(settings.workdayEnd)}"></label><label><input id="cwtw-debug" type="checkbox" ${settings.debug ? 'checked' : ''}> Debug logging</label></div>
-          <div class="cwtw-note">This v0.2.5 script never clicks ConnectWise Save, Copy, New, Submit, OK, Delete, or other action buttons. It stores a pending fill and, only after confirmation on a Time Entry page, fills Start Time, End Time, and exactly one verified Charge Code match while copying Notes for manual paste/review.</div>
+          <div class="cwtw-note">This v0.2.6 script never clicks ConnectWise Save, Copy, New, Submit, OK, Delete, or other action buttons. It stores a pending fill and, only after confirmation on a Time Entry page, fills Start Time, End Time, exactly one verified Category match, and exactly one verified Charge Code match while copying Notes for manual paste/review.</div>
           <h3>Existing intervals</h3>${renderIntervalTable(merged)}
           <h3>Raw Start/End candidates</h3>${renderCandidateTable(candidates)}
           <h3>Template settings</h3>
@@ -901,7 +952,7 @@ ConnectWise Actual Hours: ${detectedHours}.`;
     modal.id = MODAL_ID;
     modal.innerHTML = `
       <div class="cwtw-dialog" role="dialog" aria-modal="true" aria-label="Timesheet Workbench">
-        <h2>Timesheet Workbench <span class="cwtw-note">manual-fill v0.2.5</span></h2>
+        <h2>Timesheet Workbench <span class="cwtw-note">manual-fill v0.2.6</span></h2>
         <div class="cwtw-status">Open Daily Time Entries to scan for gaps.</div>
         <div class="cwtw-actions"><button id="cwtw-close" type="button">Close</button></div>
       </div>`;
@@ -911,7 +962,7 @@ ConnectWise Actual Hours: ${detectedHours}.`;
   }
 
   function renderPendingFillSummary(fill) {
-    return `<div class="cwtw-status cwtw-success"><strong>Pending fill saved.</strong><br>Open a new Time Entry, then click Fill Times + Copy Note.<br>Pending: ${escapeHtml(fill.startText)} - ${escapeHtml(fill.endText)}<br>Template: ${escapeHtml(fill.templateName)}<br>Charge Code: ${escapeHtml(fill.chargeCode || '(none)')}<br><button id="cwtw-clear-pending" type="button">Clear Pending Fill</button></div>`;
+    return `<div class="cwtw-status cwtw-success"><strong>Pending fill saved.</strong><br>Open a new Time Entry, then click Fill Times + Copy Note.<br>Pending: ${escapeHtml(fill.startText)} - ${escapeHtml(fill.endText)}<br>Template: ${escapeHtml(fill.templateName)}<br>Category: ${escapeHtml(fill.category || '(none)')}<br>Charge Code: ${escapeHtml(fill.chargeCode || '(none)')}<br><button id="cwtw-clear-pending" type="button">Clear Pending Fill</button></div>`;
   }
 
   function renderGapCards(gaps) {
