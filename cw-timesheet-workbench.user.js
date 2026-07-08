@@ -24,6 +24,7 @@
   const SETTINGS_KEY = `${APP}:settings:v1`;
   const TEMPLATES_KEY = `${APP}:note-templates:v1`;
   const PENDING_FILL_KEY = `${APP}:pendingFill:v1`;
+  const PENDING_FILL_QUEUE_KEY = `${APP}:pendingFillQueue:v1`;
   const SCROLLER_SEL = '#mytimesheetdaygrid-listview-scroller';
   const START_CELL_SEL = 'td[cellindex="4"]';
   const END_CELL_SEL = 'td[cellindex="5"]';
@@ -62,22 +63,64 @@
     }));
   }
 
-  function getPendingFill() {
+  function isValidPendingFill(fill) {
+    return !!(fill && typeof fill === 'object' && fill.source === 'CW Timesheet Workbench' && fill.startText && fill.endText && fill.noteText);
+  }
+
+  function getPendingFillQueue() {
+    let queue = [];
     try {
-      const fill = JSON.parse(localStorage.getItem(PENDING_FILL_KEY) || 'null');
-      if (!fill || typeof fill !== 'object' || fill.source !== 'CW Timesheet Workbench') return null;
-      if (!fill.startText || !fill.endText || !fill.noteText) return null;
-      return fill;
+      const storedQueue = JSON.parse(localStorage.getItem(PENDING_FILL_QUEUE_KEY) || '[]');
+      if (Array.isArray(storedQueue)) queue = storedQueue.filter(isValidPendingFill);
     } catch (_) {
-      return null;
+      queue = [];
     }
+
+    try {
+      const oldFill = JSON.parse(localStorage.getItem(PENDING_FILL_KEY) || 'null');
+      if (isValidPendingFill(oldFill)) {
+        queue.push(oldFill);
+        localStorage.setItem(PENDING_FILL_QUEUE_KEY, JSON.stringify(queue));
+      } else if (queue.length) {
+        localStorage.setItem(PENDING_FILL_QUEUE_KEY, JSON.stringify(queue));
+      }
+    } catch (_) {
+      if (queue.length) localStorage.setItem(PENDING_FILL_QUEUE_KEY, JSON.stringify(queue));
+    } finally {
+      localStorage.removeItem(PENDING_FILL_KEY);
+    }
+
+    return queue;
   }
 
-  function setPendingFill(fill) {
-    localStorage.setItem(PENDING_FILL_KEY, JSON.stringify(fill));
+  function savePendingFillQueue(queue) {
+    const validQueue = Array.isArray(queue) ? queue.filter(isValidPendingFill) : [];
+    if (validQueue.length) localStorage.setItem(PENDING_FILL_QUEUE_KEY, JSON.stringify(validQueue));
+    else localStorage.removeItem(PENDING_FILL_QUEUE_KEY);
+    localStorage.removeItem(PENDING_FILL_KEY);
   }
 
-  function clearPendingFill() {
+  function getCurrentPendingFill() {
+    return getPendingFillQueue()[0] || null;
+  }
+
+  function enqueuePendingFill(fill) {
+    if (!isValidPendingFill(fill)) return;
+    const queue = getPendingFillQueue();
+    queue.push(fill);
+    savePendingFillQueue(queue);
+  }
+
+  function removePendingFill(index) {
+    const queue = getPendingFillQueue();
+    const normalizedIndex = Number(index);
+    if (!Number.isInteger(normalizedIndex) || normalizedIndex < 0 || normalizedIndex >= queue.length) return;
+    queue.splice(normalizedIndex, 1);
+    savePendingFillQueue(queue);
+  }
+
+  function clearPendingFillQueue() {
+    localStorage.removeItem(PENDING_FILL_QUEUE_KEY);
     localStorage.removeItem(PENDING_FILL_KEY);
   }
 
@@ -700,18 +743,19 @@
     ensureStyles();
     const existing = document.getElementById(FILL_PANEL_ID);
     if (existing) existing.remove();
-    const fill = getPendingFill();
+    const queue = getPendingFillQueue();
+    const fill = getCurrentPendingFill();
     const panel = document.createElement('div');
     panel.id = FILL_PANEL_ID;
     panel.innerHTML = fill ? `
       <div class="cwtw-panel-title">CW Timesheet Workbench</div>
-      <div class="cwtw-panel-note">Pending fill: ${escapeHtml(fill.startText)} - ${escapeHtml(fill.endText)} (${escapeHtml(String(fill.durationHours))} hrs)</div>
+      <div class="cwtw-panel-note">Pending fill 1 of ${escapeHtml(String(queue.length))}: ${escapeHtml(fill.startText)} - ${escapeHtml(fill.endText)} (${escapeHtml(String(fill.durationHours))} hrs)</div>
       <div class="cwtw-panel-note">Template: ${escapeHtml(fill.templateName)}</div>
       <div class="cwtw-panel-note">Category: ${escapeHtml(fill.category || '(none)')}</div>
       <div class="cwtw-panel-note">Charge Code: ${escapeHtml(fill.chargeCode || '(none)')}</div>
       <button id="cwtw-fill-current" type="button">Fill Times + Copy Note</button>
       <button id="cwtw-copy-pending-note" type="button">Copy Note</button>
-      <button id="cwtw-clear-pending" type="button">Clear Pending Fill</button>
+      <button id="cwtw-clear-pending" type="button">Clear Pending Queue</button>
       <button id="cwtw-focus-notes" type="button">Focus Notes</button>
       <div id="cwtw-fill-status" class="cwtw-panel-status">Manual review required. This script will not save.</div>` : `
       <div class="cwtw-panel-title">CW Timesheet Workbench</div>
@@ -719,9 +763,9 @@
       <div class="cwtw-panel-note">Open Daily Time Entries and choose a gap.</div>`;
     document.body.appendChild(panel);
     if (!fill) return;
-    panel.querySelector('#cwtw-fill-current').addEventListener('click', () => showFillPreview(fill));
+    panel.querySelector('#cwtw-fill-current').addEventListener('click', () => showFillPreview(fill, 0));
     panel.querySelector('#cwtw-clear-pending').addEventListener('click', () => {
-      clearPendingFill();
+      clearPendingFillQueue();
       injectTimeEntryFillPanel();
     });
     panel.querySelector('#cwtw-copy-pending-note').addEventListener('click', async () => {
@@ -734,7 +778,7 @@
     });
   }
 
-  function showFillPreview(fill) {
+  function showFillPreview(fill, queueIndex = 0) {
     ensureStyles();
     const existing = document.getElementById(MODAL_ID);
     if (existing) existing.remove();
@@ -775,6 +819,7 @@
       status.textContent = 'Filling fields...';
       try {
         const result = await fillCurrentTimeEntry(fill);
+        removePendingFill(queueIndex);
         modal.remove();
         injectTimeEntryFillPanel();
         const panelStatus = document.querySelector(`#${FILL_PANEL_ID} #cwtw-fill-status`);
@@ -825,7 +870,8 @@ ConnectWise Actual Hours: ${detectedHours}.`;
     const merged = mergeIntervals(intervals);
     const boundary = getWorkdayBoundary(settings);
     const gaps = calculateGaps(merged, settings.minGapMinutes, boundary);
-    const pending = getPendingFill();
+    const pendingQueue = getPendingFillQueue();
+    const pending = pendingQueue[0] || null;
     const existing = document.getElementById(MODAL_ID);
     if (existing) existing.remove();
 
@@ -835,7 +881,7 @@ ConnectWise Actual Hours: ${detectedHours}.`;
       <div class="cwtw-dialog" role="dialog" aria-modal="true" aria-label="Timesheet Workbench">
         <h2>Timesheet Workbench <span class="cwtw-note">manual-fill v0.2.6</span></h2>
         <div class="cwtw-status ${error ? 'cwtw-error' : ''}">${escapeHtml(error || `Total missing time: ${minutesLabel(sumMinutes(gaps))}`)}</div>
-        ${pending ? renderPendingFillSummary(pending) : ''}
+        ${pending ? renderPendingFillSummary(pendingQueue) : ''}
         <h3>Detected gaps</h3>${renderGapCards(gaps)}
         <h3>Template</h3>
         <div class="cwtw-row"><select id="cwtw-note-template">${renderTemplateOptions(templates, selectedTemplateId)}</select><span id="cwtw-charge-code-preview" class="cwtw-note">Charge Code: ${escapeHtml((templates[selectedTemplateId] || {}).chargeCode || '(none)')}</span><button id="cwtw-copy-generated" type="button">Copy Note</button><button id="cwtw-refresh" type="button">Refresh</button><span id="cwtw-copy-status" class="cwtw-note"></span></div>
@@ -879,7 +925,7 @@ ConnectWise Actual Hours: ${detectedHours}.`;
       try { await copyText(modal.querySelector('#cwtw-generated-notes').value); status.textContent = 'Note copied.'; }
       catch (copyError) { status.textContent = `Copy failed: ${copyError.message || copyError}`; }
     });
-    modal.querySelector('#cwtw-clear-pending')?.addEventListener('click', () => { clearPendingFill(); showWorkbench(); injectTimeEntryFillPanel(); });
+    modal.querySelector('#cwtw-clear-pending')?.addEventListener('click', () => { clearPendingFillQueue(); showWorkbench(); injectTimeEntryFillPanel(); });
     fillTemplateEditor(modal);
   }
 
@@ -888,8 +934,9 @@ ConnectWise Actual Hours: ${detectedHours}.`;
     const gap = gaps[Number(button.dataset.gapIndex)];
     if (!gap) { status.textContent = 'Could not find that gap.'; return; }
     const fill = buildPendingFill(gap, getSelectedTemplate(modal));
-    setPendingFill(fill);
-    status.textContent = 'Pending fill saved. Open a new Time Entry, then click Fill Times + Copy Note.';
+    enqueuePendingFill(fill);
+    const queueCount = getPendingFillQueue().length;
+    status.textContent = `Pending fill added to queue (${queueCount} total). Open a new Time Entry, then click Fill Times + Copy Note.`;
     status.classList.add('cwtw-success');
     showWorkbench();
     injectTimeEntryFillPanel();
@@ -961,9 +1008,11 @@ ConnectWise Actual Hours: ${detectedHours}.`;
     modal.querySelector('#cwtw-close').addEventListener('click', () => modal.remove());
   }
 
-  function renderPendingFillSummary(fill) {
-    return `<div class="cwtw-status cwtw-success"><strong>Pending fill saved.</strong><br>Open a new Time Entry, then click Fill Times + Copy Note.<br>Pending: ${escapeHtml(fill.startText)} - ${escapeHtml(fill.endText)}<br>Template: ${escapeHtml(fill.templateName)}<br>Category: ${escapeHtml(fill.category || '(none)')}<br>Charge Code: ${escapeHtml(fill.chargeCode || '(none)')}<br><button id="cwtw-clear-pending" type="button">Clear Pending Fill</button></div>`;
+  function renderPendingFillSummary(queue) {
+    const fill = queue[0];
+    return `<div class="cwtw-status cwtw-success"><strong>${escapeHtml(String(queue.length))} pending fill${queue.length === 1 ? '' : 's'} queued.</strong><br>Open a new Time Entry, then click Fill Times + Copy Note. The next queued fill will become available after a successful fill.<br>Next: ${escapeHtml(fill.startText)} - ${escapeHtml(fill.endText)}<br>Template: ${escapeHtml(fill.templateName)}<br>Category: ${escapeHtml(fill.category || '(none)')}<br>Charge Code: ${escapeHtml(fill.chargeCode || '(none)')}<br><button id="cwtw-clear-pending" type="button">Clear Pending Queue</button></div>`;
   }
+
 
   function renderGapCards(gaps) {
     if (!gaps.length) return '<div class="cwtw-status">No gaps detected.</div>';
