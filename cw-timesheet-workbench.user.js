@@ -67,34 +67,44 @@
     return !!(fill && typeof fill === 'object' && fill.source === 'CW Timesheet Workbench' && fill.startText && fill.endText && fill.noteText);
   }
 
+  function makePendingFillId(fill) {
+    const parts = [fill?.createdAt, fill?.startText, fill?.endText, fill?.templateName, fill?.noteText]
+      .map(part => String(part || '').replace(/[^a-z0-9]+/gi, '-').slice(0, 32))
+      .filter(Boolean);
+    return `cwtw-${parts.join('-') || Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  function withPendingFillId(fill) {
+    return fill?.id ? fill : { ...fill, id: makePendingFillId(fill) };
+  }
+
+  function normalizePendingFillQueue(queue) {
+    return (Array.isArray(queue) ? queue : []).filter(isValidPendingFill).map(withPendingFillId);
+  }
+
   function getPendingFillQueue() {
     let queue = [];
     try {
       const storedQueue = JSON.parse(localStorage.getItem(PENDING_FILL_QUEUE_KEY) || '[]');
-      if (Array.isArray(storedQueue)) queue = storedQueue.filter(isValidPendingFill);
+      queue = normalizePendingFillQueue(storedQueue);
     } catch (_) {
       queue = [];
     }
 
     try {
       const oldFill = JSON.parse(localStorage.getItem(PENDING_FILL_KEY) || 'null');
-      if (isValidPendingFill(oldFill)) {
-        queue.push(oldFill);
-        localStorage.setItem(PENDING_FILL_QUEUE_KEY, JSON.stringify(queue));
-      } else if (queue.length) {
-        localStorage.setItem(PENDING_FILL_QUEUE_KEY, JSON.stringify(queue));
-      }
+      if (isValidPendingFill(oldFill)) queue.push(withPendingFillId(oldFill));
     } catch (_) {
-      if (queue.length) localStorage.setItem(PENDING_FILL_QUEUE_KEY, JSON.stringify(queue));
+      // Ignore malformed legacy pending fill data.
     } finally {
-      localStorage.removeItem(PENDING_FILL_KEY);
+      savePendingFillQueue(queue);
     }
 
     return queue;
   }
 
   function savePendingFillQueue(queue) {
-    const validQueue = Array.isArray(queue) ? queue.filter(isValidPendingFill) : [];
+    const validQueue = normalizePendingFillQueue(queue);
     if (validQueue.length) localStorage.setItem(PENDING_FILL_QUEUE_KEY, JSON.stringify(validQueue));
     else localStorage.removeItem(PENDING_FILL_QUEUE_KEY);
     localStorage.removeItem(PENDING_FILL_KEY);
@@ -111,9 +121,10 @@
     savePendingFillQueue(queue);
   }
 
-  function removePendingFill(index) {
+  function removePendingFill(indexOrId) {
     const queue = getPendingFillQueue();
-    const normalizedIndex = Number(index);
+    const idIndex = typeof indexOrId === 'string' ? queue.findIndex(fill => fill.id === indexOrId) : -1;
+    const normalizedIndex = idIndex >= 0 ? idIndex : Number(indexOrId);
     if (!Number.isInteger(normalizedIndex) || normalizedIndex < 0 || normalizedIndex >= queue.length) return;
     queue.splice(normalizedIndex, 1);
     savePendingFillQueue(queue);
@@ -196,6 +207,8 @@
       #${FILL_PANEL_ID} .cwtw-panel-title{font-weight:bold;margin-bottom:5px}
       #${FILL_PANEL_ID} .cwtw-panel-note{color:#57606a;margin:5px 0}
       #${FILL_PANEL_ID} .cwtw-panel-status{margin-top:6px;padding:6px;border:1px solid #d0d7de;border-radius:4px;background:#f6f8fa;white-space:pre-wrap}
+      #${FILL_PANEL_ID} .cwtw-queue-list{margin:6px 0 0 18px;padding:0;color:#57606a}
+      #${FILL_PANEL_ID} .cwtw-queue-list li{margin:2px 0}
       #${FILL_PANEL_ID} button{margin:4px 4px 0 0;padding:5px 8px;cursor:pointer}
       #${MODAL_ID}{position:fixed;inset:0;z-index:2147483646;background:rgba(0,0,0,.35);font:13px/1.4 Arial,sans-serif;color:#1f2933}
       #${MODAL_ID} .cwtw-dialog{box-sizing:border-box;width:min(760px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow:auto;margin:16px auto;background:#fff;border-radius:8px;box-shadow:0 12px 40px rgba(0,0,0,.35);padding:14px}
@@ -483,9 +496,11 @@
 
   function buildPendingFill(gap, template) {
     const minutes = gap.end - gap.start;
+    const createdAt = new Date().toISOString();
     return {
+      id: makePendingFillId({ createdAt, startText: formatMinutes(gap.start), endText: formatMinutes(gap.end), templateName: template.label || template.id || 'Workbench template' }),
       source: 'CW Timesheet Workbench',
-      createdAt: new Date().toISOString(),
+      createdAt,
       startText: formatMinutes(gap.start),
       endText: formatMinutes(gap.end),
       durationMinutes: minutes,
@@ -738,32 +753,46 @@
     return 'The Notes editor was focused. Press Ctrl+V to paste the note.';
   }
 
+  function renderTimeEntryFillQueueList(queue) {
+    const remaining = queue.slice(1, 4);
+    if (!remaining.length) return '';
+    const moreCount = Math.max(0, queue.length - 4);
+    return `<div class="cwtw-panel-note">Remaining queued gaps:</div><ol class="cwtw-queue-list" start="2">${remaining.map(item => `<li>${escapeHtml(item.startText)} - ${escapeHtml(item.endText)} (${escapeHtml(String(item.durationHours))} hrs)</li>`).join('')}${moreCount ? `<li>+ ${escapeHtml(String(moreCount))} more</li>` : ''}</ol>`;
+  }
+
   function injectTimeEntryFillPanel() {
     if (!isTimeEntryPage()) return;
     ensureStyles();
     const existing = document.getElementById(FILL_PANEL_ID);
     if (existing) existing.remove();
     const queue = getPendingFillQueue();
-    const fill = getCurrentPendingFill();
+    const fill = queue[0] || null;
     const panel = document.createElement('div');
     panel.id = FILL_PANEL_ID;
     panel.innerHTML = fill ? `
       <div class="cwtw-panel-title">CW Timesheet Workbench</div>
-      <div class="cwtw-panel-note">Pending fill 1 of ${escapeHtml(String(queue.length))}: ${escapeHtml(fill.startText)} - ${escapeHtml(fill.endText)} (${escapeHtml(String(fill.durationHours))} hrs)</div>
+      <div class="cwtw-panel-note"><strong>Queue:</strong> ${escapeHtml(String(queue.length))} pending fill${queue.length === 1 ? '' : 's'}</div>
+      <div class="cwtw-panel-note"><strong>Current:</strong> ${escapeHtml(fill.startText)} - ${escapeHtml(fill.endText)} (${escapeHtml(String(fill.durationHours))} hrs)</div>
       <div class="cwtw-panel-note">Template: ${escapeHtml(fill.templateName)}</div>
       <div class="cwtw-panel-note">Category: ${escapeHtml(fill.category || '(none)')}</div>
       <div class="cwtw-panel-note">Charge Code: ${escapeHtml(fill.chargeCode || '(none)')}</div>
-      <button id="cwtw-fill-current" type="button">Fill Times + Copy Note</button>
-      <button id="cwtw-copy-pending-note" type="button">Copy Note</button>
-      <button id="cwtw-clear-pending" type="button">Clear Pending Queue</button>
+      ${renderTimeEntryFillQueueList(queue)}
+      <button id="cwtw-fill-current" type="button">Fill Current + Copy Note</button>
+      <button id="cwtw-copy-pending-note" type="button">Copy Current Note</button>
+      <button id="cwtw-remove-current" type="button">Remove Current</button>
+      <button id="cwtw-clear-pending" type="button">Clear Queue</button>
       <button id="cwtw-focus-notes" type="button">Focus Notes</button>
-      <div id="cwtw-fill-status" class="cwtw-panel-status">Manual review required. This script will not save.</div>` : `
+      <div id="cwtw-fill-status" class="cwtw-panel-status">Manual review required. This fills visible fields only, copies the note for manual paste/review, and never saves in ConnectWise.</div>` : `
       <div class="cwtw-panel-title">CW Timesheet Workbench</div>
-      <div class="cwtw-panel-note">No pending Workbench fill</div>
-      <div class="cwtw-panel-note">Open Daily Time Entries and choose a gap.</div>`;
+      <div class="cwtw-panel-note"><strong>Queue:</strong> 0 pending fills</div>
+      <div class="cwtw-panel-note">Open Daily Time Entries and queue a gap. Visible fields are filled only after confirmation; you must manually review and save in ConnectWise.</div>`;
     document.body.appendChild(panel);
     if (!fill) return;
-    panel.querySelector('#cwtw-fill-current').addEventListener('click', () => showFillPreview(fill, 0));
+    panel.querySelector('#cwtw-fill-current').addEventListener('click', () => showFillPreview(fill, fill.id || 0));
+    panel.querySelector('#cwtw-remove-current').addEventListener('click', () => {
+      removePendingFill(fill.id || 0);
+      injectTimeEntryFillPanel();
+    });
     panel.querySelector('#cwtw-clear-pending').addEventListener('click', () => {
       clearPendingFillQueue();
       injectTimeEntryFillPanel();
@@ -778,7 +807,7 @@
     });
   }
 
-  function showFillPreview(fill, queueIndex = 0) {
+  function showFillPreview(fill, queueItemIdOrIndex = 0) {
     ensureStyles();
     const existing = document.getElementById(MODAL_ID);
     if (existing) existing.remove();
@@ -786,8 +815,8 @@
     modal.id = MODAL_ID;
     modal.innerHTML = `
       <div class="cwtw-dialog" role="dialog" aria-modal="true" aria-label="Fill Times + Copy Note Preview">
-        <h2>Fill Times + Copy Note</h2>
-        <div class="cwtw-status">Warning: This will not save the entry.</div>
+        <h2>Fill Current + Copy Note</h2>
+        <div class="cwtw-status">Warning: This fills visible fields only, copies the note for manual paste/review, and does not save in ConnectWise.</div>
         <table><tbody>
           <tr><th>Start Time</th><td>${escapeHtml(fill.startText)}</td></tr>
           <tr><th>End Time</th><td>${escapeHtml(fill.endText)}</td></tr>
@@ -800,7 +829,7 @@
         <textarea readonly>${escapeHtml(fill.noteText)}</textarea>
 
         <div id="cwtw-preview-status" class="cwtw-status" style="display:none"></div>
-        <div class="cwtw-actions"><button id="cwtw-confirm-fill" type="button">Fill Times + Copy Note</button><button id="cwtw-preview-copy-note" type="button">Copy Note</button><button id="cwtw-preview-focus-notes" type="button">Focus Notes</button><button id="cwtw-close" type="button">Cancel</button></div>
+        <div class="cwtw-actions"><button id="cwtw-confirm-fill" type="button">Fill Current + Copy Note</button><button id="cwtw-preview-copy-note" type="button">Copy Current Note</button><button id="cwtw-preview-focus-notes" type="button">Focus Notes</button><button id="cwtw-close" type="button">Cancel</button></div>
       </div>`;
     document.body.appendChild(modal);
     modal.addEventListener('click', event => { if (event.target === modal) modal.remove(); });
@@ -819,7 +848,7 @@
       status.textContent = 'Filling fields...';
       try {
         const result = await fillCurrentTimeEntry(fill);
-        removePendingFill(queueIndex);
+        removePendingFill(queueItemIdOrIndex);
         modal.remove();
         injectTimeEntryFillPanel();
         const panelStatus = document.querySelector(`#${FILL_PANEL_ID} #cwtw-fill-status`);
@@ -852,7 +881,7 @@ End Time filled.
 ${categoryLine}
 ${chargeLine}
 Notes copied to clipboard.
-Manual review and save required.
+Manual review and manual ConnectWise save required.
 Expected duration: ${fill.durationHours} hrs (${fill.durationMinutes} min).
 ConnectWise Actual Hours: ${detectedHours}.`;
   }
@@ -936,7 +965,7 @@ ConnectWise Actual Hours: ${detectedHours}.`;
     const fill = buildPendingFill(gap, getSelectedTemplate(modal));
     enqueuePendingFill(fill);
     const queueCount = getPendingFillQueue().length;
-    status.textContent = `Pending fill added to queue (${queueCount} total). Open a new Time Entry, then click Fill Times + Copy Note.`;
+    status.textContent = `Pending fill added to queue (${queueCount} total). Open a new Time Entry, then click Fill Current + Copy Note.`;
     status.classList.add('cwtw-success');
     showWorkbench();
     injectTimeEntryFillPanel();
@@ -1010,7 +1039,7 @@ ConnectWise Actual Hours: ${detectedHours}.`;
 
   function renderPendingFillSummary(queue) {
     const fill = queue[0];
-    return `<div class="cwtw-status cwtw-success"><strong>${escapeHtml(String(queue.length))} pending fill${queue.length === 1 ? '' : 's'} queued.</strong><br>Open a new Time Entry, then click Fill Times + Copy Note. The next queued fill will become available after a successful fill.<br>Next: ${escapeHtml(fill.startText)} - ${escapeHtml(fill.endText)}<br>Template: ${escapeHtml(fill.templateName)}<br>Category: ${escapeHtml(fill.category || '(none)')}<br>Charge Code: ${escapeHtml(fill.chargeCode || '(none)')}<br><button id="cwtw-clear-pending" type="button">Clear Pending Queue</button></div>`;
+    return `<div class="cwtw-status cwtw-success"><strong>${escapeHtml(String(queue.length))} pending fill${queue.length === 1 ? '' : 's'} queued.</strong><br>Open a new Time Entry, then click Fill Current + Copy Note. The next queued fill will become available after a successful fill. Visible fields only; manual review and ConnectWise save required.<br>Next: ${escapeHtml(fill.startText)} - ${escapeHtml(fill.endText)}<br>Template: ${escapeHtml(fill.templateName)}<br>Category: ${escapeHtml(fill.category || '(none)')}<br>Charge Code: ${escapeHtml(fill.chargeCode || '(none)')}<br><button id="cwtw-clear-pending" type="button">Clear Queue</button></div>`;
   }
 
 
