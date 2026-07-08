@@ -900,7 +900,6 @@ ConnectWise Actual Hours: ${detectedHours}.`;
     const boundary = getWorkdayBoundary(settings);
     const gaps = calculateGaps(merged, settings.minGapMinutes, boundary);
     const pendingQueue = getPendingFillQueue();
-    const pending = pendingQueue[0] || null;
     const existing = document.getElementById(MODAL_ID);
     if (existing) existing.remove();
 
@@ -910,7 +909,7 @@ ConnectWise Actual Hours: ${detectedHours}.`;
       <div class="cwtw-dialog" role="dialog" aria-modal="true" aria-label="Timesheet Workbench">
         <h2>Timesheet Workbench <span class="cwtw-note">manual-fill v0.2.6</span></h2>
         <div class="cwtw-status ${error ? 'cwtw-error' : ''}">${escapeHtml(error || `Total missing time: ${minutesLabel(sumMinutes(gaps))}`)}</div>
-        ${pending ? renderPendingFillSummary(pendingQueue) : ''}
+        <div id="cwtw-pending-queue">${renderPendingFillQueueSummary(pendingQueue)}</div>
         <h3>Detected gaps</h3>${renderGapCards(gaps)}
         <h3>Template</h3>
         <div class="cwtw-row"><select id="cwtw-note-template">${renderTemplateOptions(templates, selectedTemplateId)}</select><span id="cwtw-charge-code-preview" class="cwtw-note">Charge Code: ${escapeHtml((templates[selectedTemplateId] || {}).chargeCode || '(none)')}</span><button id="cwtw-copy-generated" type="button">Copy Note</button><button id="cwtw-refresh" type="button">Refresh</button><span id="cwtw-copy-status" class="cwtw-note"></span></div>
@@ -954,8 +953,28 @@ ConnectWise Actual Hours: ${detectedHours}.`;
       try { await copyText(modal.querySelector('#cwtw-generated-notes').value); status.textContent = 'Note copied.'; }
       catch (copyError) { status.textContent = `Copy failed: ${copyError.message || copyError}`; }
     });
-    modal.querySelector('#cwtw-clear-pending')?.addEventListener('click', () => { clearPendingFillQueue(); showWorkbench(); injectTimeEntryFillPanel(); });
+    wirePendingQueueButtons(modal);
     fillTemplateEditor(modal);
+  }
+
+  function refreshPendingQueueSummary(modal) {
+    const container = modal.querySelector('#cwtw-pending-queue');
+    if (!container) return;
+    container.innerHTML = renderPendingFillQueueSummary(getPendingFillQueue());
+    wirePendingQueueButtons(modal);
+  }
+
+  function wirePendingQueueButtons(modal) {
+    modal.querySelectorAll('[data-pending-index]').forEach(button => button.addEventListener('click', () => {
+      removePendingFill(Number(button.dataset.pendingIndex));
+      refreshPendingQueueSummary(modal);
+      injectTimeEntryFillPanel();
+    }));
+    modal.querySelector('#cwtw-clear-pending')?.addEventListener('click', () => {
+      clearPendingFillQueue();
+      refreshPendingQueueSummary(modal);
+      injectTimeEntryFillPanel();
+    });
   }
 
   function storePendingFillFromGap(modal, gaps, button) {
@@ -967,7 +986,7 @@ ConnectWise Actual Hours: ${detectedHours}.`;
     const queueCount = getPendingFillQueue().length;
     status.textContent = `Pending fill added to queue (${queueCount} total). Open a new Time Entry, then click Fill Current + Copy Note.`;
     status.classList.add('cwtw-success');
-    showWorkbench();
+    refreshPendingQueueSummary(modal);
     injectTimeEntryFillPanel();
   }
 
@@ -1037,9 +1056,22 @@ ConnectWise Actual Hours: ${detectedHours}.`;
     modal.querySelector('#cwtw-close').addEventListener('click', () => modal.remove());
   }
 
-  function renderPendingFillSummary(queue) {
-    const fill = queue[0];
-    return `<div class="cwtw-status cwtw-success"><strong>${escapeHtml(String(queue.length))} pending fill${queue.length === 1 ? '' : 's'} queued.</strong><br>Open a new Time Entry, then click Fill Current + Copy Note. The next queued fill will become available after a successful fill. Visible fields only; manual review and ConnectWise save required.<br>Next: ${escapeHtml(fill.startText)} - ${escapeHtml(fill.endText)}<br>Template: ${escapeHtml(fill.templateName)}<br>Category: ${escapeHtml(fill.category || '(none)')}<br>Charge Code: ${escapeHtml(fill.chargeCode || '(none)')}<br><button id="cwtw-clear-pending" type="button">Clear Queue</button></div>`;
+  function renderPendingFillQueueSummary(queue) {
+    if (!queue.length) return '';
+    const items = queue.map((fill, index) => {
+      const duration = fill.durationMinutes != null
+        ? `${escapeHtml(String(fill.durationMinutes))} min / ${escapeHtml(String(fill.durationHours || (fill.durationMinutes / 60).toFixed(2)))} hrs`
+        : escapeHtml(fill.durationHours ? `${fill.durationHours} hrs` : '(unknown)');
+      return `<li class="cwtw-pending-item">
+        <div><strong>${index === 0 ? 'Next' : `Queued #${index + 1}`}:</strong> ${escapeHtml(fill.startText)} - ${escapeHtml(fill.endText)}</div>
+        <div>Duration: ${duration}</div>
+        <div>Template: ${escapeHtml(fill.templateName || '(none)')}</div>
+        <div>Category: ${escapeHtml(fill.category || '(none)')}</div>
+        <div>Charge Code: ${escapeHtml(fill.chargeCode || '(none)')}</div>
+        <button class="cwtw-remove-pending" type="button" data-pending-index="${index}">Remove</button>
+      </li>`;
+    }).join('');
+    return `<div class="cwtw-status cwtw-success"><strong>${escapeHtml(String(queue.length))} pending fill${queue.length === 1 ? '' : 's'} queued.</strong><br>Open a new Time Entry, then click Fill Current + Copy Note. The next queued fill will become available after a successful fill. Visible fields only; manual review and ConnectWise save required.<ol class="cwtw-pending-list">${items}</ol><button id="cwtw-clear-pending" type="button">Clear Queue</button></div>`;
   }
 
 
