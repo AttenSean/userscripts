@@ -23,6 +23,8 @@
   const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
   const visible = (el) => !!el && (el.offsetParent !== null || el.getClientRects().length > 0);
   const norm = (s) => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const DEBUG = false;
+  const log = (...args) => { if (DEBUG) console.debug('[Quick Triage]', ...args); };
 
   async function until(fn, { tries = 60, delay = 60 } = {}) {
     for (let i = 0; i < tries; i++) { const v = fn(); if (v) return v; await sleep(delay); }
@@ -51,6 +53,31 @@
   let savePrompts  = { junk: true, cancel: true };
   let boardConfigs = {};
 
+  function sanitizeBoardConfigs(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+
+    const clean = {};
+    for (const [board, config] of Object.entries(value)) {
+      const boardName = String(board || '').trim();
+      if (!boardName || config == null || Array.isArray(config)) continue;
+
+      const cancelStatus = String(typeof config === 'string' ? config : config.cancelStatus || '').trim();
+      if (!cancelStatus) continue;
+
+      clean[boardName] = { cancelStatus };
+    }
+
+    return clean;
+  }
+
+  function sanitizeSavePrompts(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return { ...savePrompts };
+    return {
+      junk: typeof value.junk === 'boolean' ? value.junk : savePrompts.junk,
+      cancel: typeof value.cancel === 'boolean' ? value.cancel : savePrompts.cancel
+    };
+  }
+
   async function getPref(key, defVal) {
     try { if (window.GM?.getValue) return await window.GM.getValue(key, defVal); } catch {}
     try { const raw = localStorage.getItem(key); return raw == null ? defVal : JSON.parse(raw); } catch {}
@@ -61,12 +88,24 @@
     try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
   }
   (async () => {
-    shiftAutoSaveEnabled = await getPref(PREF_KEY_SHIFT_AUTOSAVE, false);
-    const saved = await getPref(PREF_KEY_SAVE_PROMPTS, savePrompts);
-    savePrompts = { ...savePrompts, ...(saved || {}) };
-    boardConfigs = await getPref(PREF_KEY_BOARD_CONFIGS, {});
-    if (!boardConfigs || typeof boardConfigs !== 'object') boardConfigs = {};
+    shiftAutoSaveEnabled = await getPref(PREF_KEY_SHIFT_AUTOSAVE, false) === true;
+    savePrompts = sanitizeSavePrompts(await getPref(PREF_KEY_SAVE_PROMPTS, savePrompts));
+    boardConfigs = sanitizeBoardConfigs(await getPref(PREF_KEY_BOARD_CONFIGS, {}));
   })();
+
+  // ---------- action model ----------
+  const ACTIONS = {
+    junk: {
+      label: 'Junk',
+      targetField: 'input.cw_serviceBoard',
+      value: () => 'Junk'
+    },
+    cancel: {
+      label: 'Cancel',
+      targetField: 'input.cw_status',
+      value: () => getCancelStatusForCurrentBoard()
+    }
+  };
 
   // ---------- combo helpers ----------
   function openChevronFor(input) {
@@ -94,7 +133,7 @@
       ...$$('.k-animation-container, .k-popup, .select2-container--open, [data-popup-open="true"]'),
       ...$$('.x-layer, .x-menu-floating, .x-combo-list')
     ].filter(visible));
-    openChevronFor(input); await sleep(35);
+    openChevronFor(input);
     const popup = await until(() => {
       const after = [
         ...$$('.GMDB3DUBPDJ.GMDB3DUBGFJ'),
@@ -118,8 +157,9 @@
         ||  null;
   }
   async function clickEl(el) {
-    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); el.click();
-    el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })); await sleep(22);
+    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    el.click();
+    el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
   }
   function commitBlur(input) {
     input.dispatchEvent(new Event('change', { bubbles: true }));
@@ -136,8 +176,7 @@
     if (opt) {
       await clickEl(opt);
       commitBlur(input);
-      await sleep(60);
-      return norm(input.value) === norm(desiredValue);
+      return !!(await until(() => norm(input.value) === norm(desiredValue), { tries: 6, delay: 50 }));
     }
     // Fallback: type & Enter
     input.focus();
@@ -148,19 +187,16 @@
     input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
     input.dispatchEvent(new KeyboardEvent('keyup',   { key: 'Enter', code: 'Enter', bubbles: true }));
     commitBlur(input);
-    await sleep(80);
-    if (norm(input.value) === norm(desiredValue)) return true;
+    if (await until(() => norm(input.value) === norm(desiredValue), { tries: 8, delay: 50 })) return true;
 
     // Last try: open, ArrowDown, Enter
     await openPopupAndGetContainer(input);
     input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', code: 'ArrowDown', bubbles: true }));
     input.dispatchEvent(new KeyboardEvent('keyup',   { key: 'ArrowDown', code: 'ArrowDown', bubbles: true }));
-    await sleep(45);
     input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
     input.dispatchEvent(new KeyboardEvent('keyup',   { key: 'Enter', code: 'Enter', bubbles: true }));
     commitBlur(input);
-    await sleep(80);
-    return norm(input.value) === norm(desiredValue);
+    return !!(await until(() => norm(input.value) === norm(desiredValue), { tries: 8, delay: 50 }));
   }
 
 
@@ -210,9 +246,33 @@
       cancelStatus: status
     };
 
+    boardConfigs = sanitizeBoardConfigs(boardConfigs);
     await setPref(PREF_KEY_BOARD_CONFIGS, boardConfigs);
     toast(`Learned cancel status: ${board} -> ${status}`, 2200);
     return true;
+  }
+
+  async function forgetCancelStatusForCurrentBoard() {
+    const board = getBoardName();
+    if (!board) {
+      toast('Board not found');
+      return false;
+    }
+
+    if (!boardConfigs?.[board]) {
+      toast(`No learned cancel status for ${board}`, 1800);
+      return false;
+    }
+
+    delete boardConfigs[board];
+    boardConfigs = sanitizeBoardConfigs(boardConfigs);
+    await setPref(PREF_KEY_BOARD_CONFIGS, boardConfigs);
+    toast(`Forgot cancel status for ${board}`, 1800);
+    return true;
+  }
+
+  function boardMappingsJson() {
+    return JSON.stringify(sanitizeBoardConfigs(boardConfigs), null, 2);
   }
 
   // ---------- save buttons ----------
@@ -271,85 +331,55 @@
     document.body.appendChild(overlay);
   }
 
-  // ---------- Junk action ----------
-  async function applyJunk({ showPrompt = true, autoSaveClose = false } = {}) {
-    const boardInput = await until(() => $('input.cw_serviceBoard'), { tries: 40, delay: 60 });
-    if (!boardInput) { toast('Board input not found'); return; }
-    const prevBoard = (boardInput.value || '').trim();
-    const ok = await setComboValue(boardInput, 'Junk');
-    if (!ok) { toast('Could not set Board to Junk'); return; }
+  async function applyAction(actionKey, { showPrompt = true, autoSaveClose = false } = {}) {
+    const action = ACTIONS[actionKey];
+    const input = await until(() => $(action.targetField), { tries: 40, delay: 60 });
+    if (!input) { toast(`${action.label} input not found`); return false; }
 
-    await until(() => norm(boardInput.value) === norm('Junk'), { tries: 10, delay: 45 });
-    await sleep(120);
+    const prevValue = input.value || '';
+    const desiredValue = typeof action.value === 'function' ? action.value() : action.value;
+    log('Applying action', { actionKey, targetField: action.targetField, desiredValue });
 
-    if (autoSaveClose) { if (!clickSaveAndClose()) toast('Save & Close button not found'); return; }
+    const ok = await setComboValue(input, desiredValue);
+    if (!ok) { toast(`Could not set ${actionKey === 'cancel' ? 'Status' : action.label} to ${desiredValue}`, 2200); return false; }
+
+    await until(() => norm(input.value) === norm(desiredValue), { tries: 20, delay: 100 });
+
+    if (autoSaveClose) { if (!clickSaveAndClose()) toast('Save & Close button not found'); return true; }
 
     if (showPrompt) {
-      showActionDialog('Board set to “Junk”. Save changes?', {
-        onSave:      async () => { await sleep(120); if (!clickSave()) toast('Save button not found'); },
-        onSaveClose: async () => { await sleep(120); if (!clickSaveAndClose()) toast('Save & Close button not found'); },
-        onRevert:    () => {
-          if (prevBoard) {
-            commitComboOnElement(boardInput, prevBoard).then(ret => toast(ret ? `Reverted to "${prevBoard}"` : 'Revert failed'));
-          } else {
-            boardInput.focus();
-            boardInput.value = '';
-            boardInput.dispatchEvent(new Event('change', { bubbles: true }));
-            toast('Reverted (cleared Board)');
+      showActionDialog(actionKey === 'junk' ? 'Board set to “Junk”. Save changes?' : `Set Status to "${desiredValue}". Save changes?`, {
+        onSave:      async () => { if (!clickSave()) toast('Save button not found'); },
+        onSaveClose: async () => { if (!clickSaveAndClose()) toast('Save & Close button not found'); },
+        onRevert:    async () => {
+          const currentInput = $(action.targetField);
+          if (currentInput && prevValue) {
+            const reverted = await setComboValue(currentInput, prevValue);
+            toast(reverted && actionKey === 'junk' ? `Reverted to "${prevValue}"` : 'Reverted changes');
+          } else if (currentInput) {
+            currentInput.focus();
+            currentInput.value = '';
+            currentInput.dispatchEvent(new Event('change', { bubbles: true }));
+            toast(actionKey === 'junk' ? 'Reverted (cleared Board)' : 'Reverted changes');
           }
         },
         onDismiss:   () => {}
       });
     } else {
-      toast('Junk applied');
+      toast(actionKey === 'junk' ? 'Junk applied' : `Cancel status applied: ${desiredValue}`, actionKey === 'junk' ? 1100 : 1600);
     }
+
+    return true;
+  }
+
+  // ---------- Junk action ----------
+  async function applyJunk({ showPrompt = true, autoSaveClose = false } = {}) {
+    return applyAction('junk', { showPrompt, autoSaveClose });
   }
 
   // ---------- Cancel action ----------
   async function applyClosedCancelled({ showPrompt = true, autoSaveClose = false } = {}) {
-    const statusInput = await until(() => $('input.cw_status'), { tries: 40, delay: 60 });
-    if (!statusInput) {
-      toast('Status input not found');
-      return;
-    }
-
-    const prevStatus = statusInput.value || '';
-    const desiredStatus = getCancelStatusForCurrentBoard();
-
-    const okStatus = await setComboValue(statusInput, desiredStatus);
-    if (!okStatus) {
-      toast(`Could not set Status to ${desiredStatus}`, 2200);
-      return;
-    }
-
-    await until(() => norm(statusInput.value) === norm(desiredStatus), { tries: 20, delay: 100 });
-    await sleep(120);
-
-    if (autoSaveClose) {
-      if (!clickSaveAndClose()) toast('Save & Close button not found');
-      return;
-    }
-
-    if (showPrompt) {
-      showActionDialog(`Set Status to "${desiredStatus}". Save changes?`, {
-        onSave: async () => {
-          await sleep(120);
-          if (!clickSave()) toast('Save button not found');
-        },
-        onSaveClose: async () => {
-          await sleep(120);
-          if (!clickSaveAndClose()) toast('Save & Close button not found');
-        },
-        onRevert: async () => {
-          const sIn = $('input.cw_status');
-          if (sIn && prevStatus) await setComboValue(sIn, prevStatus);
-          toast('Reverted changes');
-        },
-        onDismiss: () => {}
-      });
-    } else {
-      toast(`Cancel status applied: ${desiredStatus}`, 1600);
-    }
+    return applyAction('cancel', { showPrompt, autoSaveClose });
   }
 
   // ---------- Settings (Junk + Cancel) ----------
@@ -410,6 +440,17 @@
         mkRow('cancel', 'Show Save pop-up for Cancel')
       );
 
+      const shiftRow = document.createElement('label');
+      shiftRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin:6px 0;color:#111827;font-size:13px;';
+      const shiftCb = document.createElement('input');
+      shiftCb.type = 'checkbox';
+      shiftCb.checked = !!shiftAutoSaveEnabled;
+      shiftCb.addEventListener('change', () => { shiftAutoSaveEnabled = shiftCb.checked; });
+      const shiftText = document.createElement('span');
+      shiftText.textContent = 'Enable Shift+Click Auto Save & Close';
+      shiftRow.append(shiftCb, shiftText);
+      rows.appendChild(shiftRow);
+
       const tip = document.createElement('div');
       tip.style.cssText = 'font-size:12px;color:#4B5563;margin-top:6px;';
       tip.innerHTML = `<strong>Tip:</strong> Shift+Click any button to Apply + Save & Close (if enabled).`;
@@ -429,38 +470,82 @@
         b.addEventListener('click', onClick);
         return b;
       }
-      const saveBtn   = mkBtn('Save', async () => {
-        await setPref(PREF_KEY_SAVE_PROMPTS,  savePrompts);
-        toast('Settings saved'); overlay.remove();
-      }, true);
-      const cancelBtn = mkBtn('Cancel', () => overlay.remove());
 
-      actions.append(cancelBtn, saveBtn);
       const boardInfo = document.createElement('div');
       boardInfo.style.cssText = 'font-size:12px;color:#374151;margin-top:10px;line-height:1.5;';
       const currentBoardText = document.createElement('span');
-      currentBoardText.textContent = getBoardName() || '(not found)';
       const currentStatusText = document.createElement('span');
-      currentStatusText.textContent = getCurrentStatus() || '(not found)';
       const learnedStatusText = document.createElement('span');
-      learnedStatusText.textContent = getCancelStatusForCurrentBoard();
+
+      const mappingsTitle = document.createElement('div');
+      mappingsTitle.textContent = 'Learned board mappings';
+      mappingsTitle.style.cssText = 'font-size:12px;font-weight:700;color:#111827;margin-top:12px;';
+      const mappingsList = document.createElement('pre');
+      mappingsList.style.cssText = 'font-size:12px;color:#374151;background:#F9FAFB;border:1px solid #E5E7EB;border-radius:8px;padding:8px;max-height:120px;overflow:auto;white-space:pre-wrap;margin:6px 0 0;';
+
+      const mappingJson = document.createElement('textarea');
+      mappingJson.style.cssText = 'width:100%;min-height:90px;margin-top:8px;font:12px ui-monospace,SFMono-Regular,Consolas,monospace;border:1px solid #D1D5DB;border-radius:8px;padding:8px;box-sizing:border-box;';
+      mappingJson.placeholder = 'Export/import learned board mappings as JSON';
+
+      const refreshBoardInfo = () => {
+        currentBoardText.textContent = getBoardName() || '(not found)';
+        currentStatusText.textContent = getCurrentStatus() || '(not found)';
+        learnedStatusText.textContent = getCancelStatusForCurrentBoard();
+        const entries = Object.entries(sanitizeBoardConfigs(boardConfigs)).sort(([a], [b]) => a.localeCompare(b));
+        mappingsList.textContent = entries.length
+          ? entries.map(([board, cfg]) => `${board} -> ${cfg.cancelStatus}`).join('\n')
+          : '(no learned board mappings)';
+        mappingJson.value = boardMappingsJson();
+      };
+
       boardInfo.append(
         'Current Board: ', currentBoardText,
         document.createElement('br'),
         'Current Status: ', currentStatusText,
         document.createElement('br'),
-        'Learned Cancel Status for this board: ', learnedStatusText
+        'Learned Cancel Status: ', learnedStatusText
       );
 
       const learnRow = document.createElement('div');
-      Object.assign(learnRow.style, { display: 'flex', justifyContent: 'flex-start', marginTop: '8px' });
+      Object.assign(learnRow.style, { display: 'flex', gap: '8px', flexWrap: 'wrap', justifyContent: 'flex-start', marginTop: '8px' });
       const learnBtn = mkBtn('Learn Cancel Status For This Board', async () => {
         await learnCancelStatusForCurrentBoard();
-        learnedStatusText.textContent = getCancelStatusForCurrentBoard();
+        refreshBoardInfo();
       }, false);
-      learnRow.appendChild(learnBtn);
+      const forgetBtn = mkBtn('Forget This Board', async () => {
+        await forgetCancelStatusForCurrentBoard();
+        refreshBoardInfo();
+      }, false);
+      learnRow.append(learnBtn, forgetBtn);
 
-      card.append(h, rows, tip, boardInfo, learnRow, actions);
+      const importExportRow = document.createElement('div');
+      Object.assign(importExportRow.style, { display: 'flex', gap: '8px', flexWrap: 'wrap', justifyContent: 'flex-start', marginTop: '8px' });
+      const exportBtn = mkBtn('Export Mappings', () => { mappingJson.value = boardMappingsJson(); mappingJson.select(); }, false);
+      const importBtn = mkBtn('Import Mappings', () => {
+        try {
+          const parsed = JSON.parse(mappingJson.value || '{}');
+          boardConfigs = sanitizeBoardConfigs(parsed);
+          refreshBoardInfo();
+          toast('Mappings imported; click Save to keep them', 2200);
+        } catch (err) {
+          log('Mapping import failed', err);
+          toast('Invalid mapping JSON', 2200);
+        }
+      }, false);
+      importExportRow.append(exportBtn, importBtn);
+
+      const saveBtn = mkBtn('Save', async () => {
+        boardConfigs = sanitizeBoardConfigs(boardConfigs);
+        await setPref(PREF_KEY_SAVE_PROMPTS, savePrompts);
+        await setPref(PREF_KEY_SHIFT_AUTOSAVE, !!shiftAutoSaveEnabled);
+        await setPref(PREF_KEY_BOARD_CONFIGS, boardConfigs);
+        toast('Settings saved'); overlay.remove();
+      }, true);
+      const cancelBtn = mkBtn('Cancel', () => overlay.remove());
+
+      actions.append(cancelBtn, saveBtn);
+      refreshBoardInfo();
+      card.append(h, rows, tip, boardInfo, learnRow, mappingsTitle, mappingsList, mappingJson, importExportRow, actions);
       overlay.appendChild(card);
       document.body.appendChild(overlay);
     }
