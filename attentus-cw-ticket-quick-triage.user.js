@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         attentus-cw-ticket-quick-triage
 // @namespace    https://github.com/AttenSean/userscripts
-// @version      2.20.0
-// @description  Quick Triage — Junk + Cancel: sets Board to “Junk”, or sets Status to “>Closed/Cancelled” and Ticket Tier? to “N/A - Cancelled Ticket”. Optional Save/S&C prompt, Shift+Click turbo. SPA-safe, hides on Project tickets.
+// @version      2.21.0
+// @description  Quick Triage — provides buttons for Junk and Cancel, with board-specific learned cancel status support. Optional Save/S&C prompt, Shift+Click turbo. SPA-safe, hides on Project tickets.
 // @match        https://*.myconnectwise.net/*
 // @match        https://*.connectwise.net/*
 // @match        https://*.myconnectwise.com/*
@@ -45,8 +45,11 @@
   // ---------- persistent settings ----------
   const PREF_KEY_SHIFT_AUTOSAVE = 'att_cw_shiftAutoSave';
   const PREF_KEY_SAVE_PROMPTS   = 'att_cw_triage_savePrompts';  // { junk:true, cancel:true }
+  const PREF_KEY_BOARD_CONFIGS = 'att_cw_triage_boardConfigs';
+  const DEFAULT_CANCEL_STATUS = '>Closed/Cancelled';
   let shiftAutoSaveEnabled = false;
   let savePrompts  = { junk: true, cancel: true };
+  let boardConfigs = {};
 
   async function getPref(key, defVal) {
     try { if (window.GM?.getValue) return await window.GM.getValue(key, defVal); } catch {}
@@ -61,17 +64,28 @@
     shiftAutoSaveEnabled = await getPref(PREF_KEY_SHIFT_AUTOSAVE, false);
     const saved = await getPref(PREF_KEY_SAVE_PROMPTS, savePrompts);
     savePrompts = { ...savePrompts, ...(saved || {}) };
+    boardConfigs = await getPref(PREF_KEY_BOARD_CONFIGS, {});
+    if (!boardConfigs || typeof boardConfigs !== 'object') boardConfigs = {};
   })();
 
   // ---------- combo helpers ----------
   function openChevronFor(input) {
-    const chev = input?.closest('div')?.querySelector('.GMDB3DUBHWH, .k-select, .k-input-button, button[aria-haspopup="listbox"]');
+    const combo = input?.closest('.mm_comboBox') || input?.closest('div');
+
+    const chev =
+      combo?.querySelector('.GMDB3DUBHWH, .k-select, .k-input-button, button[aria-haspopup="listbox"]');
+
     if (visible(chev)) {
-      chev.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); chev.click();
-      chev.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })); return true;
+      chev.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      chev.click();
+      chev.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      return true;
     }
+
+    if (!input) return false;
+
     input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', code: 'ArrowDown', bubbles: true }));
-    input.dispatchEvent(new KeyboardEvent('keyup',   { key: 'ArrowDown', code: 'ArrowDown', bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keyup', { key: 'ArrowDown', code: 'ArrowDown', bubbles: true }));
     return true;
   }
   async function openPopupAndGetContainer(input) {
@@ -149,19 +163,56 @@
     return norm(input.value) === norm(desiredValue);
   }
 
-  // ---------- UDF find-by-label ----------
-  function findUdfInputByLabel(labelText) {
-    const rows = $$('.pod-element-row');
-    const needle = norm(String(labelText).replace(/[:?]\s*$/,''));
-    for (const row of rows) {
-      const labelEl = $('.mm_label, .cw_CwLabel, [id$="-label"]', row) || $('.mm_label', row);
-      const text = norm((labelEl?.textContent || '').replace(/[:?]\s*$/,''));
-      if (text && text === needle) {
-        const input = row.querySelector('input.cw_PsaUserDefinedComboBox, input.GMDB3DUBKVH');
-        if (input) return input;
-      }
+
+  async function setComboValue(input, desiredValue) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const ok = await commitComboOnElement(input, desiredValue);
+      if (ok) return true;
+
+      await until(() => norm(input?.value) === norm(desiredValue), { tries: 5, delay: 100 });
+      if (norm(input?.value) === norm(desiredValue)) return true;
+
+      await sleep(250);
     }
-    return null;
+
+    return false;
+  }
+
+  function getBoardName() {
+    return $('input.cw_serviceBoard')?.value?.trim() || '';
+  }
+
+  function getCurrentStatus() {
+    return $('input.cw_status')?.value?.trim() || '';
+  }
+
+  function getCancelStatusForCurrentBoard() {
+    const board = getBoardName();
+    return boardConfigs?.[board]?.cancelStatus || DEFAULT_CANCEL_STATUS;
+  }
+
+  async function learnCancelStatusForCurrentBoard() {
+    const board = getBoardName();
+    const status = getCurrentStatus();
+
+    if (!board) {
+      toast('Board not found');
+      return false;
+    }
+
+    if (!status) {
+      toast('Status not found');
+      return false;
+    }
+
+    boardConfigs[board] = {
+      ...(boardConfigs[board] || {}),
+      cancelStatus: status
+    };
+
+    await setPref(PREF_KEY_BOARD_CONFIGS, boardConfigs);
+    toast(`Learned cancel status: ${board} -> ${status}`, 2200);
+    return true;
   }
 
   // ---------- save buttons ----------
@@ -225,7 +276,7 @@
     const boardInput = await until(() => $('input.cw_serviceBoard'), { tries: 40, delay: 60 });
     if (!boardInput) { toast('Board input not found'); return; }
     const prevBoard = (boardInput.value || '').trim();
-    const ok = await commitComboOnElement(boardInput, 'Junk');
+    const ok = await setComboValue(boardInput, 'Junk');
     if (!ok) { toast('Could not set Board to Junk'); return; }
 
     await until(() => norm(boardInput.value) === norm('Junk'), { tries: 10, delay: 45 });
@@ -254,48 +305,50 @@
     }
   }
 
-  // ---------- Closed/Cancelled action ----------
+  // ---------- Cancel action ----------
   async function applyClosedCancelled({ showPrompt = true, autoSaveClose = false } = {}) {
-    // Capture previous to support revert
-    const prev = {
-      status: $('input.cw_status')?.value || '',
-      tier:   (function () {
-        const i = findUdfInputByLabel('Ticket Tier?');
-        return i ? i.value || '' : '';
-      })()
-    };
-
-    // Set Status
     const statusInput = await until(() => $('input.cw_status'), { tries: 40, delay: 60 });
-    if (!statusInput) { toast('Status input not found'); return; }
-    const okStatus = await commitComboOnElement(statusInput, '>Closed/Cancelled');
-    if (!okStatus) { toast('Could not set Status'); return; }
+    if (!statusInput) {
+      toast('Status input not found');
+      return;
+    }
 
-    // Set UDF: Ticket Tier?
-    const tierInput = await until(() => findUdfInputByLabel('Ticket Tier?'), { tries: 40, delay: 60 });
-    if (!tierInput) { toast('“Ticket Tier?” field not found'); return; }
-    const okTier = await commitComboOnElement(tierInput, 'N/A - Cancelled Ticket');
-    if (!okTier) { toast('Could not set “Ticket Tier?”'); return; }
+    const prevStatus = statusInput.value || '';
+    const desiredStatus = getCancelStatusForCurrentBoard();
 
+    const okStatus = await setComboValue(statusInput, desiredStatus);
+    if (!okStatus) {
+      toast(`Could not set Status to ${desiredStatus}`, 2200);
+      return;
+    }
+
+    await until(() => norm(statusInput.value) === norm(desiredStatus), { tries: 20, delay: 100 });
     await sleep(120);
 
-    if (autoSaveClose) { if (!clickSaveAndClose()) toast('Save & Close button not found'); return; }
+    if (autoSaveClose) {
+      if (!clickSaveAndClose()) toast('Save & Close button not found');
+      return;
+    }
 
     if (showPrompt) {
-      showActionDialog('Set Status to “>Closed/Cancelled” and apply “N/A - Cancelled Ticket”. Save changes?', {
-        onSave:      async () => { await sleep(120); if (!clickSave()) toast('Save button not found'); },
-        onSaveClose: async () => { await sleep(120); if (!clickSaveAndClose()) toast('Save & Close button not found'); },
-        onRevert:    async () => {
+      showActionDialog(`Set Status to "${desiredStatus}". Save changes?`, {
+        onSave: async () => {
+          await sleep(120);
+          if (!clickSave()) toast('Save button not found');
+        },
+        onSaveClose: async () => {
+          await sleep(120);
+          if (!clickSaveAndClose()) toast('Save & Close button not found');
+        },
+        onRevert: async () => {
           const sIn = $('input.cw_status');
-          if (sIn && prev.status) await commitComboOnElement(sIn, prev.status);
-          const tIn = findUdfInputByLabel('Ticket Tier?');
-          if (tIn) await commitComboOnElement(tIn, prev.tier || '');
+          if (sIn && prevStatus) await setComboValue(sIn, prevStatus);
           toast('Reverted changes');
         },
-        onDismiss:   () => {}
+        onDismiss: () => {}
       });
     } else {
-      toast('Closed/Cancelled applied');
+      toast(`Cancel status applied: ${desiredStatus}`, 1600);
     }
   }
 
@@ -354,7 +407,7 @@
       const rows = document.createElement('div');
       rows.append(
         mkRow('junk',   'Show Save pop-up for Junk'),
-        mkRow('cancel', 'Show Save pop-up for Closed/Cancelled')
+        mkRow('cancel', 'Show Save pop-up for Cancel')
       );
 
       const tip = document.createElement('div');
@@ -383,7 +436,31 @@
       const cancelBtn = mkBtn('Cancel', () => overlay.remove());
 
       actions.append(cancelBtn, saveBtn);
-      card.append(h, rows, tip, actions);
+      const boardInfo = document.createElement('div');
+      boardInfo.style.cssText = 'font-size:12px;color:#374151;margin-top:10px;line-height:1.5;';
+      const currentBoardText = document.createElement('span');
+      currentBoardText.textContent = getBoardName() || '(not found)';
+      const currentStatusText = document.createElement('span');
+      currentStatusText.textContent = getCurrentStatus() || '(not found)';
+      const learnedStatusText = document.createElement('span');
+      learnedStatusText.textContent = getCancelStatusForCurrentBoard();
+      boardInfo.append(
+        'Current Board: ', currentBoardText,
+        document.createElement('br'),
+        'Current Status: ', currentStatusText,
+        document.createElement('br'),
+        'Learned Cancel Status for this board: ', learnedStatusText
+      );
+
+      const learnRow = document.createElement('div');
+      Object.assign(learnRow.style, { display: 'flex', justifyContent: 'flex-start', marginTop: '8px' });
+      const learnBtn = mkBtn('Learn Cancel Status For This Board', async () => {
+        await learnCancelStatusForCurrentBoard();
+        learnedStatusText.textContent = getCancelStatusForCurrentBoard();
+      }, false);
+      learnRow.appendChild(learnBtn);
+
+      card.append(h, rows, tip, boardInfo, learnRow, actions);
       overlay.appendChild(card);
       document.body.appendChild(overlay);
     }
@@ -437,7 +514,7 @@
     ({ useAuto }) => applyJunk({ showPrompt: !useAuto && !!savePrompts.junk, autoSaveClose: useAuto })
   );
   const makeCancelButton = () => mkActionButton(
-    'att-cw-cancel-btn', 'Closed/Cancelled', 'Set Status to >Closed/Cancelled and Ticket Tier? to N/A - Cancelled Ticket (Shift-click = apply + Save & Close)',
+    'att-cw-cancel-btn', 'Cancel', 'Set Status to the learned cancel status for this board. Shift-click = apply + Save & Close',
     ({ useAuto }) => applyClosedCancelled({ showPrompt: !useAuto && !!savePrompts.cancel, autoSaveClose: useAuto })
   );
 
@@ -452,7 +529,7 @@
     const slot = document.createElement('div');
     slot.id = 'att-cw-triage-slot';
     Object.assign(slot.style, { display: 'inline-flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' });
-    // Buttons: Junk • Closed/Cancelled • ⚙︎
+    // Buttons: Junk • Cancel • ⚙︎
     slot.appendChild(makeJunkButton());
     slot.appendChild(makeCancelButton());
     slot.appendChild(makeSettingsButton());
